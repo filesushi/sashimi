@@ -1,15 +1,27 @@
-from typing import Any, Dict, List, Optional, Tuple, Literal
-from pydantic import BaseModel, Field
+from typing import Any, Dict, List, Optional, Tuple, Literal, Union
+from pydantic import BaseModel, Field, field_validator
 
 
 class BaseThumbsConfig(BaseModel):
     """Shared configuration mechanics for all contact sheet generation."""
 
     # Grid & Layout Options
-    output_width: int = Field(default=2560, ge=1, description="Total width of the final image")
     gap: int = Field(default=5, ge=0, description="Pixel gap between thumbnails")
-    cols: Optional[int] = Field(default=None, ge=1, description="Explicit column count override")
-    rows: Optional[int] = Field(default=None, ge=1, description="Explicit row count override")
+
+    cols: Union[int, Literal["auto"]] = Field(default="auto", description="Explicit column count override or 'auto'")
+    rows: Union[int, Literal["auto"]] = Field(default="auto", description="Explicit row count override or 'auto'")
+
+    @field_validator("cols", "rows", mode="before")
+    @classmethod
+    def _parse_grid_dimension(cls, v: Any) -> Union[int, Literal["auto"]]:
+        """Accepts a positive integer (or numeric string), or 'auto' in any case. None means 'auto'."""
+        if v is None or (isinstance(v, str) and v.strip().lower() == "auto"):
+            return "auto"
+        if isinstance(v, str) and v.strip().isdigit():
+            v = int(v.strip())
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 1:
+            return v
+        raise ValueError(f"must be a positive integer or 'auto', got {v!r}")
 
     # Temporal Options
     start_offset_percent: float = Field(default=7.0, ge=0.0, le=100.0, description="Skip first N% of video")
@@ -80,14 +92,15 @@ class BaseThumbsConfig(BaseModel):
 class StaticThumbsConfig(BaseThumbsConfig):
     """Configuration strictly for static JPEG contact sheets."""
 
+    static_width: int = Field(default=2560, ge=1, description="Width for static JPEG sheets")
     jpeg_quality: int = Field(default=85, ge=1, le=100)
 
 
 class AnimatedThumbsConfig(BaseThumbsConfig):
     """Configuration strictly for animated WebP/GIF contact sheets."""
 
+    animated_width: int = Field(default=1280, ge=1, description="Width for animated sheets")
     output_format: Literal["webp", "gif"] = Field(default="webp")
-    output_width: int = Field(default=1280, ge=1)  # Overriding the default for smaller file sizes
     sample_duration: float = Field(default=2.0, gt=0.0)
     output_fps: int = Field(default=12, gt=0)
     loop: bool = Field(default=True)

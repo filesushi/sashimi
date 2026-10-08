@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sashimi"
-version = "0.1.0"
+version = "0.2.0"
 description = "An API-first, structured toolkit for file processing."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -78,6 +78,3 @@ dev = [
     "pytest-mock>=3.14.0",
     "ruff>=0.8.4",
 ]
-
-[project.scripts]
-sashimi = "sashimi.cli.main:main"

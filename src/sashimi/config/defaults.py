@@ -8,13 +8,16 @@ verbose = 0
 priority = "normal"
 
 [thumbs]
-output_width = 1280
-cols = 3
-rows = 3
+static_width = 2560
+animated_width = 1280
+cols = "auto"
+rows = "auto"
+gap = 5
+jpeg_quality = 85
+output_format = "webp"
 sample_duration = 2.0
-start_offset = "5%"
-end_offset = "5%"
+start_offset_percent = 7.0
+end_offset_percent = 7.0
 output_fps = 12
-quality = 80
 loop = true
 """

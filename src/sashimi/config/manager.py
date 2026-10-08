@@ -11,7 +11,7 @@ from .defaults import _DEFAULT_CONFIG_STRING
 
 logger = logging.getLogger("sashimi")
 
-# Hardcoded for portability; in a real app, these move to src/sashimi/common/constants.py
+
 GLOBAL_CONFIG_DIR = pathlib.Path.home() / ".sashimi"
 GLOBAL_CONFIG_FILENAME = "sashimi.toml"
 PROJECT_CONFIG_FILENAMES = ["sashimi.toml", ".sashimi.toml"]

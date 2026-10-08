@@ -1,21 +1,21 @@
-import time
 import pathlib
-from typing import Iterator, List, Union, Dict, Any, Optional, Tuple, Literal
+from typing import Iterator, List, Union, Dict, Any, Optional, Tuple, Literal, Sequence
 
 from sashimi.config import resolve_config
 from sashimi.file.animated_thumbs import generate_animated_thumbs as _generate_animated_thumbs
 from sashimi.file.animated_thumbs import YieldType
+from sashimi.api._consume import consume_generator
 
 
 def make_animated_thumbs_generator(
-    paths: Union[str, pathlib.Path, List[Union[str, pathlib.Path]]],
+    paths: Union[str, pathlib.Path, Sequence[Union[str, pathlib.Path]]],
     recursive: bool = False,
     force: bool = False,
     output_format: Optional[Literal["webp", "gif"]] = None,
-    output_width: Optional[int] = None,
+    animated_width: Optional[int] = None,
     gap: Optional[int] = None,
-    cols: Optional[int] = None,
-    rows: Optional[int] = None,
+    cols: Optional[Union[int, str]] = None,
+    rows: Optional[Union[int, str]] = None,
     sample_duration: Optional[float] = None,
     output_fps: Optional[int] = None,
     loop: Optional[bool] = None,
@@ -38,15 +38,15 @@ def make_animated_thumbs_generator(
     Generate animated contact sheets (WebP/GIF) as a generator.
     Yields the total file count first, followed by status tuples.
     """
-    if not isinstance(paths, list):
+    if isinstance(paths, (str, pathlib.Path)):
         paths = [paths]
     resolved_paths = [pathlib.Path(p).resolve() for p in paths]
 
     overrides: Dict[str, Any] = {}
     if output_format is not None:
         overrides["output_format"] = output_format
-    if output_width is not None:
-        overrides["output_width"] = output_width
+    if animated_width is not None:
+        overrides["animated_width"] = animated_width
     if gap is not None:
         overrides["gap"] = gap
     if cols is not None:
@@ -97,15 +97,15 @@ def make_animated_thumbs_generator(
 
 
 def make_animated_thumbs(
-    paths: Union[str, pathlib.Path, List[Union[str, pathlib.Path]]],
+    paths: Union[str, pathlib.Path, Sequence[Union[str, pathlib.Path]]],
     recursive: bool = False,
     force: bool = False,
-    show_progress: bool = True,  # <-- NEW
+    show_progress: bool = True,
     output_format: Optional[Literal["webp", "gif"]] = None,
-    output_width: Optional[int] = None,
+    animated_width: Optional[int] = None,
     gap: Optional[int] = None,
-    cols: Optional[int] = None,
-    rows: Optional[int] = None,
+    cols: Optional[Union[int, str]] = None,
+    rows: Optional[Union[int, str]] = None,
     sample_duration: Optional[float] = None,
     output_fps: Optional[int] = None,
     loop: Optional[bool] = None,
@@ -123,19 +123,17 @@ def make_animated_thumbs(
     timestamp_text_color: Optional[Tuple[int, int, int]] = None,
     video_extensions: Optional[List[str]] = None,
     mediainfo_template: Optional[Dict[str, Dict[str, Any]]] = None,
-) -> Dict[str, Any]:  # <-- NEW return signature
+) -> Dict[str, Any]:
     """
     Synchronously generate animated contact sheets and return a summary payload.
     Perfect for Jupyter notebooks and scripts.
     """
-    start_time = time.perf_counter()
-
     gen = make_animated_thumbs_generator(
         paths=paths,
         recursive=recursive,
         force=force,
         output_format=output_format,
-        output_width=output_width,
+        animated_width=animated_width,
         gap=gap,
         cols=cols,
         rows=rows,
@@ -157,60 +155,5 @@ def make_animated_thumbs(
         video_extensions=video_extensions,
         mediainfo_template=mediainfo_template,
     )
-    
-    try:
-        total_files = next(gen)
-    except StopIteration:
-        total_files = 0
-        
-    results = []
-    counts = {"success": 0, "error": 0, "exists": 0, "skipped": 0}
-    
-    pbar = None
-    if show_progress and total_files > 0:
-        try:
-            from tqdm.auto import tqdm
-            pbar = tqdm(total=total_files, desc="Generating Animated Thumbs")
-        except ImportError:
-            pass  # Fail gracefully if tqdm isn't installed in the environment
 
-    try:
-        for item in gen:
-            if isinstance(item, tuple) and len(item) == 3:
-                file_path, status, message = item
-                
-                if status == "starting":
-                    if pbar:
-                        # Update the progress bar text without advancing the counter
-                        pbar.set_postfix_str(f"Processing: {file_path.name[:25]}")
-                    continue
-                
-                # It's a final state (success, error, exists, skipped)
-                counts[status] = counts.get(status, 0) + 1
-                results.append({
-                    "file": str(file_path),
-                    "status": status,
-                    "message": message
-                })
-                
-                # Only advance the bar if it was an actively processed file
-                if pbar and status not in ("skipped", "exists"):
-                    pbar.update(1)
-    finally:
-        if pbar:
-            pbar.close()
-            
-    time_taken = time.perf_counter() - start_time
-    
-    return {
-        "summary": {
-            "total_found": total_files,
-            "success": counts["success"],
-            "exists": counts["exists"],
-            "skipped": counts["skipped"],
-            "errors": counts["error"],
-            "time_taken_seconds": round(time_taken, 2),
-            "avg_time_seconds": round(time_taken / counts["success"], 2) if counts["success"] > 0 else 0.0
-        },
-        "results": results
-    }
+    return consume_generator(gen, show_progress, "Generating Animated Thumbs")

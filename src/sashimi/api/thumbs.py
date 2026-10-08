@@ -1,19 +1,20 @@
 import pathlib
-from typing import Iterator, List, Union, Dict, Any, Optional, Tuple
+from typing import Iterator, List, Union, Dict, Any, Optional, Tuple, Sequence
 
 from sashimi.config import resolve_config
 from sashimi.file.thumbs import generate_contact_sheets as _generate_contact_sheets
 from sashimi.file.thumbs import YieldType
+from sashimi.api._consume import consume_generator
 
 
 def make_thumbs_generator(
-    paths: Union[str, pathlib.Path, List[Union[str, pathlib.Path]]],
+    paths: Union[str, pathlib.Path, Sequence[Union[str, pathlib.Path]]],
     recursive: bool = False,
     force: bool = False,
-    output_width: Optional[int] = None,
+    static_width: Optional[int] = None,
     gap: Optional[int] = None,
-    cols: Optional[int] = None,
-    rows: Optional[int] = None,
+    cols: Optional[Union[int, str]] = None,
+    rows: Optional[Union[int, str]] = None,
     start_offset_percent: Optional[float] = None,
     end_offset_percent: Optional[float] = None,
     jpeg_quality: Optional[int] = None,
@@ -34,14 +35,14 @@ def make_thumbs_generator(
     Generate contact sheets for video files as a generator.
     Yields the total file count first, followed by status tuples.
     """
-    if not isinstance(paths, list):
+    if isinstance(paths, (str, pathlib.Path)):
         paths = [paths]
     resolved_paths = [pathlib.Path(p).resolve() for p in paths]
 
     # Explicitly map provided arguments to overrides, dropping None values
     overrides: Dict[str, Any] = {}
-    if output_width is not None:
-        overrides["output_width"] = output_width
+    if static_width is not None:
+        overrides["static_width"] = static_width
     if gap is not None:
         overrides["gap"] = gap
     if cols is not None:
@@ -79,19 +80,20 @@ def make_thumbs_generator(
     if mediainfo_template is not None:
         overrides["mediainfo_template"] = mediainfo_template
 
-    config = resolve_config(cli_overrides=overrides)
+    config = resolve_config(cli_overrides={"thumbs": overrides})
 
     return _generate_contact_sheets(paths=resolved_paths, config=config.thumbs, recursive=recursive, force=force)
 
 
 def make_thumbs(
-    paths: Union[str, pathlib.Path, List[Union[str, pathlib.Path]]],
+    paths: Union[str, pathlib.Path, Sequence[Union[str, pathlib.Path]]],
     recursive: bool = False,
     force: bool = False,
-    output_width: Optional[int] = None,
+    show_progress: bool = True,
+    static_width: Optional[int] = None,
     gap: Optional[int] = None,
-    cols: Optional[int] = None,
-    rows: Optional[int] = None,
+    cols: Optional[Union[int, str]] = None,
+    rows: Optional[Union[int, str]] = None,
     start_offset_percent: Optional[float] = None,
     end_offset_percent: Optional[float] = None,
     jpeg_quality: Optional[int] = None,
@@ -107,19 +109,16 @@ def make_thumbs(
     timestamp_text_color: Optional[Tuple[int, int, int]] = None,
     video_extensions: Optional[List[str]] = None,
     mediainfo_template: Optional[Dict[str, Dict[str, Any]]] = None,
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
     """
-    Synchronously generate contact sheets and return a summary list.
+    Synchronously generate contact sheets and return a summary payload.
     Perfect for Jupyter notebooks and scripts.
-
-    Returns:
-        A list of dictionaries containing 'file', 'status', and 'message'.
     """
     gen = make_thumbs_generator(
         paths=paths,
         recursive=recursive,
         force=force,
-        output_width=output_width,
+        static_width=static_width,
         gap=gap,
         cols=cols,
         rows=rows,
@@ -140,16 +139,4 @@ def make_thumbs(
         mediainfo_template=mediainfo_template,
     )
 
-    try:
-        next(gen)
-    except StopIteration:
-        return []
-
-    results = []
-    for item in gen:
-        if isinstance(item, tuple) and len(item) == 3:
-            file_path, status, message = item
-            if status != "starting":
-                results.append({"file": str(file_path), "status": status, "message": message})
-
-    return results
+    return consume_generator(gen, show_progress, "Generating Static Thumbs")

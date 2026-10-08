@@ -92,7 +92,7 @@ def test_generate_contact_sheets_orchestration(mock_is_file, mock_is_dir, mock_e
         assert result_yield[1] == "success"
 
 
-@patch("sashimi.file.thumbs.MediaInfo.parse")
+@patch("sashimi.file._sheet.MediaInfo.parse")
 def test_contact_sheet_generator_metadata(mock_parse, base_config):
 
     dummy_track = DummyTrack(track_type="Video", duration="60000.0", width=1920, height=1080)
@@ -112,7 +112,7 @@ def test_contact_sheet_generator_metadata(mock_parse, base_config):
     assert generator.num_samples == 30
 
 
-@patch("sashimi.file.thumbs.MediaInfo.parse")
+@patch("sashimi.file._sheet.MediaInfo.parse")
 def test_calculate_timestamps(mock_parse, base_config):
 
     dummy_track = DummyTrack(track_type="Video", duration="100000.0", width=1920, height=1080)
@@ -138,17 +138,18 @@ def test_extract_single_frame_task(mock_run, fs):
 
     expected_out = temp_dir / "frame_1.000.jpg"
     fs.create_file(str(expected_out), contents="dummy_image_data")
-    assert _extract_single_frame_task(1.0, temp_dir, pathlib.Path("test.mp4"), 200) == (expected_out, 1.0)
+    assert _extract_single_frame_task(1.0, temp_dir, pathlib.Path("test.mp4"), 200, 112) == (expected_out, 1.0)
 
     fs.create_file(str(temp_dir / "frame_2.000.jpg"), contents="")
-    assert _extract_single_frame_task(2.0, temp_dir, pathlib.Path("test.mp4"), 200) is None
+    assert _extract_single_frame_task(2.0, temp_dir, pathlib.Path("test.mp4"), 200, 112) is None
 
     mock_run.side_effect = Exception("FFmpeg crash")
-    assert _extract_single_frame_task(3.0, temp_dir, pathlib.Path("test.mp4"), 200) is None
+    assert _extract_single_frame_task(3.0, temp_dir, pathlib.Path("test.mp4"), 200, 112) is None
 
 
+@patch("sashimi.file.thumbs.ContactSheetGenerator.__init__", return_value=None)
 @patch("sashimi.file.thumbs.ContactSheetGenerator.generate")
-def test_process_file_branches(mock_gen, base_config, fs):
+def test_process_file_branches(mock_gen, mock_init, base_config, fs):
     p = pathlib.Path("/test.mp4")
 
     fs.create_file("/test.mp4.jpeg")
@@ -175,7 +176,7 @@ def test_process_file_branches(mock_gen, base_config, fs):
 
 @patch("sashimi.file.thumbs.ContactSheetGenerator._calculate_timestamps")
 @patch("sashimi.file.thumbs._extract_single_frame_task")
-@patch("sashimi.file.thumbs.MediaInfo.parse")
+@patch("sashimi.file._sheet.MediaInfo.parse")
 def test_generator_generate(mock_parse, mock_extract, mock_timestamps, base_config, tmp_path):
     class DummyTrack:
         track_type = "Video"
