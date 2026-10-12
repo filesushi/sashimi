@@ -2,7 +2,7 @@ import pathlib
 import time
 from typing import Any, Dict, Iterator, Set
 
-from sashimi.file._sheet import YieldType
+from sashimi.api._batch import YieldType
 
 
 def consume_generator(gen: Iterator[YieldType], show_progress: bool, desc: str) -> Dict[str, Any]:
@@ -15,8 +15,6 @@ def consume_generator(gen: Iterator[YieldType], show_progress: bool, desc: str) 
 
     results = []
     counts = {"success": 0, "error": 0, "exists": 0, "skipped": 0}
-    # Only files the generator announced with "starting" count towards the total;
-    # rejected inputs (missing paths, non-video files) are reported but don't advance the bar.
     started: Set[pathlib.Path] = set()
 
     pbar = None

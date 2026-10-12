@@ -37,7 +37,7 @@ def test_rejected_inputs_are_reported_but_do_not_advance_progress(monkeypatch):
 
     payload = consume_generator(gen(), show_progress=True, desc="test")
 
-    assert sum(updates) == 2  # both started files, including exists/skipped; not the rejected inputs
+    assert sum(updates) == 2
     assert payload["summary"]["errors"] == 1
     assert payload["summary"]["skipped"] == 2
     assert len(payload["results"]) == 4

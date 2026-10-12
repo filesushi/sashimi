@@ -5,7 +5,7 @@ import pytest
 from typer.testing import CliRunner
 
 from sashimi.cli.main import app
-from sashimi.config import manager
+from sashimi.cli import settings as manager
 
 runner = CliRunner()
 
@@ -33,7 +33,7 @@ def test_missing_path_is_reported_in_table(tmp_path):
     result = runner.invoke(app, ["thumbs", "typo.mp4"])
 
     assert result.exit_code == 1
-    assert "No valid files found" in result.stdout
+    assert "No matching files found" in result.stdout
     assert "Path does not exist" in result.stdout
 
 
@@ -44,9 +44,7 @@ def test_non_video_file_is_reported(tmp_path):
 
     payload = json.loads(result.stdout)
     assert result.exit_code == 0
-    assert payload["results"] == [
-        {"file": str(tmp_path.resolve() / "notes.txt"), "status": "skipped", "message": "Not a video file"}
-    ]
+    assert payload["results"] == [{"file": "notes.txt", "status": "skipped", "message": "Unsupported file type"}]
 
 
 @pytest.mark.parametrize(
@@ -67,14 +65,20 @@ def test_auto_grid_is_case_insensitive(tmp_path):
     assert result.exit_code == 0
 
 
+def test_static_only_warns_about_animated_options(tmp_path):
+    result = runner.invoke(app, ["thumbs", ".", "--fps", "10", "--no-loop", "--json"])
+
+    assert "--fps, --no-loop only apply to animated (-a) sheets" in " ".join(result.stderr.split())
+
+
 @pytest.mark.parametrize(
-    "args, expected",
+    "args, message",
     [
-        (["--fps", "10", "--no-loop"], "--fps, --no-loop only apply to animated (-a) mode"),
-        (["-a", "--quality", "50"], "--quality only applies to static mode"),
+        (["-a", "-o", "jpeg"], "Animated contact sheets can be WebP or GIF."),
+        (["-o", "gif"], "GIF sheets must be animated."),
     ],
 )
-def test_mode_specific_options_warn_when_ignored(tmp_path, args, expected):
-    result = runner.invoke(app, ["thumbs", ".", *args, "--json"])
+def test_format_must_suit_the_mode(tmp_path, args, message):
+    result = runner.invoke(app, ["thumbs", ".", *args])
 
-    assert expected in " ".join(result.stderr.split())
+    assert result.exit_code == 2 and message in " ".join(result.stderr.split())

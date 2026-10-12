@@ -3,15 +3,16 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "sashimi"
-version = "0.2.0"
-description = "An API-first, structured toolkit for file processing."
+name = "sashimi-convert"
+dynamic = ["version"]
+description = "File conversion and video contact sheets for apps and servers: explicit paths, atomic writes, typed errors, no network."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [
     { name = "Rio Achuzia", email = "rio@dorsalhub.com" }
 ]
+keywords = ["ffmpeg", "video", "image", "audio", "conversion", "contact-sheet", "thumbnails"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3",
@@ -21,26 +22,34 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Video :: Conversion",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+    "Typing :: Typed",
 ]
 
 dependencies = [
-    "moviepy>=2.0.0",
+    "pydantic>=2.0",
+    "pillow>=10.1",
+]
+
+[project.optional-dependencies]
+cli = [
     "typer>=0.16.0",
     "rich>=14.0.0",
-    "pymediainfo>=6.1.0",
-    "ffmpeg-python>=0.2.0",
-    "pillow",
-    "pilmoji",
-    "pydantic>=2.0.0",
-    "tomlkit",# Added for your multi-tier config engine
+    "tomlkit",
 ]
+emoji = ["pilmoji"]
+heif = ["pillow-heif>=0.18"]
 
 [project.urls]
 "Homepage" = "https://github.com/dorsalhub/sashimi"
 "Repository" = "https://github.com/dorsalhub/sashimi"
 
 [project.scripts]
-sashimi = "sashimi.cli.main:app"
+sashimi = "sashimi.cli:main"
+
+[tool.hatch.version]
+path = "src/sashimi/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sashimi"]
@@ -70,11 +79,15 @@ warn_unreachable = true
 
 [dependency-groups]
 dev = [
-    "black>=24.10.0",
     "mypy>=1.15.0",
     "pyfakefs>=5.9.2",
     "pytest>=8.3.4",
     "pytest-cov>=6.0.0",
     "pytest-mock>=3.14.0",
     "ruff>=0.8.4",
+    "typer>=0.16.0",
+    "rich>=14.0.0",
+    "tomlkit",
+    "pilmoji",
+    "pillow-heif>=0.18",
 ]

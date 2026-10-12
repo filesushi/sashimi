@@ -1,0 +1,170 @@
+"""Content-based media probing with ffprobe."""
+
+import json
+import os
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict
+
+from sashimi.core._ffmpeg import (
+    AUDIO_CONTAINERS,
+    INPUT_PROTOCOLS,
+    VIDEO_CONTAINERS,
+    ffprobe_binary,
+    file_arg,
+    run_ffmpeg,
+)
+from sashimi.errors import ProcessingError, UnsupportedMediaError
+
+__all__ = ["MediaInfo", "StreamInfo", "probe", "VIDEO_CONTAINERS", "AUDIO_CONTAINERS"]
+
+
+class StreamInfo(BaseModel):
+    """One stream of a file, in stream order."""
+
+    model_config = ConfigDict(frozen=True)
+
+    type: str
+    """ffprobe's codec type: ``video``, ``audio``, ``subtitle``, ``data`` or ``attachment``."""
+    codec: str
+    """ffprobe's codec name, e.g. ``h264``; ``unknown`` when ffprobe has none (e.g. a timecode track)."""
+
+
+class MediaInfo(BaseModel):
+    """What ffprobe found in a file. Dimensions are in display orientation (rotation applied)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    container: str
+    """ffprobe's demuxer name list, e.g. ``"matroska,webm"`` or ``"mov,mp4,m4a,3gp,3g2,mj2"``."""
+    duration: float | None = None
+    """Seconds, or None when the container doesn't say (e.g. a still image)."""
+    size_bytes: int | None = None
+    bit_rate: int | None = None
+    has_video: bool = False
+    """True if there is a real video stream; embedded cover art doesn't count."""
+    has_audio: bool = False
+    width: int | None = None
+    height: int | None = None
+    rotation: int = 0
+    """Display rotation in degrees (0, 90, 180 or 270) that players apply."""
+    display_aspect_ratio: float | None = None
+    fps: float | None = None
+    video_codec: str | None = None
+    audio_codec: str | None = None
+    codecs: list[str] = []
+    """Codec names of every stream, in stream order."""
+    streams: list[StreamInfo] = []
+    """Every stream's type and codec, in stream order."""
+
+    @property
+    def container_names(self) -> frozenset[str]:
+        return frozenset(self.container.split(","))
+
+
+def _ratio(text: Any) -> float | None:
+    if not isinstance(text, str) or ":" not in text and "/" not in text:
+        return None
+    num, _, den = text.replace(":", "/").partition("/")
+    try:
+        n, d = float(num), float(den)
+    except ValueError:
+        return None
+    return n / d if n > 0 and d > 0 else None
+
+
+def _float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result == result and result >= 0 else None
+
+
+def _rotation(stream: dict[str, Any]) -> int:
+    degrees: float | None = None
+    for side_data in stream.get("side_data_list", []):
+        if "rotation" in side_data:
+            degrees = _float(abs(float(side_data["rotation"])))
+            break
+    if degrees is None:
+        degrees = _float(stream.get("tags", {}).get("rotate"))
+    if degrees is None:
+        return 0
+    return int(round(degrees / 90.0)) * 90 % 360
+
+
+def parse_ffprobe_json(data: dict[str, Any]) -> MediaInfo:
+    """Builds a MediaInfo from ``ffprobe -show_format -show_streams -of json`` output. Pure function."""
+    fmt = data.get("format", {})
+    streams = data.get("streams", [])
+    videos = [s for s in streams if s.get("codec_type") == "video" and not s.get("disposition", {}).get("attached_pic")]
+    audios = [s for s in streams if s.get("codec_type") == "audio"]
+
+    duration = _float(fmt.get("duration"))
+    if duration is None:
+        durations = [d for d in (_float(s.get("duration")) for s in streams) if d]
+        duration = max(durations) if durations else None
+
+    info: dict[str, Any] = {
+        "container": fmt.get("format_name", ""),
+        "duration": duration,
+        "size_bytes": int(fmt["size"]) if str(fmt.get("size", "")).isdigit() else None,
+        "bit_rate": int(fmt["bit_rate"]) if str(fmt.get("bit_rate", "")).isdigit() else None,
+        "has_video": bool(videos),
+        "has_audio": bool(audios),
+        "codecs": [s.get("codec_name", "unknown") for s in streams],
+        "streams": [
+            StreamInfo(type=s.get("codec_type", "unknown"), codec=s.get("codec_name", "unknown")) for s in streams
+        ],
+        "audio_codec": audios[0].get("codec_name") if audios else None,
+    }
+
+    if videos:
+        video = videos[0]
+        width, height = int(video.get("width") or 0), int(video.get("height") or 0)
+        sar = _ratio(video.get("sample_aspect_ratio")) or 1.0
+        dar = width * sar / height if width and height else _ratio(video.get("display_aspect_ratio"))
+        rotation = _rotation(video)
+        if rotation in (90, 270):
+            width, height = height, width
+            dar = 1.0 / dar if dar else None
+        info.update(
+            width=width or None,
+            height=height or None,
+            rotation=rotation,
+            display_aspect_ratio=round(dar, 6) if dar else None,
+            fps=_ratio(video.get("avg_frame_rate")) or _ratio(video.get("r_frame_rate")),
+            video_codec=video.get("codec_name"),
+        )
+    return MediaInfo(**info)
+
+
+def probe(input_path: str | os.PathLike[str]) -> MediaInfo:
+    """
+    Inspects a file's content with ffprobe. The file name and extension are ignored.
+
+    Raises UnsupportedMediaError if ffprobe can't read the file as media.
+    """
+    cmd = [
+        ffprobe_binary(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        *INPUT_PROTOCOLS,
+        "-show_format",
+        "-show_streams",
+        "-of",
+        "json",
+        file_arg(input_path),
+    ]
+    try:
+        output = run_ffmpeg(cmd, capture_stdout=True)
+        data = json.loads(output or b"{}")
+    except ProcessingError as e:
+        raise UnsupportedMediaError("This file doesn't look like media we can read.", detail=str(e)) from e
+    except ValueError as e:
+        raise ProcessingError(f"ffprobe returned invalid JSON for {os.fspath(input_path)}: {e}") from e
+    if not data.get("format"):
+        raise UnsupportedMediaError("This file doesn't look like media we can read.")
+    return parse_ffprobe_json(data)

@@ -1,0 +1,198 @@
+# Migrating from 0.4 to 0.5
+
+Configs moved to `sashimi.config` and split into one model per output format. The converters
+(`sashimi.video.convert`, `image.convert`, …) take the same arguments as before, except for sheets.
+
+## Building configs
+
+Swap each config class for its family; the call shape is the same.
+
+| 0.4 | 0.5 |
+|---|---|
+| `ImageConvertConfig.from_params(p, target=t)` | `IMAGE_CONVERT.from_params(p, target=t)` |
+| `ImageResizeConfig.from_params(p, target=t)` | `IMAGE_RESIZE.from_params(p, target=t)` (target and a size required) |
+| `IcoConfig.from_params(p)` | unchanged (`sashimi.config.IcoConfig`) |
+| `VideoConvertConfig.from_params(p, target=t)` | `VIDEO_CONVERT.from_params(p, target=t)` |
+| `TransformConfig.from_params(p, target=t)` | `VIDEO_TRANSFORM.from_params(p, target=t)` |
+| `TrimConfig.from_params(p, container=c)` | `VIDEO_TRIM.from_params(p, container=c)` |
+| `AudioConvertConfig.from_params(p, target=t)` | `AUDIO_CONVERT.from_params(p, target=t)` |
+| `ContactSheetConfig.from_params(p, target=t)` | `CONTACT_SHEET.from_params(p, target=t)` |
+| `AnimatedSheetConfig.from_params(p, target=t)` | `CONTACT_SHEET.from_params({**p, "animated": True}, target=t)` |
+
+```python
+# 0.4
+from sashimi.video import VideoConvertConfig
+config = VideoConvertConfig.from_params(params, target="mp4")
+
+# 0.5
+from sashimi.config import VIDEO_CONVERT
+config = VIDEO_CONVERT.from_params(params, target="mp4")   # -> Mp4VideoConfig
+```
+
+To build a model directly, use its class: `Mp4VideoConfig(crf=20)`, `JpegImageConfig(quality=90)`,
+`CopyTrimConfig(container="mkv", end_seconds=30)`. The `target` field defaults to the model's own
+format. To read a model's fields, defaults and bounds without building one:
+`VIDEO_CONVERT.model_for(target="mp4").model_fields`.
+
+## Options that no longer apply
+
+Each model only has the fields that change its output, so options for other formats are
+rejected with "Unknown option: …" instead of being ignored. Drop them before validating:
+
+- images: `quality` for PNG/GIF/BMP; `lossless` and `webp_method` outside WebP; `progressive`
+  and `jpeg_subsampling` outside JPEG; `png_compress_level` outside PNG; `tiff_compression`
+  outside TIFF; `preserve_transparency` for JPEG/BMP; `optimize` for BMP/TIFF; `keep_exif` and
+  `keep_icc` for GIF/BMP;
+- video: `fps`, `loop`, `dither`, `palette_mode`, `quality`, `lossless` for WebM/MP4; `crf`,
+  `preset`, `speed`, `audio_bitrate_kbps`, `mute` for GIF/WebP; `preset` for WebM; `speed` for MP4;
+- trims: every encoder option unless `accurate`; then `speed` for MP4/MOV/MKV and `preset` for WebM;
+- audio: `bitrate_kbps` for WAV/FLAC; `wav_bit_depth` outside WAV; `flac_compression_level`
+  outside FLAC;
+- sheets: `sample_duration`, `fps`, `loop` for still sheets; `quality` for PNG still sheets and
+  GIF animated sheets.
+
+`None` still means "use the default" everywhere, and the defaults are now the field defaults:
+`Mp4VideoConfig.crf` is `23`, not `None`. The `effective_*` properties and `encoder_target` are
+gone; read the field itself.
+
+## Contact sheets
+
+```python
+# 0.4
+from sashimi.sheets import ContactSheetConfig, contact_sheet, animated_sheet
+contact_sheet(src, dst, ContactSheetConfig(width=1920, header_font_path="/fonts/x.ttf"))
+
+# 0.5
+from sashimi import sheets
+from sashimi.config import CONTACT_SHEET
+config = CONTACT_SHEET.from_params({"width": 1920})                 # or {"animated": True, ...}
+sheets.render(src, dst, config, header_font="/fonts/x.ttf")
+```
+
+`header_font_path`, `timestamp_font_path` and `emoji_dir` are now the `header_font`,
+`timestamp_font` and `emoji_dir` arguments of `sheets.render` (and of `api.make_thumbs`), never
+config fields. `api.make_animated_thumbs` is gone: pass an animated config to `api.make_thumbs`.
+
+## Images
+
+`image.resize` is gone: `image.convert` shrinks when the config has `max_width`/`max_height`.
+`IMAGE_RESIZE` builds the same models with a size required. The batch `resize_images` takes one
+resize config, or a function from format name (`"jpeg"`, `"png"`, …) to config to keep each
+image's own format. `DEFAULT_MAX_PIXELS` moved to `sashimi.config`.
+
+## Errors
+
+- GIF/animated WebP over 30 s, explicit video lengths over 10 minutes and audio over 60 minutes
+  now fail in `from_params` (`InvalidOptionsError`), before any file is read. Accurate trims over
+  10 minutes are an `InvalidOptionsError` when the length is given, and `MediaTooLongError` as
+  before when the rest of the video is longer.
+- A copy trim into a container that can't hold the source's streams is an `InvalidOptionsError`
+  (was a `ProcessingError` from the muxer).
+- A video too wide for 16 px tiles is a `MediaTooLargeError`; sheet settings that make tiles
+  narrower than 16 px are an `InvalidOptionsError`.
+
+## CLI
+
+Commands and flags are unchanged. `resize` now needs `--width` or `--height`, flags that don't
+apply to the output are warned about and ignored, and `extract` refuses encoder flags without
+`--accurate`. TOML keys are unchanged, including `header_font_path`, `timestamp_font_path` and
+`emoji_dir`.
+
+# Migrating from 0.2 to 0.4
+
+## Install
+
+```sh
+pip uninstall sashimi                    # if you installed 0.2 from source
+pip install 'sashimi-convert[cli]'       # CLI users
+pip install sashimi-convert              # library users (add [heif] / [emoji] as needed)
+```
+
+The import name is unchanged: `import sashimi`. `ffmpeg` and `ffprobe` must be on `PATH`;
+MediaInfo is no longer needed.
+
+## CLI
+
+All four commands keep working. Differences:
+
+- `sashimi convert --width/--height` are now maximums and never upscale; with both, the image is
+  fitted inside the box rather than stretched.
+- `sashimi convert` also accepts `webp`, `gif`, `bmp`, `tiff` and `ico` for images, `gif`, `webm` and
+  `mp4` for videos, and `mp3`, `m4a`, `wav`, `ogg` and `flac` for videos and audio.
+- PNGs are no longer optimised by default; pass `--optimize` for the 0.2 behaviour.
+- `sashimi thumbs --format/-o` now also chooses the static format (jpeg, png, webp).
+- Your `~/.sashimi/sashimi.toml` and project `sashimi.toml` files keep working with the same keys.
+  `mediainfo_template` and `header_height_ratio` are ignored.
+- Headers no longer render emoji unless you set `emoji_dir` to a folder of Twemoji-style PNGs and
+  install the `[emoji]` extra.
+
+## Python: contact sheets
+
+```python
+# 0.2
+from sashimi.api import make_thumbs
+make_thumbs("videos/", recursive=True, static_width=1920, jpeg_quality=80, cols=4)
+
+# 0.4: batch (outputs next to inputs); in 0.5, see above
+from sashimi.api import make_thumbs
+from sashimi.sheets import ContactSheetConfig
+make_thumbs("videos/", ContactSheetConfig(width=1920, quality=80, cols=4), recursive=True)
+
+# 0.4: single file, explicit paths
+from sashimi.sheets import contact_sheet
+contact_sheet("in.mkv", "out/sheet.jpg", ContactSheetConfig(width=1920), display_name="My clip.mkv")
+```
+
+| 0.2 keyword (`StaticThumbsConfig`) | 0.4 field (`ContactSheetConfig`) |
+|---|---|
+| `static_width` | `width` |
+| `jpeg_quality` | `quality` |
+| `video_extensions` | `make_thumbs(..., extensions=[...])` |
+| `mediainfo_template`, `header_height_ratio` | removed |
+| everything else (`cols`, `rows`, `gap`, offsets, colours, fonts) | same name |
+
+| 0.2 keyword (`AnimatedThumbsConfig`) | 0.4 field (`AnimatedSheetConfig`) |
+|---|---|
+| `animated_width` | `width` |
+| `output_format` | `target` |
+| `output_fps` | `fps` |
+| `sample_duration`, `loop`, `cols`, `rows`, `gap`, … | same name |
+
+`make_animated_thumbs(paths, AnimatedSheetConfig(...), recursive=..., force=...)` follows the same pattern.
+
+## Python: image conversion
+
+```python
+# 0.2
+from sashimi.api.convert import to_jpeg
+to_jpeg("photos/", width=800, quality="85%")
+
+# 0.4
+from sashimi.api import to_jpeg               # now exported from sashimi.api
+to_jpeg("photos/", max_width=800, quality=85)  # options are ImageConvertConfig fields
+```
+
+`ToJpegConfig`/`ToPngConfig` are replaced by `sashimi.image.ImageConvertConfig(target=...)`.
+Quality is an integer 1–100.
+
+## Python: extract
+
+`sashimi.api.extract(input_path, start, end, output_path=None, force=False)` still returns
+`(status, message, output_path)`. The parameters `start_str`/`end_str` are now `start`/`end` and
+also accept numbers of seconds. New keyword-only `accurate=True` re-encodes for an exact cut
+(with `crf`, `preset`, `speed`, `audio_bitrate_kbps`, `mute` and `max_workers`). The single-file equivalent is
+`sashimi.video.trim(input, output, TrimConfig(container="mkv", start_seconds=..., end_seconds=...))`.
+
+## Python: config
+
+`sashimi.config` is gone. The library no longer reads TOML files: build config models directly
+(or with `Model.from_params(dict)`). TOML handling for the CLI lives in `sashimi.cli.settings`.
+
+## Errors
+
+Batch functions still report per-file statuses. Single-file functions raise:
+
+- `sashimi.errors.UserInputError` subclasses: show `e.user_message` to your users;
+- `sashimi.errors.ProcessingError`: log it.
+
+Branch on the exception type, not on its message.

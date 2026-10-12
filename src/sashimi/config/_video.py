@@ -1,0 +1,250 @@
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Annotated, Any, ClassVar, Literal, Self
+
+from pydantic import Field, model_validator
+
+from sashimi.config._base import ConfigFamily, FormBool, FormInt, ParamsModel, TargetName, parse_flag, sentence
+from sashimi.config._limits import (
+    DEFAULT_GIF_SECONDS,
+    GIF_TOO_LONG,
+    MAX_GIF_SECONDS,
+    MAX_VIDEO_SECONDS,
+    VIDEO_CLIP_TOO_LONG,
+    WEBP_TOO_LONG,
+)
+
+X264Preset = Literal["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"]
+_AudioBitrate = Annotated[int, Field(ge=32, le=512)]
+
+
+class _H264Options(ParamsModel):
+    """H.264 video with AAC audio."""
+
+    crf: int = Field(default=23, ge=0, le=51)
+    """Constant quality: lower is better and bigger."""
+    preset: X264Preset = "veryfast"
+    """Slower presets give smaller files."""
+    audio_bitrate_kbps: _AudioBitrate = 128
+    """AAC audio bitrate in kb/s."""
+    mute: bool = False
+    """Drop the audio track."""
+
+
+class _Vp9Options(ParamsModel):
+    """VP9 video with Opus audio."""
+
+    crf: int = Field(default=34, ge=0, le=63)
+    """Constant quality: lower is better and bigger."""
+    speed: int = Field(default=8, ge=0, le=8)
+    """libvpx ``-cpu-used``: higher is faster and lower quality."""
+    audio_bitrate_kbps: _AudioBitrate = 96
+    """Opus audio bitrate in kb/s."""
+    mute: bool = False
+    """Drop the audio track."""
+
+
+class _Clip(ParamsModel):
+    start_seconds: float = Field(default=0.0, ge=0)
+    """Where to start, in seconds from the beginning."""
+
+
+class _Animated(_Clip):
+    duration_seconds: float = Field(default=DEFAULT_GIF_SECONDS, gt=0, le=MAX_GIF_SECONDS)
+    """Length in seconds, at most 30."""
+    max_width: int = Field(default=480, ge=64, le=3840)
+    """Never upscales; keeps the aspect ratio."""
+    fps: int = Field(default=12, ge=1, le=30)
+    """Frames per second."""
+    loop: bool = True
+    """Loop forever, or play once."""
+
+
+class _Transcode(_Clip):
+    duration_seconds: float | None = Field(default=None, gt=0, le=MAX_VIDEO_SECONDS)
+    """``None`` converts to the end of the video (which may be at most 10 minutes long)."""
+    max_width: int | None = Field(default=None, ge=64, le=3840)
+    """``None`` keeps the source's width. Never upscales; keeps the aspect ratio."""
+
+    bound_messages: ClassVar[Mapping[str, str]] = MappingProxyType({"duration_seconds": VIDEO_CLIP_TOO_LONG})
+
+
+class GifVideoConfig(_Animated):
+    """A GIF made from part of a video: no sound, a 256-colour palette."""
+
+    target: Annotated[Literal["gif"], TargetName] = "gif"
+    """The output format."""
+    dither: Literal["bayer", "sierra2_4a", "floyd_steinberg", "none"] = "bayer"
+    """Bayer gives smaller files; error diffusion (sierra2_4a, floyd_steinberg) smoother gradients."""
+    palette_mode: Literal["diff", "full", "single"] = "diff"
+    """Build the palette from moving parts ("diff"), all pixels ("full"), or per frame ("single")."""
+
+    bound_messages: ClassVar[Mapping[str, str]] = MappingProxyType({"duration_seconds": GIF_TOO_LONG})
+
+
+class WebpVideoConfig(_Animated):
+    """An animated WebP made from part of a video: no sound."""
+
+    target: Annotated[Literal["webp"], TargetName] = "webp"
+    """The output format."""
+    quality: int = Field(default=75, ge=0, le=100)
+    """Lossy quality, or compression effort when ``lossless``."""
+    lossless: bool = False
+    """Lossless frames (much bigger files)."""
+
+    bound_messages: ClassVar[Mapping[str, str]] = MappingProxyType({"duration_seconds": WEBP_TOO_LONG})
+
+
+class WebmVideoConfig(_Vp9Options, _Transcode):
+    """A WebM (VP9 + Opus) video."""
+
+    target: Annotated[Literal["webm"], TargetName] = "webm"
+    """The output format."""
+
+
+class Mp4VideoConfig(_H264Options, _Transcode):
+    """An MP4 (H.264 + AAC) video."""
+
+    target: Annotated[Literal["mp4"], TargetName] = "mp4"
+    """The output format."""
+
+
+Rotation = Annotated[Literal[0, 90, 180, 270], FormInt]
+
+
+class _Transform(ParamsModel):
+    rotate: Rotation = 0
+    """Clockwise rotation in degrees."""
+    flip: Literal["none", "horizontal", "vertical"] = "none"
+    """Mirror the picture."""
+
+    @model_validator(mode="after")
+    def _check_something_to_do(self) -> Self:
+        if self.rotate == 0 and self.flip == "none":
+            raise sentence("Choose a rotation or a flip.")
+        return self
+
+
+class Mp4TransformConfig(_H264Options, _Transform):
+    """Rotate and/or flip a video, re-encoding it as MP4 (H.264 + AAC)."""
+
+    target: Annotated[Literal["mp4"], TargetName] = "mp4"
+    """The output format."""
+
+
+class WebmTransformConfig(_Vp9Options, _Transform):
+    """Rotate and/or flip a video, re-encoding it as WebM (VP9 + Opus)."""
+
+    target: Annotated[Literal["webm"], TargetName] = "webm"
+    """The output format."""
+
+
+class _TrimRange(ParamsModel):
+    start_seconds: float = Field(default=0.0, ge=0)
+    """Where the clip starts, in seconds."""
+    end_seconds: float | None = Field(default=None, gt=0)
+    """``None`` (with no ``duration_seconds``) trims to the end of the video."""
+    duration_seconds: float | None = Field(default=None, gt=0)
+    """The clip's length, instead of ``end_seconds``."""
+
+    @model_validator(mode="after")
+    def _check_range(self) -> Self:
+        if self.end_seconds is not None and self.duration_seconds is not None:
+            raise sentence("Give an end time or a length, not both.")
+        if self.end_seconds is not None and self.end_seconds <= self.start_seconds:
+            raise sentence("The end time must be after the start time.")
+        return self
+
+    @property
+    def length(self) -> float | None:
+        """The requested length in seconds, or ``None`` for "to the end"."""
+        if self.end_seconds is not None:
+            return self.end_seconds - self.start_seconds
+        return self.duration_seconds
+
+
+class _AccurateRange(_TrimRange):
+    duration_seconds: float | None = Field(default=None, gt=0, le=MAX_VIDEO_SECONDS)
+    """The clip's length, instead of ``end_seconds``."""
+    accurate: Annotated[Literal[True], FormBool] = True
+    """Re-encode for a frame-accurate cut."""
+
+    bound_messages: ClassVar[Mapping[str, str]] = MappingProxyType({"duration_seconds": VIDEO_CLIP_TOO_LONG})
+
+    @model_validator(mode="after")
+    def _check_length(self) -> Self:
+        if (self.length or 0) > MAX_VIDEO_SECONDS:
+            raise sentence(VIDEO_CLIP_TOO_LONG)
+        return self
+
+
+class CopyTrimConfig(_TrimRange):
+    """
+    A lossless trim: streams are copied into `container`, so the cut is instant but starts at the
+    keyframe at or before `start_seconds` (see :data:`KEYFRAME_NOTE`). The container must be able
+    to hold the source's codecs.
+    """
+
+    container: Annotated[Literal["mkv", "mp4", "webm", "mov"], TargetName]
+    """The output container; it must be able to hold the source's codecs."""
+    accurate: Annotated[Literal[False], FormBool] = False
+    """Copy the streams without re-encoding."""
+
+
+class H264TrimConfig(_H264Options, _AccurateRange):
+    """A frame-accurate trim, re-encoded as H.264 + AAC into MP4, MOV or MKV."""
+
+    container: Annotated[Literal["mp4", "mov", "mkv"], TargetName]
+    """The output container."""
+
+
+class Vp9TrimConfig(_Vp9Options, _AccurateRange):
+    """A frame-accurate trim, re-encoded as VP9 + Opus into WebM."""
+
+    container: Annotated[Literal["webm"], TargetName] = "webm"
+    """The output container."""
+
+
+VideoConvertConfig = GifVideoConfig | WebpVideoConfig | WebmVideoConfig | Mp4VideoConfig
+"""Any video conversion config: one model per output format."""
+TransformConfig = Mp4TransformConfig | WebmTransformConfig
+"""Any rotate/flip config."""
+TrimConfig = CopyTrimConfig | H264TrimConfig | Vp9TrimConfig
+"""Any trim config: a stream copy, or an accurate re-encode."""
+
+VIDEO_CONVERT: ConfigFamily[VideoConvertConfig] = ConfigFamily(
+    "video convert",
+    {"gif": GifVideoConfig, "webp": WebpVideoConfig, "webm": WebmVideoConfig, "mp4": Mp4VideoConfig},
+)
+"""Video conversion, by ``target``: gif, webp (animated), webm, mp4."""
+
+VIDEO_TRANSFORM: ConfigFamily[TransformConfig] = ConfigFamily(
+    "video transform", {"mp4": Mp4TransformConfig, "webm": WebmTransformConfig}, default="mp4"
+)
+"""Rotate/flip, by ``target``: mp4 (the default) or webm."""
+
+
+class _TrimFamily(ConfigFamily[TrimConfig]):
+    @property
+    def targets(self) -> tuple[str, ...]:
+        return ("mkv", "mp4", "webm", "mov")
+
+    def _pick(self, data: Mapping[str, Any]) -> tuple[type[ParamsModel], dict[str, Any]]:
+        accurate = parse_flag("accurate", data.get("accurate", False))
+        containers = dict.fromkeys(self.targets, CopyTrimConfig)
+        name, model = self._lookup("container", data.get("container"), containers, None)
+        if accurate:
+            model = Vp9TrimConfig if name == "webm" else H264TrimConfig
+        return model, {**data, "container": name, "accurate": accurate}
+
+
+VIDEO_TRIM: ConfigFamily[TrimConfig] = _TrimFamily(
+    "video trim",
+    {"copy": CopyTrimConfig, "h264": H264TrimConfig, "vp9": Vp9TrimConfig},
+    key="container",
+)
+"""
+Trimming, by ``container`` (mkv, mp4, webm, mov) and ``accurate``: a stream copy
+(:class:`CopyTrimConfig`) unless ``accurate``, which re-encodes as VP9 for WebM
+(:class:`Vp9TrimConfig`) and H.264 otherwise (:class:`H264TrimConfig`).
+"""
