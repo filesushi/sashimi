@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Annotated, Any, ClassVar, Generic, Self, TypeVar, cast
@@ -149,6 +152,9 @@ class ConfigFamily(Generic[C]):
     :meth:`from_params` picks the model from the discriminating option (``target`` unless stated)
     and validates the remaining options against it; :meth:`model_for` returns that model without
     validating anything, for reading its fields, defaults and bounds.
+
+    ``key`` is the name of the discriminating option (``container`` for ``VIDEO_TRIM``,
+    ``target`` for the others), and ``name`` describes the operation.
     """
 
     def __init__(
@@ -173,7 +179,10 @@ class ConfigFamily(Generic[C]):
         return f"<ConfigFamily {self.name}: {', '.join(m.__name__ for m in self.models)}>"
 
     def model_for(self, **discriminators: Any) -> type[C]:
-        """The model used for these discriminating options, e.g. ``model_for(target="jpeg")``."""
+        """
+        The model used for these discriminating options, e.g. ``model_for(target="jpeg")``. Other
+        keyword arguments are ignored, so a whole form's values can be passed.
+        """
         model, _ = self._pick(discriminators)
         return cast(type[C], model)
 

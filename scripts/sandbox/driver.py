@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Sandbox conformance driver. Runs one conversion job the way a FileSushi worker would, inside the
 locked-down container started by scripts/sandbox_check.sh, then verifies the result.

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Image conversion, resizing and ICO generation with Pillow."""
 
 import contextlib

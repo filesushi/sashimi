@@ -106,9 +106,13 @@ reads defaults from `~/.sashimi/sashimi.toml` and a project `sashimi.toml`, whic
 
 ```sh
 uv sync                       # dev environment, including all extras
-sh scripts/check.sh           # ruff format + check, mypy, pytest on Python 3.11-3.14
+sh scripts/check.sh           # ruff format --check, ruff check, mypy, pytest on Python 3.11-3.14
 sh scripts/sandbox_check.sh   # run every converter in a FileSushi-style locked-down container
 ```
+
+`scripts/check.sh` doesn't change the tree: it uses the locked dependencies as they are
+(`uv run --frozen`) and runs each Python version in its own environment under `.venvs/`, so the
+`.venv` that `uv sync` made is left alone.
 
 `scripts/sandbox_check.sh` builds a `python:3.14-alpine` worker image from the wheel (wheels only,
 `apk add ffmpeg`), then runs every converter under FileSushi's sandbox flags (`--network none
@@ -117,4 +121,7 @@ its time, peak memory and peak process/thread count, and fails if the output is 
 written outside `/vault/output` or left in `/tmp`, or a network call is attempted. `--skip-long` skips
 the 10-minute, 300 MB animated-sheet budget case.
 
-Licensed under Apache-2.0.
+## License
+
+Copyright 2026 The FileSushi Authors, who are listed in `AUTHORS`. Licensed under the Apache
+License, Version 2.0; see `LICENSE`.

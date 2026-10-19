@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Animated (GIF/WebP) video contact sheets, rendered with ffmpeg + Pillow (no moviepy)."""
 
 import concurrent.futures
@@ -24,7 +27,7 @@ from sashimi.core._resources import resolve_max_workers
 from sashimi.core.sheets._layout import SheetLayout, check_tiles, clip_starts, plan_layout
 from sashimi.core.sheets._render import HeaderStyle, format_duration, load_font, render_header, stamp, timestamp_label
 from sashimi.core.sheets.static import NO_FRAMES, check_sheet_size, header_lines, optional_path, probe_sheet_source
-from sashimi.errors import InvalidOptionsError, ProcessingError, UnsupportedMediaError
+from sashimi.errors import BinaryNotFoundError, InvalidOptionsError, ProcessingError, UnsupportedMediaError
 
 __all__ = ["render_animated", "build_clip_command", "build_encode_command"]
 
@@ -121,6 +124,8 @@ def build_encode_command(
 def _grab_clip(cmd: list[str], frame_bytes: int) -> list[bytes] | None:
     try:
         data = run_ffmpeg(cmd, capture_stdout=True)
+    except BinaryNotFoundError:
+        raise
     except ProcessingError as e:
         logger.debug(f"Clip extraction failed: {e}")
         return None

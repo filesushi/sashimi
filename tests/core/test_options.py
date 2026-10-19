@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """The extra options exposed on every config, and that their defaults keep the §4 behaviour."""
 
 import pytest
@@ -5,8 +8,11 @@ from PIL import Image
 
 from sashimi import audio, image, video
 from sashimi.config import (
+    AAC_SAMPLE_RATES,
     AUDIO_CONVERT,
     IMAGE_CONVERT,
+    MP3_SAMPLE_RATES,
+    OPUS_SAMPLE_RATES,
     VIDEO_CONVERT,
     BmpImageConfig,
     GifImageConfig,
@@ -80,6 +86,38 @@ def test_audio_options():
         "Invalid value for sample_rate: input should be 8000, 12000, 16000, 24000 or 48000."
     )
     assert AUDIO_CONVERT.from_params({"sample_rate": "48000"}, target="ogg").sample_rate == 48000
+
+
+@pytest.mark.parametrize(
+    "target, rates", [("mp3", MP3_SAMPLE_RATES), ("m4a", AAC_SAMPLE_RATES), ("ogg", OPUS_SAMPLE_RATES)]
+)
+def test_sample_rates_are_the_encoders_choices(target, rates):
+    model = AUDIO_CONVERT.model_for(target=target)
+    schema = model.model_json_schema()["properties"]["sample_rate"]
+    assert schema["anyOf"] == [{"enum": list(rates), "type": "integer"}, {"type": "null"}]
+    assert [AUDIO_CONVERT.from_params({"sample_rate": str(rate)}, target=target).sample_rate for rate in rates] == list(
+        rates
+    )
+    assert AUDIO_CONVERT.from_params({}, target=target).sample_rate is None
+
+
+def test_mp3_refuses_rates_lame_cannot_encode():
+    with pytest.raises(InvalidOptionsError) as e:
+        AUDIO_CONVERT.from_params({"sample_rate": 96000}, target="mp3")
+    assert e.value.user_message == (
+        "Invalid value for sample_rate: input should be 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100 or 48000."
+    )
+    assert AUDIO_CONVERT.from_params({"sample_rate": 96000}, target="m4a").sample_rate == 96000
+    with pytest.raises(InvalidOptionsError):
+        AUDIO_CONVERT.from_params({"sample_rate": 192000}, target="m4a")
+
+
+@pytest.mark.parametrize("target", ["wav", "flac"])
+def test_pcm_and_flac_take_any_rate_in_range(target):
+    assert AUDIO_CONVERT.from_params({"sample_rate": 192000}, target=target).sample_rate == 192000
+    assert AUDIO_CONVERT.from_params({"sample_rate": 9000}, target=target).sample_rate == 9000
+    with pytest.raises(InvalidOptionsError):
+        AUDIO_CONVERT.from_params({"sample_rate": 192001}, target=target)
 
 
 @pytest.mark.parametrize(

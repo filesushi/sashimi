@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """CPU budgeting. Containers often limit CPU with a CFS quota that os.cpu_count() doesn't see."""
 
 import math

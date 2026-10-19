@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Pure layout maths for contact sheets: grids, tile sizes and sample times. No I/O."""
 
 from dataclasses import dataclass

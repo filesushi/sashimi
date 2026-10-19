@@ -1,3 +1,47 @@
+# Migrating from 0.5 to 0.6
+
+0.6.0 is the first release on PyPI (`pip install sashimi-convert`). If you used a private 0.5.1
+build, replace it with 0.6.0. Conversion outputs are unchanged.
+
+## MP3 and M4A sample rates
+
+`sample_rate` now accepts only the rates each encoder can write. Anything else raises
+`InvalidOptionsError` from `from_params`, before any file is read, where 0.5 accepted any integer
+from 8000 to 192000 and then failed in ffmpeg with `ProcessingError`.
+
+| Output | Accepted `sample_rate` (Hz) | Constant |
+|---|---|---|
+| MP3 | 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000 | `sashimi.config.MP3_SAMPLE_RATES` |
+| M4A (AAC) | the MP3 rates, plus 64000, 88200, 96000 | `sashimi.config.AAC_SAMPLE_RATES` |
+| OGG (Opus) | 8000, 12000, 16000, 24000, 48000 (unchanged) | `sashimi.config.OPUS_SAMPLE_RATES` |
+| WAV, FLAC | any integer from 8000 to 192000 (unchanged) | |
+
+If a form offers sample rates, build its choices per format from these constants, for example
+by dropping 96 kHz from MP3. Leaving `sample_rate` unset still keeps the source's rate when the
+encoder supports it, and otherwise uses the nearest rate it does (a 96 kHz source becomes 48 kHz
+MP3).
+
+The MP3 and M4A fields are integer `Literal`s now: `model_json_schema()` gives an `enum`, and
+`model_fields["sample_rate"].metadata` no longer has `Ge`/`Le` entries. Code that read the bounds
+from there should read the choices instead:
+
+```python
+from sashimi.config import Mp3AudioConfig
+
+schema = Mp3AudioConfig.model_json_schema()["properties"]["sample_rate"]
+choices = schema["anyOf"][0]["enum"]          # [8000, 11025, ..., 48000]
+```
+
+## A missing or broken ffprobe
+
+`sashimi.probe()` and everything that probes first (`video.convert`, `video.trim`,
+`video.transform`, `audio.convert`, `sheets.render` and the batch API) raise
+`BinaryNotFoundError` when ffprobe (or, for sheets, ffmpeg) is missing or can't be started. 0.5
+raised `UnsupportedMediaError` ("This file doesn't look like media we can read.") when a path
+given to `set_ffmpeg_paths()` didn't work, so a deployment problem looked like a bad upload. `BinaryNotFoundError` is a `ProcessingError`, so code
+that shows `UserInputError.user_message` to users and logs everything else needs no change. The
+batch API reports such files as `error` ("Failed: Cannot run …") rather than `skipped`.
+
 # Migrating from 0.4 to 0.5
 
 Configs moved to `sashimi.config` and split into one model per output format. The converters

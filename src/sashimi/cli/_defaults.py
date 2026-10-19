@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Option defaults for help text and ``sashimi config defaults``: built-in, from the config models, and from sashimi.toml."""
 
 from __future__ import annotations

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """The config module: import isolation, one model per target, and no field that its converter ignores."""
 
 import io

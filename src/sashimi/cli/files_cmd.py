@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """`sashimi extract`, `flatten` and `info`."""
 
 from __future__ import annotations

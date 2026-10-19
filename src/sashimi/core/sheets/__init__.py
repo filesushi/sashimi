@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Static and animated contact sheets."""
 
 from sashimi.config import AnimatedGifSheetConfig, AnimatedWebpSheetConfig, SheetConfig

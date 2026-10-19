@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared CLI plumbing: consoles, the batch progress/results renderer, and option validation errors."""
 
 from __future__ import annotations

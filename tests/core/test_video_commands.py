@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Parity tests: the video command builders must produce exactly the arguments FileSushi relies on (brief §4)."""
 
 import pytest

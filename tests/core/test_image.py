@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Image conversion (P0-a), resize (P1-d), ICO and HEIC. Pillow only; no ffmpeg needed."""
 
 import io

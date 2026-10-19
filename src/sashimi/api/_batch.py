@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared batch machinery: file discovery, the result protocol, and error classification."""
 
 import functools

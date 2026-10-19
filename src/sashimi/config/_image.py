@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Annotated, Literal, Self
 
 from pydantic import Field, field_validator, model_validator

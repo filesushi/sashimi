@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """The ``sashimi`` command line. Needs the ``cli`` extra: ``pip install 'sashimi-convert[cli]'``."""
 
 import sys

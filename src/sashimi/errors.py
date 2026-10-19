@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Exceptions raised by sashimi.
 
@@ -66,4 +69,4 @@ class ProcessingError(SashimiError):
 
 
 class BinaryNotFoundError(ProcessingError):
-    """ffmpeg or ffprobe could not be found."""
+    """ffmpeg or ffprobe could not be found or started. Operations that wrap probing re-raise it unchanged."""

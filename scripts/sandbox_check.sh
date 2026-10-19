@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)

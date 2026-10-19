@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """The CLI's shape: version, help on bare commands, and the commands added in 0.4."""
 
 import json

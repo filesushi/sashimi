@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Annotated, Any, ClassVar, Literal, Self

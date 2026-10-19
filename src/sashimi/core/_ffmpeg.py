@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Locating and running ffmpeg/ffprobe, with progress reporting and bounded threading."""
 
 import collections
@@ -121,7 +124,8 @@ def run_ffmpeg(
 
     With `on_progress` and `progress_total` (seconds of media the command will produce), the command
     must include ``-progress pipe:1 -nostats``; progress lines are parsed into fractions.
-    Raises ProcessingError on a non-zero exit, with the tail of stderr for the logs.
+    Raises ProcessingError on a non-zero exit, with the tail of stderr for the logs, and
+    BinaryNotFoundError if the executable is missing or can't be started.
     """
     report_progress = on_progress is not None and progress_total and not capture_stdout
     try:
@@ -131,7 +135,7 @@ def run_ffmpeg(
             stdout=subprocess.PIPE if (capture_stdout or report_progress) else subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
-    except FileNotFoundError as e:
+    except OSError as e:
         raise BinaryNotFoundError(f"Cannot run {cmd[0]!r}: {e}") from e
 
     stderr_tail: collections.deque = collections.deque(maxlen=40)

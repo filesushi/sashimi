@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Reusable CLI option declarations and value parsers. Kept import-light for fast ``--help``."""
 
 from __future__ import annotations

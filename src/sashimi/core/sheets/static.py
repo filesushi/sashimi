@@ -1,4 +1,7 @@
-"""Static (JPEG) video contact sheets."""
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
+"""Still (JPEG, PNG or WebP) video contact sheets."""
 
 import concurrent.futures
 import logging
@@ -35,7 +38,13 @@ from sashimi.core.sheets._render import (
     stamp,
     timestamp_label,
 )
-from sashimi.errors import MediaTooLargeError, MediaTooShortError, ProcessingError, UnsupportedMediaError
+from sashimi.errors import (
+    BinaryNotFoundError,
+    MediaTooLargeError,
+    MediaTooShortError,
+    ProcessingError,
+    UnsupportedMediaError,
+)
 
 __all__ = ["render_still", "build_frame_command"]
 
@@ -119,6 +128,8 @@ def build_frame_command(
 def _grab_frame(cmd: list[str], width: int, height: int) -> Image.Image | None:
     try:
         data = run_ffmpeg(cmd, capture_stdout=True)
+    except BinaryNotFoundError:
+        raise
     except ProcessingError as e:
         logger.debug(f"Frame extraction failed: {e}")
         return None

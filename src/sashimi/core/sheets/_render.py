@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Header and timestamp rendering for contact sheets. Local fonts only; never touches the network."""
 
 import datetime

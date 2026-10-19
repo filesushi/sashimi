@@ -1,38 +1,78 @@
-# Hand-back: sashimi 0.5.1 for FileSushi
+# Hand-back: sashimi 0.6.0 for FileSushi
 
-From the sashimi agent to the FileSushi agent, answering the 0.5.0 release brief of 2026-10-12.
-Everything is in sashimi's working tree, uncommitted, for Rio to review. Nothing in FileSushi was
-touched. The wheel is `dist/sashimi_convert-0.5.1-py3-none-any.whl`.
+From the sashimi agent to FileSushi, written 2026-10-19 for sashimi 0.6.0, its first PyPI
+release (distribution `sashimi-convert`). The release isn't published yet: the owner builds and
+uploads it by hand. Until then, a wheel built from sashimi's tree at 0.6.0 is the same code.
 
-FileSushi's code matched the brief everywhere I checked (`sashimi_worker.py` line numbers,
-`tool_params.py` validators, the `KEYFRAME_NOTE` copy in `TrimParams.hint`); I found no
-disagreement to report.
+FileSushi vendors an early build of 0.5.1 (`docker/workers/wheels/sashimi_convert-0.5.1-py3-none-any.whl`,
+sha256 `b9bd0581…`). Its `config/`, `core/` and `api/` match the later 0.5.1 build; the
+differences were in the CLI only. 0.6.0 is that code plus the changes below, with the same
+command lines and byte-identical outputs.
 
-**0.5.1 is a drop-in replacement for 0.5.0**: same API, same command lines, same outputs. It adds:
+## 1. What FileSushi must change
 
-- **Field descriptions.** Every config field has a user-facing description in
-  `model_fields[name].description` and in `Model.model_json_schema()` (pinned by
-  `test_every_field_is_described`), usable as form help text. They come from the docstrings
-  under each field (`use_attribute_docstrings`), so they need the `.py` sources installed, which a
-  normal wheel install has.
-- **`cols`/`rows` bounds in the schema.** `GridValue` is now `Annotated[int, Field(ge=1, le=20)] |
-  Literal["auto"]`, so the JSON schema shows 1-20; validation and messages are unchanged.
+1. **Depend on the PyPI release.** Once 0.6.0 is on PyPI, replace the vendored wheel:
+   - `pyproject.toml`: drop the `[tool.uv.sources]` entry for `sashimi-convert` (it points at
+     `docker/workers/wheels/sashimi_convert-0.5.1-py3-none-any.whl`) and require
+     `sashimi-convert==0.6.0`, then re-lock;
+   - `docker/workers/sashimi.Dockerfile`: install from the index, wheels only, with hashes, for
+     example `pip install --no-cache-dir --only-binary=:all: --require-hashes -r requirements.txt`
+     with `sashimi-convert[heif]==0.6.0` and its dependencies pinned, instead of copying the wheel;
+   - delete `docker/workers/wheels/sashimi_convert-0.5.1-py3-none-any.whl`.
+2. **Don't offer 96 kHz for MP3.** `Mp3AudioConfig.sample_rate` now takes only LAME's rates
+   (`sashimi.config.MP3_SAMPLE_RATES`: 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100,
+   48000). `tool_params.py` gave every audio tool except OGG the same choices, including "96 kHz";
+   with 0.6.0, MP3 at 96000 is refused by `from_params` with `InvalidOptionsError` ("Invalid value
+   for sample_rate: input should be 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100 or
+   48000."), where 0.5.1 accepted it and the worker then failed with `ProcessingError`. M4A, WAV
+   and FLAC still take 96000. FileSushi's working tree (checked 2026-10-19) already gives
+   `Mp3Params` its own choices without 96 kHz (`tool_params.py:1042-1047,1099`); keep that. If you
+   build the choices from sashimi's constants instead, note that `MP3_SAMPLE_RATES` is also the
+   name of the local `Choices` tuple there.
+3. **M4A takes AAC's rates only:** `AAC_SAMPLE_RATES` (the MP3 rates plus 64000, 88200, 96000).
+   FileSushi offers 22050, 44100, 48000 and 96000, all of which are accepted; nothing to change
+   unless you add more.
+4. **Nothing else.** The rest is behaviour FileSushi gets for free:
+   - a missing or broken ffprobe or ffmpeg in the worker image now raises `BinaryNotFoundError`
+     (a `ProcessingError`), so the worker logs "Conversion failed" and writes no `error.txt`.
+     0.5.1 raised `UnsupportedMediaError`, telling the user "This file doesn't look like … we can
+     read." about a deployment fault;
+   - `sashimi.__version__`, which the worker logs, is `0.6.0`;
+   - the package metadata names "The FileSushi Authors <admin@filesushi.com>", licence
+     `Apache-2.0` (PEP 639), and `github.com/filesushi/sashimi`.
 
-If you integrated against 0.5.0, swap the wheel and nothing else.
+## 2. What sashimi now pins for FileSushi
 
-## 1. Install
+`tests/core/test_filesushi_contract.py` (2026-10-19) pins the behaviour FileSushi relies on
+beyond field names, defaults and bounds:
 
-Unchanged from 0.4.0, with the new version:
+- `ConfigFamily.key` is public: `"target"`, or `"container"` for `VIDEO_TRIM`
+  (`tool_params.py:107,127`);
+- `ConfigFamily.model_for(**kwargs)` ignores keyword arguments that don't pick the model, so
+  passing every form field works (`tool_params.py:107`);
+- every `int`/`float` field with an upper bound has exactly one `annotated_types.Le` in
+  `model_fields[name].metadata`, equal to the schema's `maximum`, and none uses an exclusive
+  maximum (`_upper`, `tool_params.py:692`). Fields that are choices (`Literal`s, such as the MP3,
+  M4A and OGG `sample_rate`) and `cols`/`rows` (`GridValue`, whose 1-20 bound is inside the type)
+  have no `Le` in the field's metadata; read their choices or bounds from `model_json_schema()`;
+- the exact `KEYFRAME_NOTE` text;
+- `MediaTooLargeError(user_message, detail=…)`, and the same constructor and `.detail` on every
+  `UserInputError` subclass (worker `:104,185`).
+
+The user messages FileSushi's tests assert ("Unknown option: quality.", "This file doesn't look
+like a video we can read.") were already pinned by `tests/core/test_sheet_guards.py` and
+`tests/integration/test_video_audio.py`.
+
+## 3. Install
 
 ```dockerfile
-RUN pip install --no-cache-dir --only-binary=:all: 'sashimi_convert-0.5.1-py3-none-any.whl[heif]'
+RUN pip install --no-cache-dir --only-binary=:all: 'sashimi-convert[heif]==0.6.0'
 ```
 
-The web app needs only `pip install sashimi_convert-0.5.1-py3-none-any.whl` (no extras); it
-pulls in `pydantic` and `pillow`, but importing `sashimi.config` loads neither Pillow nor anything
-that runs ffmpeg.
+The web app needs only `sashimi-convert==0.6.0` (no extras); it pulls in `pydantic` and
+`pillow`, but importing `sashimi.config` loads neither Pillow nor anything that runs ffmpeg.
 
-## 2. The config module: `sashimi.config`
+## 4. The config module: `sashimi.config`
 
 - Import path: `sashimi.config` (a package; everything public is re-exported from it, so import
   only from `sashimi.config`).
@@ -48,8 +88,8 @@ that runs ffmpeg.
   `duration_seconds` on WebM/MP4/audio (to the end) and `end_seconds`/`duration_seconds` on trims.
 - Limits that don't depend on the file are field bounds you can read from
   `model_fields[name].metadata` (`annotated_types.Le(le=30)` etc.).
-- Choice fields that hold ints or bools (`rotate`, `wav_bit_depth`, Opus `sample_rate`,
-  `accurate`, `animated`) accept form strings: `"90"`, `"24"`, `"true"`, `"on"`. Ordinary `int`,
+- Choice fields that hold ints or bools (`rotate`, `wav_bit_depth`, the MP3, M4A and OGG
+  `sample_rate`, `accurate`, `animated`) accept form strings: `"90"`, `"24"`, `"true"`, `"on"`. Ordinary `int`,
   `float` and `bool` fields already did.
 - Models are frozen, reject unknown keys, and treat `None`/missing as the default, as before.
 
@@ -57,7 +97,8 @@ that runs ffmpeg.
 
 Each is a `ConfigFamily` with `from_params(params, **fields)` (explicit fields win over
 `params`), `model_for(**discriminators)` (the model class, for reading fields/defaults/bounds
-without validating), `models` and `targets`. Everything invalid raises `InvalidOptionsError`.
+without validating; other keyword arguments are ignored), `key` (the discriminating option's
+name), `models` and `targets`. Everything invalid raises `InvalidOptionsError`.
 
 | Family | Picks the model by | Models |
 |---|---|---|
@@ -89,12 +130,14 @@ VIDEO_CONVERT.from_params({"duration_seconds": 31}, target="gif")
 | `DEFAULT_GIF_SECONDS` | 10 | GIF / animated WebP length when none is given |
 | `MAX_VIDEO_SECONDS` | 600 | longest re-encode (WebM/MP4, rotate, accurate trim) |
 | `MAX_AUDIO_SECONDS` | 3600 | longest audio conversion |
-| `DURATION_TOLERANCE_SECONDS` | 1 | see §4 |
+| `DURATION_TOLERANCE_SECONDS` | 1 | see §6 |
 | `DEFAULT_MAX_PIXELS` | 64,000,000 | default `max_pixels` of `image.convert`/`to_ico` |
 | `MAX_SHEET_HEIGHT` / `MAX_SHEET_PIXELS` | 16,383 / 64,000,000 | contact sheet size limits |
 | `MAX_FRAME_BYTES` | 400 MiB | decoded frames an animated sheet may hold |
 | `MIN_TILE_SIZE` | 16 | smallest sheet tile side, px |
-| `OPUS_SAMPLE_RATES` | (8000, 12000, 16000, 24000, 48000) | |
+| `MP3_SAMPLE_RATES` | (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000) | what `Mp3AudioConfig.sample_rate` accepts (new in 0.6.0) |
+| `AAC_SAMPLE_RATES` | the MP3 rates plus 64000, 88200, 96000 | what `M4aAudioConfig.sample_rate` accepts (new in 0.6.0) |
+| `OPUS_SAMPLE_RATES` | (8000, 12000, 16000, 24000, 48000) | what `OggAudioConfig.sample_rate` accepts |
 | `KEYFRAME_NOTE` | "Trimming without re-encoding is instant and keeps the original quality, but cuts can only land on keyframes, so your clip may start a moment before the time you chose." | |
 
 Also exported: `ParamsModel`, `ConfigFamily`, `RGB`, `RGBA`, `parse_color`, `Resample`,
@@ -105,7 +148,7 @@ Also exported: `ParamsModel`, `ConfigFamily`, `RGB`, `RGBA`, `parse_color`, `Res
 Generated from `model_fields` (the CLI prints the same, per format, with
 `sashimi config defaults <command> [format]`). `target` (and `accurate`/`animated` where shown) is fixed per
 model and defaults to the model's own value. Colours accept `"#rrggbb"`/`"#rrggbbaa"`, `"r,g,b"`
-or tuples. The limit fields' bound messages are in §5.
+or tuples. The limit fields' bound messages are in §7.
 
 #### `JpegImageConfig` (`target`='jpeg')
 
@@ -336,7 +379,7 @@ MP3 (LAME).
 | `start_seconds` | float | ≥ 0 | `0.0` | Where to start, in seconds from the beginning. |
 | `duration_seconds` | float or None | > 0, ≤ 3600 | `None` | ``None`` converts to the end of the file (which may be at most 60 minutes long). |
 | `mono` | bool |  | `False` | Mix down to one channel. |
-| `sample_rate` | int or None | ≥ 8000, ≤ 192000 | `None` | Output sample rate in Hz. ``None`` keeps the source's. |
+| `sample_rate` | 8000 / 11025 / 12000 / 16000 / 22050 / 24000 / 32000 / 44100 / 48000 or None |  | `None` | Output sample rate in Hz. ``None`` keeps the source's if MP3 supports it, and otherwise uses the nearest rate it does. |
 | `bitrate_kbps` | int | ≥ 64, ≤ 320 | `192` | Bitrate in kb/s. |
 
 #### `M4aAudioConfig` (`target`='m4a')
@@ -348,7 +391,7 @@ M4A (AAC).
 | `start_seconds` | float | ≥ 0 | `0.0` | Where to start, in seconds from the beginning. |
 | `duration_seconds` | float or None | > 0, ≤ 3600 | `None` | ``None`` converts to the end of the file (which may be at most 60 minutes long). |
 | `mono` | bool |  | `False` | Mix down to one channel. |
-| `sample_rate` | int or None | ≥ 8000, ≤ 192000 | `None` | Output sample rate in Hz. ``None`` keeps the source's. |
+| `sample_rate` | 8000 / 11025 / 12000 / 16000 / 22050 / 24000 / 32000 / 44100 / 48000 / 64000 / 88200 / 96000 or None |  | `None` | Output sample rate in Hz. ``None`` keeps the source's if AAC supports it, and otherwise uses the nearest rate it does. |
 | `bitrate_kbps` | int | ≥ 64, ≤ 320 | `160` | Bitrate in kb/s. |
 
 #### `OggAudioConfig` (`target`='ogg')
@@ -514,7 +557,7 @@ An animated contact sheet saved as GIF: every tile plays a short clip.
 | `fit` | pad / crop |  | `"pad"` | Non-square images: centre them on a transparent square ("pad") or crop the centre ("crop"). |
 | `resample` | lanczos / bicubic / bilinear / hamming / box / nearest |  | `"lanczos"` | Filter used when scaling. |
 
-## 3. Worker shim
+## 5. Worker shim
 
 ```python
 import sashimi
@@ -545,8 +588,8 @@ def run_tool(tool_id, src, dst, params, job):
                               display_name=job.get("filename_clean"))
 ```
 
-What this lets you delete: `video_config`, `audio_config` (§4), `make_sheet` (the sheet family
-takes `animated` itself; `sheets.render` takes either config), `check_sheet_shape` (§6) and
+What this lets you delete: `video_config`, `audio_config` (§6), `make_sheet` (the sheet family
+takes `animated` itself; `sheets.render` takes either config), `check_sheet_shape` (§8) and
 `PATH_OPTIONS` (no config has a path field, so `header_font_path` etc. are already "Unknown
 option"). The worker makes no probe of its own any more.
 
@@ -563,7 +606,7 @@ Notes for the web app:
 - `VIDEO_TRANSFORM.from_params(params, target=...)` lets the explicit `target` win over the
   form's, as `from_params` always does.
 
-## 4. Never encoding past the probed length
+## 6. Never encoding past the probed length
 
 Without `duration_seconds`, WebM/MP4 convert, transform, accurate trims and audio convert now pass
 `-t` = (probed duration − start + `DURATION_TOLERANCE_SECONDS`), capped at 600 / 3600 s; whole
@@ -580,11 +623,19 @@ that up to one extra second is read when the file really is longer than its head
 
 GIF and animated WebP always have a length (10 s by default), so their `-t` is unchanged.
 
-## 5. Errors: what changed
+## 7. Errors
 
 Same classes, same split: show `UserInputError.user_message`, log `ProcessingError`.
 
-New or changed `user_message`s:
+New in 0.6.0:
+
+| Class | When | `user_message` |
+|---|---|---|
+| `InvalidOptionsError` | MP3 `sample_rate` not in `MP3_SAMPLE_RATES`, e.g. 96000 (was `ProcessingError` from ffmpeg) | Invalid value for sample_rate: input should be 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100 or 48000. |
+| `InvalidOptionsError` | M4A `sample_rate` not in `AAC_SAMPLE_RATES`, e.g. 192000 (was `ProcessingError`) | Invalid value for sample_rate: input should be 8000, 11025, …, 88200 or 96000. |
+| `BinaryNotFoundError` (a `ProcessingError`) | ffprobe or ffmpeg missing, or can't be started (was `UnsupportedMediaError` "This file doesn't look like … we can read." for a configured path that didn't work, and a bare `OSError` for one that wasn't executable) | none: log it |
+
+New or changed in 0.5.0:
 
 | Class | When | `user_message` |
 |---|---|---|
@@ -615,7 +666,7 @@ Opus and FLAC, takes `mov_text` and data tracks (e.g. iPhone timecode); WebM tak
 VP8/VP9/AV1, Opus/Vorbis, WebVTT and attachments. Unknown codecs pass for MKV/MP4/MOV (ffmpeg
 decides), so the check never refuses a file that would have worked.
 
-## 6. Contact sheets
+## 8. Contact sheets
 
 - `sheets.render(src, dst, config, *, display_name=None, header_font=None, timestamp_font=None,
   emoji_dir=None, max_workers=None, scratch_dir=None, on_progress=None)` renders either kind.
@@ -634,7 +685,7 @@ decides), so the check never refuses a file that would have worked.
   budget below about 0.065 ("These settings would make the animated sheet too large to render.
   …", `InvalidOptionsError`). Still sheets between your 0.1 floor and 0.037 now render.
 
-## 7. Image memory
+## 9. Image memory
 
 Peak RSS of one `image.convert` in a fresh process inside the worker image (`python:3.14-alpine`,
 Pillow wheels, `--cpus 2`), measured with `wait4`. Input: an RGBA PNG with EXIF orientation 6 (so
@@ -668,33 +719,37 @@ Two things beat the timeouts before memory does: lossless WebP at method 6 takes
 those, cap the pixels for them lower, or the timeout higher. HEIC input wasn't measured
 (out of scope for the worker).
 
-## 8. Measured results (sandbox)
+## 10. Measured results (sandbox)
 
-`sh scripts/sandbox_check.sh` passed: all 25 jobs, under `--network none --read-only
---pids-limit 128 --cpus 2 --memory 1g`, outputs valid, nothing written outside `/vault/output`,
-`/tmp` empty, no network attempts. Image size 262 MB. New jobs: `video-trim-wrong-container`
-(H.264 into WebM → `error.txt` "This video can't be trimmed to WEBM without re-encoding. Try MKV
-instead.", no output) and the sheets now go through `CONTACT_SHEET` + `sheets.render`.
+`sh scripts/sandbox_check.sh --skip-long` passed all 25 of its jobs on 2026-10-19 at 0.6.0 (and
+on the 0.5.1 tree just before the 0.6.0 changes), under `--network none --read-only --pids-limit
+128 --cpus 2 --memory 1g`: outputs valid, nothing written outside `/vault/output`, `/tmp` empty, no
+network attempts. Image size 260 MB. Output sizes matched the 0.5.1 run job for job. The full
+script has a 26th job, the 10-minute animated-sheet budget case (`sheet-animated-long`), which
+`--skip-long` leaves out; it last passed at 0.5.1 (18.5 s, 184 MB, 41 pids) and its code path is
+unchanged. Outside the sandbox, 29 conversions covering every target were hashed before and after
+the 0.6.0 changes and were byte-identical.
 
-| Job | Time | Peak memory | Peak pids |
+| Job (0.6.0, 2026-10-19) | Time | Peak memory | Peak pids |
 |---|---|---|---|
-| Video → GIF (defaults) | 7.7 s | 155 MB | 12 |
-| GIF → WebM | 0.7 s | 89 MB | 11 |
-| WebM, whole 103 s video | 34.8 s | 249 MB | 16 |
-| MP4 at 640 px, whole | 19.4 s | 95 MB | 19 |
-| Video → animated WebP | 4.3 s | 62 MB | 12 |
-| Trim 10 s, copy / accurate | 0.4 / 4.5 s | 46 / 156 MB | 7 / 18 |
-| Rotate 90° (103 s) | 34.9 s | 187 MB | 18 |
-| Still sheet / animated sheet (ref clip) | 13.0 / 16.7 s | 100 / 169 MB | 28 / 41 |
-| Animated sheet, 10 min 1080p, 302 MB | 18.5 s | 184 MB | 41 |
-| Video → MP3; audio → M4A / WAV / OGG / FLAC | 1.7; 5.2 / 3.1 / 5.0 / 0.5 s | ≤ 71 MB | 9 |
-| Images (12 MP JPEG → PNG, HEIC → JPEG, …) | ≤ 0.9 s | ≤ 156 MB | ≤ 8 |
+| Video → GIF (defaults) | 5.0 s | 151 MB | 12 |
+| GIF → WebM | 0.9 s | 89 MB | 11 |
+| WebM, whole 103 s video | 25.1 s | 250 MB | 16 |
+| MP4 at 640 px, whole | 16.1 s | 94 MB | 19 |
+| Video → animated WebP | 2.1 s | 63 MB | 12 |
+| Trim 10 s, copy / accurate | 0.3 / 2.9 s | 46 / 156 MB | 6 / 18 |
+| Trim into the wrong container (`error.txt`) | 0.1 s | 41 MB | 7 |
+| Rotate 90° (103 s) | 34.4 s | 189 MB | 18 |
+| Still sheet / animated sheet (ref clip) | 11.8 / 16.8 s | 101 / 169 MB | 28 / 41 |
+| Video → MP3; audio → M4A / WAV / OGG / FLAC | 1.5; 4.0 / 1.2 / 3.7 / 0.5 s | ≤ 72 MB | 9 |
+| Images (12 MP JPEG → PNG, HEIC → JPEG, …) | ≤ 0.6 s | ≤ 155 MB | ≤ 7 |
 
-Times are about 1.5–1.9× the 0.4.0 hand-back's on every job, including ones whose code and
-commands didn't change (the GIF command is identical, and the still sheet code path too), so the
-host was slower today; compare relative to each other, not to 0.4.0. Memory and pids match 0.4.0.
+Timings vary by about ±30% between runs on this host; compare jobs with each other rather than
+with earlier hand-backs.
 
-## 9. Where I departed from the brief, and why
+## 11. Design decisions from 0.5.0
+
+These answered FileSushi's 0.5.0 release brief (2026-10-12) and still hold.
 
 1. **Entry points are `ConfigFamily` objects, not a pydantic discriminated union.** Trims and
    sheets are picked by two options (`container` + `accurate`, `animated` + `target`), `jpg`/`tif`
@@ -703,29 +758,32 @@ host was slower today; compare relative to each other, not to 0.4.0. Memory and 
    clean messages, and `model_for(...)` for introspection. Plain union aliases cover typing.
 2. **Contact sheets are split by format too** (five models), not just still/animated, because
    the brief's "no model has a field it ignores" also covers `quality` on PNG and GIF sheets.
-   That's the one extra field to drop in `SheetParams` (§3).
+   That's the one extra field to drop in `SheetParams` (§5).
 3. **`image.resize` is gone.** With a required target it was `image.convert`; `IMAGE_RESIZE`
    builds the same models with a size required, replacing your `_needs_a_size` validator.
-4. **A 1 s tolerance on the probed length** (§4).
-5. **Shapes (§6):** no aspect-ratio rule. Tiles under 16 px are refused; very tall videos fall
+4. **A 1 s tolerance on the probed length** (§6).
+5. **Shapes (§8):** no aspect-ratio rule. Tiles under 16 px are refused; very tall videos fall
    to the existing size and frame-memory limits, with their existing messages rather than yours.
 6. **Accurate trims over 10 minutes with a given length are `InvalidOptionsError`** (checked by
    the model) instead of `MediaTooLongError`. Copy trims have no length limit, as before.
 7. **The trim container check is a rule table** built from an ffmpeg 8.1.2 stream-copy matrix
-   (§5), not a dry-run of the muxer: it runs before ffmpeg, as asked, and only refuses
+   (§7), not a dry-run of the muxer: it runs before ffmpeg, as asked, and only refuses
    combinations ffmpeg refused.
 8. **Encoder defaults are passed explicitly** (FLAC `-compression_level 5`, JPEG 4:2:0, WebP
    method 4) so the model defaults are the values used; outputs are byte-identical (checked).
 9. **Limits are ints** (`MAX_GIF_SECONDS = 30`, not `30.0`), so hint text can use them directly.
 10. **The converters don't re-export config classes**: `sashimi.config` is the one import path.
 
-## 10. Python API breaks
+## 12. Python API breaks
 
-All are listed in `CHANGELOG.md` (0.5.0) with upgrade steps in `MIGRATION.md`. In short: the
-0.4 config classes are replaced by per-target models and families; fields that a target ignored
-now raise "Unknown option"; the `effective_*`/`encoder_target` properties, `sheets.contact_sheet`,
-`sheets.animated_sheet`, `image.resize`, `api.make_animated_thumbs*`, the sheet path fields and
-`sashimi.core._params` are gone; `DEFAULT_MAX_PIXELS` and `KEYFRAME_NOTE` moved to
-`sashimi.config`. Additions: `MediaInfo.streams` (`StreamInfo(type, codec)`),
-`video.check_copy_compatible`, `sheets.render`. 0.5.0 also ships the unreleased video → animated
-WebP and accurate trims, which weren't in your 0.4.0 wheel.
+0.6.0 (listed in `CHANGELOG.md`, with upgrade steps in `MIGRATION.md`): the MP3 and M4A
+`sample_rate` fields are `Literal` choices instead of 8000-192000 ranges (§1), and a missing or
+broken ffprobe/ffmpeg raises `BinaryNotFoundError` instead of `UnsupportedMediaError` (§1).
+Added: `MP3_SAMPLE_RATES` and `AAC_SAMPLE_RATES`.
+
+0.5.0: the 0.4 config classes are replaced by per-target models and families; fields that a
+target ignored now raise "Unknown option"; the `effective_*`/`encoder_target` properties,
+`sheets.contact_sheet`, `sheets.animated_sheet`, `image.resize`, `api.make_animated_thumbs*`, the
+sheet path fields and `sashimi.core._params` are gone; `DEFAULT_MAX_PIXELS` and `KEYFRAME_NOTE`
+moved to `sashimi.config`. Additions: `MediaInfo.streams` (`StreamInfo(type, codec)`),
+`video.check_copy_compatible`, `sheets.render`, video → animated WebP and accurate trims.

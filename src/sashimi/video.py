@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Video conversion (GIF, animated WebP, WebM, MP4), lossless or frame-accurate trimming, and rotate/flip. Requires ffmpeg on PATH."""
 
 from sashimi.core.video import (

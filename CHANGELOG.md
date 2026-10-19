@@ -3,12 +3,39 @@
 sashimi follows [Semantic Versioning](https://semver.org/). Before 1.0, minor versions may break
 the Python API; every break is listed here. See [MIGRATION.md](MIGRATION.md) for upgrade steps.
 
-## 0.5.1 — unreleased
+## 0.6.0 — unreleased
 
-No breaking changes to the Python API, and no change to any conversion output.
+The first release on PyPI, as **`sashimi-convert`**. Builds labelled 0.5.1 were shared privately
+but never published; 0.6.0 contains all of their changes, listed here too. No conversion output
+changes. The breaking changes are validation and error types; [MIGRATION.md](MIGRATION.md) shows
+what to change.
+
+### Breaking
+
+- **MP3 and M4A sample rates are limited to what the encoders accept.** `Mp3AudioConfig.sample_rate`
+  takes 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100 or 48000 (LAME's rates), and
+  `M4aAudioConfig.sample_rate` takes those plus 64000, 88200 and 96000 (the AAC encoder's), where
+  both took any integer from 8000 to 192000. Any other rate, such as 96000 for MP3, now raises
+  `InvalidOptionsError` in `from_params` ("Invalid value for sample_rate: input should be 8000,
+  11025, … or 48000."), instead of passing validation and failing in ffmpeg with
+  `ProcessingError`. Every rate still accepted encodes exactly as before. The fields are integer
+  `Literal`s, so `model_json_schema()` lists them as an `enum`, and their `model_fields` metadata
+  no longer carries `Ge`/`Le` bounds. WAV and FLAC still take 8000-192000, and OGG the Opus rates.
+- **A missing or broken ffprobe is no longer reported as unreadable media.** `sashimi.probe()`,
+  and everything that probes first (`video.convert`, `video.trim`, `video.transform`,
+  `audio.convert`, `sheets.render`, the batch API), raised `UnsupportedMediaError` ("This file
+  doesn't look like media we can read.") when the configured ffprobe couldn't be run. They now
+  raise `BinaryNotFoundError`, a `ProcessingError`, so batch results report "Failed: Cannot run
+  …" instead of skipping the file.
 
 ### Added
 
+- `MP3_SAMPLE_RATES` and `AAC_SAMPLE_RATES` in `sashimi.config`, next to `OPUS_SAMPLE_RATES`.
+- Tests that pin what FileSushi relies on (`tests/core/test_filesushi_contract.py`): `ConfigFamily.key`,
+  `model_for` ignoring non-discriminating options, an `annotated_types.Le` in `model_fields` for
+  every number with an upper bound, the `KEYFRAME_NOTE` text, and the `UserInputError(user_message,
+  detail=…)` constructor of every user error. A real-ffmpeg test encodes every accepted MP3, AAC and
+  Opus sample rate.
 - Every config field has a description, available as `model_fields[name].description` and in
   `model_json_schema()` (the docstrings under each field, via pydantic's
   `use_attribute_docstrings`).
@@ -24,6 +51,23 @@ No breaking changes to the Python API, and no change to any conversion output.
 
 ### Changed
 
+- Package metadata uses PEP 639: `License-Expression: Apache-2.0`, with `LICENSE` and `AUTHORS` as
+  licence files, and no licence classifier. Building needs hatchling 1.27 or later, and the
+  wheel and sdist are written as core metadata 2.4 whichever hatchling builds them.
+- Copyright is held by the FileSushi Authors, listed in `AUTHORS`; every source file starts with
+  an SPDX copyright and licence header, which `tests/test_licensing.py` enforces.
+- The package's author is "The FileSushi Authors <admin@filesushi.com>", and its project URLs
+  (homepage, repository, changelog, issues) point at `github.com/filesushi/sashimi`.
+- The sdist leaves out `CLAUDE.md` and `docs/FILESUSHI_HANDBACK.md`; the wheel already did.
+- The MP3 and M4A `sample_rate` descriptions say what leaving it unset does: the source's rate if
+  the encoder supports it, otherwise the nearest one it does.
+- `BinaryNotFoundError` is also raised when ffmpeg or ffprobe exists but can't be started (for
+  example, a path to a file that isn't executable), which used to escape as a bare `OSError`.
+- `ConfigFamily` documents `key` (the discriminating option's name) and that `model_for` ignores
+  options that don't pick the model.
+- `scripts/check.sh` changes nothing: it runs `ruff format --check`, uses the locked dependencies
+  without re-locking (`uv run --frozen`), and gives each Python version its own environment under
+  `.venvs/`, leaving `.venv` and `uv.lock` alone. It also lints `scripts/`.
 - The CLI no longer writes `~/.sashimi/sashimi.toml` on first use. Only `sashimi config set`
   creates a settings file, holding just the values you set. The old full template pinned
   that version's defaults, so later changes to built-in defaults never reached you. Existing
@@ -38,6 +82,8 @@ No breaking changes to the Python API, and no change to any conversion output.
   config models by `tests/cli/test_help_defaults.py`, and the options that lacked one
   (`--subsampling`, `--start`, `--duration`, `--height`, the thumbs colours and fonts) have one.
 - `resize --help` no longer mentions animated WebP or video widths.
+- A contact sheet whose ffmpeg can't be run raises `BinaryNotFoundError`, instead of
+  `UnsupportedMediaError` ("We couldn't read any frames from this video.").
 
 ## 0.5.0 — 2026-10-12
 
@@ -148,8 +194,9 @@ only pydantic. Every break is listed below; [MIGRATION.md](MIGRATION.md) shows t
 ## 0.4.0 — 2026-10-09
 
 sashimi is now a three-layer library: a single-file **core** for embedding in apps and servers,
-the **batch API** (`sashimi.api`) on top of it, and the **CLI** on top of that. It is published as
-**`sashimi-convert`** on PyPI (the name `sashimi` was taken); the import name is still `sashimi`.
+the **batch API** (`sashimi.api`) on top of it, and the **CLI** on top of that. Its distribution
+name is **`sashimi-convert`** (the name `sashimi` is taken on PyPI); the import name is still
+`sashimi`. 0.4.0 wasn't published on PyPI; the first release there is 0.6.0.
 
 ### Added
 

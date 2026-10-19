@@ -1,5 +1,8 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
@@ -8,10 +11,9 @@ dynamic = ["version"]
 description = "File conversion and video contact sheets for apps and servers: explicit paths, atomic writes, typed errors, no network."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
-authors = [
-    { name = "Rio Achuzia", email = "rio@dorsalhub.com" }
-]
+license = "Apache-2.0"
+license-files = ["LICENSE", "AUTHORS"]
+authors = [{ name = "The FileSushi Authors", email = "admin@filesushi.com" }]
 keywords = ["ffmpeg", "video", "image", "audio", "conversion", "contact-sheet", "thumbnails"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -20,7 +22,6 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Topic :: Multimedia :: Video :: Conversion",
     "Topic :: Multimedia :: Graphics :: Graphics Conversion",
@@ -42,8 +43,10 @@ emoji = ["pilmoji"]
 heif = ["pillow-heif>=0.18"]
 
 [project.urls]
-"Homepage" = "https://github.com/dorsalhub/sashimi"
-"Repository" = "https://github.com/dorsalhub/sashimi"
+"Homepage" = "https://github.com/filesushi/sashimi"
+"Repository" = "https://github.com/filesushi/sashimi"
+"Changelog" = "https://github.com/filesushi/sashimi/blob/main/CHANGELOG.md"
+"Issues" = "https://github.com/filesushi/sashimi/issues"
 
 [project.scripts]
 sashimi = "sashimi.cli:main"
@@ -53,6 +56,11 @@ path = "src/sashimi/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sashimi"]
+core-metadata-version = "2.4"
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/CLAUDE.md", "/docs/FILESUSHI_HANDBACK.md"]
+core-metadata-version = "2.4"
 
 [tool.pytest.ini_options]
 log_cli = true

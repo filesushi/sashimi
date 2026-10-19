@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Batch API: file discovery, extension filters, outputs written next to inputs, progress and
 summaries, built on the single-file core (:mod:`sashimi.video`, :mod:`sashimi.image`,

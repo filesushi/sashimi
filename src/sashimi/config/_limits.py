@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 MAX_GIF_SECONDS = 30
 """Longest GIF or animated WebP made from a video, in seconds."""
 DEFAULT_GIF_SECONDS = 10
@@ -25,6 +28,10 @@ MAX_FRAME_BYTES = 400 * 1024 * 1024
 MIN_TILE_SIZE = 16
 """Smallest contact sheet tile, in pixels on either side; layouts that need smaller tiles are refused."""
 
+MP3_SAMPLE_RATES = (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000)
+"""The sample rates the MP3 encoder (LAME) accepts, in Hz."""
+AAC_SAMPLE_RATES = (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200, 96000)
+"""The sample rates the AAC encoder (M4A output) accepts, in Hz."""
 OPUS_SAMPLE_RATES = (8000, 12000, 16000, 24000, 48000)
 """The sample rates the Opus encoder accepts, in Hz."""
 

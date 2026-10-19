@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Content-based media probing with ffprobe."""
 
 import json
@@ -14,7 +17,7 @@ from sashimi.core._ffmpeg import (
     file_arg,
     run_ffmpeg,
 )
-from sashimi.errors import ProcessingError, UnsupportedMediaError
+from sashimi.errors import BinaryNotFoundError, ProcessingError, UnsupportedMediaError
 
 __all__ = ["MediaInfo", "StreamInfo", "probe", "VIDEO_CONTAINERS", "AUDIO_CONTAINERS"]
 
@@ -144,7 +147,8 @@ def probe(input_path: str | os.PathLike[str]) -> MediaInfo:
     """
     Inspects a file's content with ffprobe. The file name and extension are ignored.
 
-    Raises UnsupportedMediaError if ffprobe can't read the file as media.
+    Raises UnsupportedMediaError if ffprobe can't read the file as media, and
+    BinaryNotFoundError if ffprobe itself is missing or can't be run.
     """
     cmd = [
         ffprobe_binary(),
@@ -161,6 +165,8 @@ def probe(input_path: str | os.PathLike[str]) -> MediaInfo:
     try:
         output = run_ffmpeg(cmd, capture_stdout=True)
         data = json.loads(output or b"{}")
+    except BinaryNotFoundError:
+        raise
     except ProcessingError as e:
         raise UnsupportedMediaError("This file doesn't look like media we can read.", detail=str(e)) from e
     except ValueError as e:

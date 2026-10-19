@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Batch conversion of images, videos and audio, routed by each file's kind and the target format."""
 
 import pathlib

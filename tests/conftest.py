@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Shared fixtures. Media is generated at test time with ffmpeg's lavfi sources (testsrc2, sine),
 so no media files are committed. Inputs are named ``original.blob`` like FileSushi's, to prove

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Annotated, ClassVar, Literal
@@ -30,6 +33,8 @@ class Mp3AudioConfig(_AudioBase):
     """The output format."""
     bitrate_kbps: _Bitrate = 192
     """Bitrate in kb/s."""
+    sample_rate: Annotated[Literal[8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000], FormInt] | None = None
+    """Output sample rate in Hz. ``None`` keeps the source's if MP3 supports it, and otherwise uses the nearest rate it does."""
 
 
 class M4aAudioConfig(_AudioBase):
@@ -39,6 +44,11 @@ class M4aAudioConfig(_AudioBase):
     """The output format."""
     bitrate_kbps: _Bitrate = 160
     """Bitrate in kb/s."""
+    sample_rate: (
+        Annotated[Literal[8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200, 96000], FormInt]
+        | None
+    ) = None
+    """Output sample rate in Hz. ``None`` keeps the source's if AAC supports it, and otherwise uses the nearest rate it does."""
 
 
 class OggAudioConfig(_AudioBase):

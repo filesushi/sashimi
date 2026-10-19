@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """`sashimi config`: view and change the CLI's TOML defaults."""
 
 from __future__ import annotations

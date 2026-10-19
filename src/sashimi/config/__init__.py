@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Every config model, limit and user-facing constant, importable without Pillow or ffmpeg.
 
@@ -50,6 +53,7 @@ from sashimi.config._image import (
     WebpResizeConfig,
 )
 from sashimi.config._limits import (
+    AAC_SAMPLE_RATES,
     DEFAULT_GIF_SECONDS,
     DEFAULT_MAX_PIXELS,
     DURATION_TOLERANCE_SECONDS,
@@ -61,6 +65,7 @@ from sashimi.config._limits import (
     MAX_SHEET_PIXELS,
     MAX_VIDEO_SECONDS,
     MIN_TILE_SIZE,
+    MP3_SAMPLE_RATES,
     OPUS_SAMPLE_RATES,
 )
 from sashimi.config._sheets import (
@@ -161,6 +166,8 @@ __all__ = [
     "MAX_SHEET_PIXELS",
     "MAX_FRAME_BYTES",
     "MIN_TILE_SIZE",
+    "MP3_SAMPLE_RATES",
+    "AAC_SAMPLE_RATES",
     "OPUS_SAMPLE_RATES",
     "KEYFRAME_NOTE",
 ]

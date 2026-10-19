@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Real ffmpeg runs on generated media. Inputs are named original.blob; outputs have no meaningful suffix."""
 
 import hashlib
@@ -8,7 +11,10 @@ from PIL import Image
 
 from sashimi import audio, probe, video
 from sashimi.config import (
+    AAC_SAMPLE_RATES,
     AUDIO_CONVERT,
+    MP3_SAMPLE_RATES,
+    OPUS_SAMPLE_RATES,
     VIDEO_CONVERT,
     VIDEO_TRIM,
     CopyTrimConfig,
@@ -180,6 +186,24 @@ def test_audio_from_video(video_blob, tmp_path, target, codec):
     info = probe(out)
     assert info.audio_codec == codec and not info.has_video
     assert info.duration == pytest.approx(2.0, abs=0.1)
+
+
+@pytest.mark.parametrize(
+    "target, rates", [("mp3", MP3_SAMPLE_RATES), ("m4a", AAC_SAMPLE_RATES), ("ogg", OPUS_SAMPLE_RATES)]
+)
+def test_every_accepted_sample_rate_encodes(video_blob, tmp_path, target, rates):
+    for rate in rates:
+        out = tmp_path / f"result-{rate}"
+        config = AUDIO_CONVERT.from_params({"sample_rate": rate, "duration_seconds": 0.5}, target=target)
+        audio.convert(video_blob, out, config, max_workers=1)
+        if target != "ogg":
+            written = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "stream=sample_rate", "-of", "csv=p=0", str(out)],
+                capture_output=True,
+                check=True,
+                text=True,
+            ).stdout
+            assert int(written) == rate
 
 
 def test_audio_to_audio_mono_ignores_cover_art(audio_blob, tmp_path):
