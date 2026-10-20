@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Every config model, limit and user-facing constant, importable without Pillow or ffmpeg.
+Every config model, the limits, and every user-facing constant, importable without Pillow or ffmpeg.
 
 This module needs only pydantic, so a web app can validate a form against the exact models the
 converters use, and read their defaults and bounds, without installing anything else.
+
+Field bounds are format and codec limits (a crf of 0-51, a quality of 0-100); the limits a caller
+chooses (lengths, pixels, memory) are :class:`Limits`, passed to the converters as ``limits=``.
 
 There is one model per operation and output format, holding only the options that affect that
 output, each with the default actually used. ``None`` is a default only where it means "keep the
@@ -31,7 +34,17 @@ from sashimi.config._audio import (
     OggAudioConfig,
     WavAudioConfig,
 )
-from sashimi.config._base import RGB, RGBA, ConfigFamily, Flip, ParamsModel, Rotation, parse_color
+from sashimi.config._base import (
+    METADATA_MODES,
+    RGB,
+    RGBA,
+    ConfigFamily,
+    Flip,
+    MetadataMode,
+    ParamsModel,
+    Rotation,
+    parse_color,
+)
 from sashimi.config._image import (
     EDIT_QUALITY,
     FAVICON_PNG_SIZES,
@@ -74,19 +87,18 @@ from sashimi.config._limits import (
     DEFAULT_GIF_SECONDS,
     DEFAULT_MAX_PIXELS,
     DURATION_TOLERANCE_SECONDS,
+    FLAC_MAX_SAMPLE_RATE,
+    GIF_MAX_SIDE,
+    JPEG_MAX_SIDE,
     KEYFRAME_NOTE,
-    MAX_ANIMATION_BYTES,
-    MAX_AUDIO_SECONDS,
-    MAX_FRAME_BYTES,
-    MAX_GIF_SECONDS,
-    MAX_PREVIEW_SAMPLES,
-    MAX_SHEET_HEIGHT,
-    MAX_SHEET_PIXELS,
-    MAX_VIDEO_SECONDS,
+    MAX_ANIMATION_FPS,
     MIN_FRAME_MS,
     MIN_TILE_SIZE,
     MP3_SAMPLE_RATES,
+    OPUS_MAX_KBPS_PER_CHANNEL,
     OPUS_SAMPLE_RATES,
+    WEBP_MAX_SIDE,
+    Limits,
 )
 from sashimi.config._sheets import (
     CONTACT_SHEET,
@@ -204,22 +216,23 @@ __all__ = [
     "AnimatedWebpSheetConfig",
     "AnimatedGifSheetConfig",
     "GridValue",
-    "MAX_GIF_SECONDS",
+    "Limits",
     "DEFAULT_GIF_SECONDS",
-    "MAX_PREVIEW_SAMPLES",
-    "MAX_VIDEO_SECONDS",
-    "MAX_AUDIO_SECONDS",
     "DURATION_TOLERANCE_SECONDS",
     "DEFAULT_MAX_PIXELS",
-    "MAX_SHEET_HEIGHT",
-    "MAX_SHEET_PIXELS",
-    "MAX_FRAME_BYTES",
-    "MAX_ANIMATION_BYTES",
+    "WEBP_MAX_SIDE",
+    "JPEG_MAX_SIDE",
+    "GIF_MAX_SIDE",
     "MIN_FRAME_MS",
+    "MAX_ANIMATION_FPS",
     "CROP_ASPECTS",
     "MIN_TILE_SIZE",
     "MP3_SAMPLE_RATES",
     "AAC_SAMPLE_RATES",
     "OPUS_SAMPLE_RATES",
+    "OPUS_MAX_KBPS_PER_CHANNEL",
+    "MetadataMode",
+    "METADATA_MODES",
+    "FLAC_MAX_SAMPLE_RATE",
     "KEYFRAME_NOTE",
 ]

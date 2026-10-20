@@ -11,7 +11,15 @@ import pytest
 from PIL import Image
 
 from sashimi import image
-from sashimi.config import IMAGE_CONVERT, IMAGE_RESIZE, FaviconPackConfig, IcoConfig, JpegImageConfig, PngImageConfig
+from sashimi.config import (
+    IMAGE_CONVERT,
+    IMAGE_RESIZE,
+    FaviconPackConfig,
+    IcoConfig,
+    JpegImageConfig,
+    Limits,
+    PngImageConfig,
+)
 from sashimi.errors import InvalidOptionsError, MediaTooLargeError, UnsupportedMediaError
 
 from tests.conftest import leftovers
@@ -121,9 +129,43 @@ def test_truncated_image_is_a_user_error(tmp_path):
 
 
 def test_oversized_images_are_refused(tmp_path):
-    src = blob(tmp_path, Image.new("RGB", (100, 100)), "PNG")
-    with pytest.raises(MediaTooLargeError):
-        image.convert(src, tmp_path / "r", PngImageConfig(), max_pixels=5000)
+    src = blob(tmp_path, Image.new("RGB", (3000, 2000)), "PNG")
+    with pytest.raises(MediaTooLargeError) as e:
+        image.convert(src, tmp_path / "r", PngImageConfig(), limits=Limits(max_pixels=5_000_000))
+    assert e.value.user_message == (
+        "This image is too large to process: it has 6 megapixels (3000x2000), and the limit is 5."
+    )
+    assert e.value.limit == "max_pixels"
+    for call in (image.to_ico, image.favicon_pack):
+        with pytest.raises(MediaTooLargeError):
+            call(src, tmp_path / "r", limits=Limits(max_pixels=5_000_000))
+    image.convert(src, tmp_path / "r", PngImageConfig(), limits=Limits(max_pixels=None))
+    assert not leftovers(tmp_path)
+
+
+def _gif_header(path, width, height):
+    import struct
+
+    screen = b"GIF89a" + struct.pack("<HHBBB", width, height, 0, 0, 0)
+    path.write_bytes(screen + b"\x2c" + struct.pack("<HHHHB", 0, 0, 1, 1, 0) + b"\x02\x02\x44\x01\x00\x3b")
+    return path
+
+
+def test_limits_above_pillows_own_are_honoured(tmp_path):
+    huge = _gif_header(tmp_path / "huge.gif", 20000, 20000)
+    before = Image.MAX_IMAGE_PIXELS
+    with pytest.raises(MediaTooLargeError) as e:
+        image.frames_info(huge)
+    assert e.value.limit == "max_pixels"
+    assert e.value.user_message == (
+        "This image is too large to process: it has more than 179 megapixels, and the limit is 64."
+    )
+    with pytest.raises(MediaTooLargeError) as e:
+        image.frames_info(huge, limits=Limits(max_pixels=300_000_000))
+    assert "it has 400 megapixels (20000x20000), and the limit is 300." in e.value.user_message
+    assert image.frames_info(huge, limits=Limits(max_pixels=None)).width == 20000
+    assert image.frames_info(huge, limits=Limits(max_pixels=400_000_000)).height == 20000
+    assert Image.MAX_IMAGE_PIXELS == before
 
 
 def test_resize_configs_need_a_size(tmp_path):
@@ -239,7 +281,6 @@ def test_favicon_manifest_and_html_escape_user_text():
     "params, message",
     [
         ({"name": "a\nb"}, "Invalid value for name: must be a single line of text."),
-        ({"name": "x" * 101}, "Invalid value for name: string should have at most 100 characters."),
         ({"ico_sizes": "8,16"}, "Invalid value for ico_sizes: icon sizes must be between 16 and 256 pixels."),
         ({"background_color": "teal"}, "Invalid value for background_color: not a colour: 'teal'."),
     ],
@@ -250,9 +291,44 @@ def test_favicon_pack_options_are_validated(params, message):
     assert e.value.user_message == message
 
 
+def test_favicon_names_have_no_length_limit():
+    assert len(FaviconPackConfig.from_params({"name": "x" * 500, "short_name": "y" * 200}).name) == 500
+
+
 def test_favicon_pack_refuses_non_images(tmp_path):
     src = tmp_path / "original.blob"
     src.write_bytes(b"not an image")
     with pytest.raises(UnsupportedMediaError):
         image.favicon_pack(src, tmp_path / "pack")
     assert not (tmp_path / "pack").exists() and leftovers(tmp_path) == []
+
+
+@pytest.mark.parametrize("target", ["jpeg", "png", "webp", "tiff", "gif", "bmp"])
+@pytest.mark.parametrize("source", ["PNG", "JPEG", "TIFF", "WEBP"])
+def test_keep_icc_false_strips_the_profile_in_every_format(tmp_path, source, target):
+    from PIL import ImageCms
+
+    srgb = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    src = tmp_path / "original.blob"
+    Image.new("RGB", (32, 24), (200, 100, 50)).save(src, source, icc_profile=srgb)
+    model = IMAGE_CONVERT.model_for(target=target)
+    stripped = tmp_path / "stripped"
+    kept = tmp_path / "kept"
+    has_option = "keep_icc" in model.model_fields
+    image.convert(src, stripped, model(**({"keep_icc": False} if has_option else {})))
+    image.convert(src, kept, model())
+    with Image.open(stripped) as out:
+        assert not out.info.get("icc_profile"), target
+    with Image.open(kept) as out:
+        assert out.info.get("icc_profile") == (srgb if has_option else None), target
+
+
+@pytest.mark.parametrize("target", ["jpeg", "png", "webp", "tiff"])
+def test_a_cmyk_profile_stays_only_on_cmyk_output(tmp_path, target):
+    src = tmp_path / "original.blob"
+    profile = b"cmyk-profile" * 20
+    Image.new("CMYK", (16, 16), (10, 20, 30, 40)).save(src, "JPEG", icc_profile=profile)
+    image.convert(src, tmp_path / "out", IMAGE_CONVERT.from_params({}, target=target))
+    with Image.open(tmp_path / "out") as out:
+        assert out.info.get("icc_profile") == (profile if out.mode == "CMYK" else None)
+        assert (out.mode == "CMYK") is (target == "tiff")

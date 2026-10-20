@@ -7,7 +7,9 @@ import contextlib
 import html
 import io
 import json
+import logging
 import os
+import threading
 import warnings
 import zipfile
 from collections.abc import Iterator
@@ -17,7 +19,6 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from sashimi.config._image import _BmpSave, _GifSave, _JpegSave, _PngSave, _TiffSave, _WebpSave
 from sashimi.config import (
-    DEFAULT_MAX_PIXELS,
     FAVICON_PNG_SIZES,
     BmpImageConfig,
     FaviconPackConfig,
@@ -25,16 +26,30 @@ from sashimi.config import (
     IcoConfig,
     ImageConvertConfig,
     JpegImageConfig,
+    Limits,
     PngImageConfig,
     Resample,
     TiffImageConfig,
     WebpImageConfig,
 )
+from sashimi.config._base import SourceMetadata
+from sashimi.config._limits import megapixels, resolve_limits
 from sashimi.core._atomic import PathLike, atomic_output
+from sashimi.core._imagemeta import (
+    Carriers,
+    add_tiff_groups,
+    apply_mode,
+    clean_info,
+    read_carriers,
+    save_arguments,
+    tiff_groups,
+)
 from sashimi.core._ffmpeg import ProgressCallback
 from sashimi.errors import MediaTooLargeError, ProcessingError, UnsupportedMediaError
 
-__all__ = ["convert", "to_ico", "favicon_pack", "heif_available"]
+__all__ = ["convert", "to_ico", "favicon_pack", "heif_available", "to_srgb"]
+
+logger = logging.getLogger("sashimi")
 
 NOT_AN_IMAGE = "This file isn't an image we can convert."
 DAMAGED_IMAGE = "This image file is damaged or incomplete."
@@ -71,27 +86,69 @@ _RESAMPLE = {
 _TIFF_COMPRESSION = {"none": None, "lzw": "tiff_lzw", "deflate": "tiff_adobe_deflate", "jpeg": "jpeg"}
 
 
+_PILLOW_LIMIT = threading.Lock()
+
+
 @contextlib.contextmanager
-def _open_image(input_path: PathLike, max_pixels: int, *, load: bool = True) -> Iterator[Image.Image]:
+def _pillow_allows(max_pixels: int | None) -> Iterator[None]:
     """
-    Opens an image by content, refusing unsupported formats and oversized images. The first frame
-    is decoded unless `load` is False.
+    Lets ``Image.open`` read images of up to `max_pixels` pixels (``None``: any size). Pillow
+    refuses images over twice ``PIL.Image.MAX_IMAGE_PIXELS`` (about 179 MP) on its own; when
+    `max_pixels` is above that, its limit is raised for the call, under a lock, and restored.
+    """
+    current = Image.MAX_IMAGE_PIXELS
+    if current is None or (max_pixels is not None and max_pixels <= 2 * current):
+        yield
+        return
+    with _PILLOW_LIMIT:
+        saved = Image.MAX_IMAGE_PIXELS
+        Image.MAX_IMAGE_PIXELS = None
+        try:
+            yield
+        finally:
+            Image.MAX_IMAGE_PIXELS = saved
+
+
+def too_large_image(width: int, height: int, limit: int) -> MediaTooLargeError:
+    """The refusal of an image over ``Limits.max_pixels``."""
+    return MediaTooLargeError(
+        f"This image is too large to process: it has {megapixels(width * height)} megapixels ({width}x{height}), "
+        f"and the limit is {megapixels(limit)}.",
+        detail=f"{width}x{height}",
+        limit="max_pixels",
+    )
+
+
+@contextlib.contextmanager
+def _open_image(input_path: PathLike, limits: Limits | None, *, load: bool = True) -> Iterator[Image.Image]:
+    """
+    Opens an image by content, refusing unsupported formats and images over ``limits.max_pixels``.
+    The first frame is decoded unless `load` is False.
     """
     if "HEIF" in _INPUT_FORMATS:
         heif_available()
+    max_pixels = resolve_limits(limits).max_pixels
+    pillow_limit = Image.MAX_IMAGE_PIXELS
     try:
-        with warnings.catch_warnings():
+        with warnings.catch_warnings(), _pillow_allows(max_pixels):
             warnings.simplefilter("ignore", Image.DecompressionBombWarning)
             img = Image.open(os.fspath(input_path))
     except Image.DecompressionBombError as e:
-        raise MediaTooLargeError(TOO_LARGE_IMAGE, detail=str(e)) from e
+        if max_pixels is None or pillow_limit is None:
+            raise MediaTooLargeError(TOO_LARGE_IMAGE, detail=str(e)) from e
+        raise MediaTooLargeError(
+            f"This image is too large to process: it has more than {megapixels(2 * pillow_limit)} megapixels, "
+            f"and the limit is {megapixels(max_pixels)}.",
+            detail=str(e),
+            limit="max_pixels",
+        ) from e
     except (UnidentifiedImageError, OSError) as e:
         raise UnsupportedMediaError(NOT_AN_IMAGE, detail=str(e)) from e
     with img:
         if img.format not in _INPUT_FORMATS:
             raise UnsupportedMediaError(NOT_AN_IMAGE, detail=f"Pillow format {img.format}")
-        if img.width * img.height > max_pixels:
-            raise MediaTooLargeError(TOO_LARGE_IMAGE, detail=f"{img.width}x{img.height}")
+        if max_pixels is not None and img.width * img.height > max_pixels:
+            raise too_large_image(img.width, img.height, max_pixels)
         if load:
             try:
                 img.load()
@@ -126,28 +183,38 @@ def _fit(img: Image.Image, max_width: int | None, max_height: int | None, resamp
     return img.resize(size, _RESAMPLE[resample])
 
 
-def _render(img: Image.Image, config: ImageConvertConfig) -> tuple[Image.Image, dict[str, Any]]:
-    """Returns the image converted for `config.target` and the save() keyword arguments."""
+def _render(
+    img: Image.Image, config: ImageConvertConfig, carriers: Carriers | None = None
+) -> tuple[Image.Image, dict[str, Any], dict[int, dict[int, Any]]]:
+    """
+    Returns the image converted for `config.target`, the save() keyword arguments, and the EXIF
+    directories to add to a TIFF afterwards.
+    """
     metadata = (
         config if isinstance(config, (JpegImageConfig, PngImageConfig, WebpImageConfig, TiffImageConfig)) else None
     )
-    icc = img.info.get("icc_profile") if metadata and metadata.keep_icc and img.mode != "CMYK" else None
+    icc = img.info.get("icc_profile") if metadata and metadata.keep_icc else None
+    cmyk_source = img.mode == "CMYK"
+    turned = config.auto_orient and img.getexif().get(0x0112, 1) not in (None, 1)
     if config.auto_orient:
         img = ImageOps.exif_transpose(img)
-    exif = img.getexif() if metadata and metadata.keep_exif else None
     img = _fit(img, config.max_width, config.max_height, config.resample)
 
     flatten = isinstance(config, (JpegImageConfig, BmpImageConfig)) or not config.preserve_transparency
     if _has_alpha(img) and flatten:
         img = _flatten(img, config.background_color)
     img, kwargs = encode_for(img, config, config.background_color)
-    if isinstance(config, WebpImageConfig):
-        kwargs["optimize"] = config.optimize
-    if icc:
-        kwargs["icc_profile"] = icc
-    if exif is not None and len(exif):
-        kwargs["exif"] = exif
-    return img, kwargs
+    if metadata is not None:
+        kwargs["icc_profile"] = None if cmyk_source and img.mode != "CMYK" else icc
+    groups: dict[int, dict[int, Any]] = {}
+    if isinstance(config, SourceMetadata):
+        kept = apply_mode(
+            carriers or Carriers(), config.metadata, upright=config.auto_orient, edited=turned, size=img.size
+        )
+        kwargs.update(save_arguments(kept, _PIL_FORMAT[config.target]))
+        if config.target == "tiff":
+            groups = tiff_groups(kept)
+    return clean_info(img), kwargs, groups
 
 
 SaveConfig = _JpegSave | _PngSave | _WebpSave | _GifSave | _BmpSave | _TiffSave
@@ -192,10 +259,17 @@ def encode_for(
 
 
 def _save(
-    img: Image.Image, output_path: PathLike, pil_format: str, kwargs: dict[str, Any], scratch_dir: PathLike | None
+    img: Image.Image,
+    output_path: PathLike,
+    pil_format: str,
+    kwargs: dict[str, Any],
+    scratch_dir: PathLike | None,
+    groups: dict[int, dict[int, Any]] | None = None,
 ) -> None:
     with atomic_output(output_path, scratch_dir) as temp:
         img.save(temp, format=pil_format, **kwargs)
+        if groups:
+            add_tiff_groups(temp, groups)
 
 
 def convert(
@@ -204,7 +278,7 @@ def convert(
     config: ImageConvertConfig,
     *,
     scratch_dir: PathLike | None = None,
-    max_pixels: int = DEFAULT_MAX_PIXELS,
+    limits: Limits | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> None:
     """
@@ -212,21 +286,55 @@ def convert(
     says (see :data:`~sashimi.config.IMAGE_CONVERT` and :data:`~sashimi.config.IMAGE_RESIZE`).
 
     Accepts PNG, JPEG, WebP, BMP, TIFF, the first frame of a GIF, and HEIC/HEIF when
-    ``pillow-heif`` is installed. The input type is detected from content. EXIF metadata is
-    dropped unless ``keep_exif``; the colour profile is kept unless ``keep_icc=False``.
-    Images with more than `max_pixels` pixels raise MediaTooLargeError.
+    ``pillow-heif`` is installed. The input type is detected from content. The source's
+    metadata (EXIF, XMP, IPTC, comments, PNG text) is kept, as far as the output format can hold
+    it, unless ``metadata`` says to remove location data or all of it; when the orientation is
+    applied, the orientation tag is reset to 1. The colour profile is kept unless
+    ``keep_icc=False`` (a CMYK profile is dropped when the output is RGB). BMP outputs hold no
+    metadata. Images with more than ``limits.max_pixels`` pixels raise MediaTooLargeError.
     """
     pil_format = _PIL_FORMAT[config.target]
-    with _open_image(input_path, max_pixels) as img:
-        rendered, kwargs = _render(img, config)
-        _save(rendered, output_path, pil_format, kwargs, scratch_dir)
+    with _open_image(input_path, limits) as img:
+        carriers = read_carriers(input_path, img) if isinstance(config, SourceMetadata) else Carriers()
+        rendered, kwargs, groups = _render(img, config, carriers)
+        _save(rendered, output_path, pil_format, kwargs, scratch_dir, groups)
     if on_progress:
         on_progress(1.0, "done")
 
 
+def to_srgb(img: Image.Image) -> Image.Image:
+    """
+    The image's colours converted from its colour profile to sRGB, as RGB or RGBA (carrying no
+    profile), or the image as it is when it has no profile or the profile can't be used.
+    """
+    icc = img.info.get("icc_profile")
+    if not icc:
+        return img
+    alpha = img.convert("RGBA").getchannel("A") if _has_alpha(img) else None
+    base = img if img.mode in ("RGB", "CMYK", "L") else img.convert("RGB")
+    try:
+        from PIL import ImageCms
+
+        source = ImageCms.ImageCmsProfile(io.BytesIO(icc))
+        converted = ImageCms.profileToProfile(base, source, ImageCms.createProfile("sRGB"), outputMode="RGB")
+    except Exception as e:  # noqa: BLE001
+        logger.info(f"Kept the colours as they are: the colour profile can't be used ({e})")
+        return img
+    if converted is None:
+        return img
+    if alpha is not None:
+        converted.putalpha(alpha)
+    converted.info = {}
+    return converted
+
+
 def _square(img: Image.Image, fit: str) -> Image.Image:
-    """The image upright, in RGBA, padded (transparent) or cropped to a centred square."""
-    oriented = ImageOps.exif_transpose(img).convert("RGBA")
+    """
+    The image upright, in sRGB and RGBA, padded (transparent) or cropped to a centred square,
+    carrying none of the source's metadata or colour profile.
+    """
+    oriented = to_srgb(ImageOps.exif_transpose(img)).convert("RGBA")
+    oriented.info = {}
     if fit == "crop":
         edge = min(oriented.size)
         left, top = (oriented.width - edge) // 2, (oriented.height - edge) // 2
@@ -253,16 +361,19 @@ def to_ico(
     config: IcoConfig | None = None,
     *,
     scratch_dir: PathLike | None = None,
-    max_pixels: int = DEFAULT_MAX_PIXELS,
+    limits: Limits | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> None:
     """
     Makes a multi-size .ico (favicon). Non-square images are padded or cropped to a square (see
     ``IcoConfig.fit``); small images are scaled up to the largest size, since icons need fixed
     sizes. Transparent areas stay transparent unless ``IcoConfig.background_color`` is set.
+    Colours are converted to sRGB from the image's colour profile, if it has one, and the icon
+    carries no profile or metadata (browsers treat icons as sRGB). Images with more than
+    ``limits.max_pixels`` pixels raise MediaTooLargeError.
     """
     config = config or IcoConfig()
-    with _open_image(input_path, max_pixels) as img:
+    with _open_image(input_path, limits) as img:
         square = _square(img, config.fit)
         if config.background_color is not None:
             square = _filled(square, config.background_color)
@@ -338,7 +449,7 @@ def favicon_pack(
     config: FaviconPackConfig | None = None,
     *,
     scratch_dir: PathLike | None = None,
-    max_pixels: int = DEFAULT_MAX_PIXELS,
+    limits: Limits | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> None:
     """
@@ -349,12 +460,14 @@ def favicon_pack(
     so the files belong next to the pages that use them (or adjust the paths).
 
     The image is padded or cropped to a square as ``fit`` says and scaled to each size, up if
-    needed. The zip's entries, order and timestamps are fixed, so the same input and config give
-    the same bytes. Written atomically.
+    needed. Colours are converted to sRGB from the image's colour profile, if it has one, and no
+    icon carries a profile or the source's metadata. The zip's entries, order and timestamps are
+    fixed, so the same input and config give the same bytes. Images with more than
+    ``limits.max_pixels`` pixels raise MediaTooLargeError. Written atomically.
     """
     config = config or FaviconPackConfig()
     entries: list[tuple[str, bytes]] = []
-    with _open_image(input_path, max_pixels) as img:
+    with _open_image(input_path, limits) as img:
         square = _square(img, config.fit)
         buffer = io.BytesIO()
         _ico_base(square, config.ico_sizes, config.resample).save(

@@ -6,6 +6,7 @@ sashimi: file conversion and video contact sheets, built on FFmpeg and Pillow.
 
 Public modules: :mod:`sashimi.config` (every config model and limit; needs only pydantic),
 :mod:`sashimi.video`, :mod:`sashimi.image`, :mod:`sashimi.audio`, :mod:`sashimi.sheets`,
+:mod:`sashimi.metadata`,
 :mod:`sashimi.errors`, and the batch helpers in :mod:`sashimi.api`.
 Submodules load on first use, so ``import sashimi`` stays cheap.
 """
@@ -16,12 +17,12 @@ from typing import TYPE_CHECKING, Any
 from sashimi._version import __version__
 
 if TYPE_CHECKING:
-    from sashimi import api, audio, config, errors, image, sheets, video
+    from sashimi import api, audio, config, errors, image, metadata, sheets, video
     from sashimi.core._ffmpeg import set_ffmpeg_paths
     from sashimi.core.probe import MediaInfo, StreamInfo, probe
     from sashimi.errors import ProcessingError, SashimiError, UserInputError
 
-_SUBMODULES = {"api", "audio", "config", "errors", "image", "sheets", "video"}
+_SUBMODULES = {"api", "audio", "config", "errors", "image", "metadata", "sheets", "video"}
 _ATTRIBUTES = {
     "probe": "sashimi.core.probe",
     "MediaInfo": "sashimi.core.probe",

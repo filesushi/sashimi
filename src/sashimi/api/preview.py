@@ -6,7 +6,7 @@ from typing import Any
 
 from sashimi.api._batch import VIDEO_EXTENSIONS, FileProgress, PathInput, YieldType, output_name, run_batch
 from sashimi.api._consume import consume_generator
-from sashimi.config import PreviewConfig, WebpPreviewConfig
+from sashimi.config import Limits, PreviewConfig, WebpPreviewConfig
 from sashimi.core.preview import preview
 
 __all__ = ["make_previews", "make_previews_generator"]
@@ -24,6 +24,7 @@ def make_previews_generator(
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
     dry_run: bool = False,
+    limits: Limits | None = None,
 ) -> Iterator[YieldType]:
     """
     A preview (see :func:`sashimi.video.preview`) of every video found, an animated WebP by
@@ -37,7 +38,9 @@ def make_previews_generator(
         recursive=recursive,
         force=force,
         name_for=lambda _, stem: output_name(stem, chosen.target, "preview"),
-        process=lambda src, dst, progress: preview(src, dst, chosen, max_workers=max_workers, on_progress=progress),
+        process=lambda src, dst, progress: preview(
+            src, dst, chosen, max_workers=max_workers, limits=limits, on_progress=progress
+        ),
         success_message="Preview created: {name}",
         on_file_progress=on_file_progress,
         output=output,

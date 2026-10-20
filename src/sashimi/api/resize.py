@@ -8,7 +8,7 @@ from typing import Any
 from sashimi.api._batch import IMAGE_EXTENSIONS, FileProgress, PathInput, YieldType, output_name, run_batch
 from sashimi.api._consume import consume_generator
 from sashimi.api.convert import _SAME_FORMAT, TARGET_SUFFIX
-from sashimi.config import ImageResizeConfig
+from sashimi.config import ImageResizeConfig, Limits
 from sashimi.core.image import convert
 
 __all__ = ["resize_images", "resize_images_generator", "source_target"]
@@ -43,6 +43,7 @@ def resize_images_generator(
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
     dry_run: bool = False,
+    limits: Limits | None = None,
 ) -> Iterator[YieldType]:
     """
     Shrinks every image found, writing ``<stem>.resized.<ext>`` next to it, under `output_dir`, or
@@ -69,7 +70,7 @@ def resize_images_generator(
         recursive=recursive,
         force=force,
         name_for=name_for,
-        process=lambda src, dst, progress: convert(src, dst, config_for(src), on_progress=progress),
+        process=lambda src, dst, progress: convert(src, dst, config_for(src), limits=limits, on_progress=progress),
         success_message="Resized to {name}",
         on_file_progress=on_file_progress,
         output=output,

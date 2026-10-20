@@ -9,7 +9,7 @@ from typing import Annotated, Optional
 import typer
 
 from sashimi._version import __version__
-from sashimi.cli import config_cmd, convert_cmd, edit_cmd, files_cmd, thumbs_cmd
+from sashimi.cli import config_cmd, convert_cmd, edit_cmd, files_cmd, metadata_cmd, thumbs_cmd
 
 
 def _version_callback(value: bool) -> None:
@@ -124,6 +124,12 @@ app.command(
     short_help="Change a video's container (e.g. MP4 to MKV) without re-encoding.",
 )(files_cmd.remux_cmd)
 app.command(
+    name="strip",
+    no_args_is_help=True,
+    rich_help_panel=CONVERT,
+    short_help="Remove metadata (or just location) from images, videos and audio, without re-encoding.",
+)(metadata_cmd.strip_cmd)
+app.command(
     name="thumbs",
     no_args_is_help=True,
     rich_help_panel=SHEETS,
@@ -142,6 +148,12 @@ app.command(
     rich_help_panel=INSPECT,
     short_help="Show a media file's format, duration and codecs, or an image's frames.",
 )(files_cmd.info_cmd)
+app.command(
+    name="metadata",
+    no_args_is_help=True,
+    rich_help_panel=INSPECT,
+    short_help="Show the metadata a file holds (camera, dates, location, titles).",
+)(metadata_cmd.metadata_cmd)
 app.command(
     name="flatten",
     no_args_is_help=True,

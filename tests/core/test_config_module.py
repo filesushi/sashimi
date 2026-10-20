@@ -9,8 +9,10 @@ import sys
 
 import pytest
 from PIL import Image, ImageCms
+from PIL.PngImagePlugin import PngInfo
 
-from sashimi import audio, config, video
+from sashimi import audio, config, image, video
+from sashimi.core._imagemeta import Carriers
 from sashimi.core.image import _render
 from sashimi.errors import InvalidOptionsError
 
@@ -95,22 +97,52 @@ def test_every_field_is_described(model):
     assert all(prop.get("description") for prop in schema.values())
 
 
-def test_limits_are_field_bounds():
-    def bound(model, name):
-        return next(m.le for m in model.model_fields[name].metadata if hasattr(m, "le"))
+FORMAT_UPPER_BOUNDS = {
+    "crf": {51, 63},
+    "speed": {8},
+    "quality": {100},
+    "audio_bitrate_kbps": {512},
+    "bitrate_kbps": {320, 512},
+    "flac_compression_level": {12},
+    "png_compress_level": {9},
+    "webp_method": {6},
+    "fps": {config.MAX_ANIMATION_FPS},
+    "start_offset_percent": {100},
+    "end_offset_percent": {100},
+    "header_font_size": {200},
+    "timestamp_font_size": {200},
+    "sample_rate": {config.FLAC_MAX_SAMPLE_RATE},
+}
+"""Every upper bound a config field may have: format and codec limits and correctness rules, never a policy."""
 
-    assert bound(config.GifVideoConfig, "duration_seconds") == config.MAX_GIF_SECONDS == 30
-    assert bound(config.WebpVideoConfig, "duration_seconds") == 30
-    assert bound(config.Mp4VideoConfig, "duration_seconds") == config.MAX_VIDEO_SECONDS == 600
-    assert bound(config.Vp9TrimConfig, "duration_seconds") == 600
-    assert bound(config.FlacAudioConfig, "duration_seconds") == config.MAX_AUDIO_SECONDS == 3600
-    assert bound(config.Mp4TransformConfig, "crf") == 51
+
+@pytest.mark.parametrize("model", sorted(ALL_MODELS, key=lambda m: m.__name__), ids=lambda m: m.__name__)
+def test_field_bounds_are_only_format_limits(model):
+    for name, field in model.model_fields.items():
+        for meta in field.metadata:
+            upper = getattr(meta, "le", None) or getattr(meta, "lt", None)
+            if upper is not None:
+                assert upper in FORMAT_UPPER_BOUNDS.get(name, set()), (model.__name__, name, upper)
+
+
+def test_lengths_are_limits_not_field_bounds():
+    for model in (config.GifVideoConfig, config.Mp4VideoConfig, config.Vp9TrimConfig, config.FlacAudioConfig):
+        assert not [m for m in model.model_fields["duration_seconds"].metadata if hasattr(m, "le")]
+    config.VIDEO_CONVERT.from_params({"duration_seconds": 3600}, target="gif")
+    config.GifPreviewConfig(samples=100, sample_duration=60)
 
 
 def test_gif_length_message_reads_as_a_sentence():
+    gif = config.VIDEO_CONVERT.from_params({"duration_seconds": 31}, target="gif")
     with pytest.raises(InvalidOptionsError) as e:
-        config.VIDEO_CONVERT.from_params({"duration_seconds": 31}, target="gif")
+        config.Limits(max_gif_seconds=30).check(gif)
     assert e.value.user_message == "GIFs can be at most 30 seconds long."
+    with pytest.raises(InvalidOptionsError) as e:
+        config.Limits(max_gif_seconds=1).check(gif)
+    assert e.value.user_message == "GIFs can be at most 1 second long."
+    with pytest.raises(InvalidOptionsError) as e:
+        config.Limits(max_gif_seconds=12.5).check(gif)
+    assert e.value.user_message == "GIFs can be at most 12.5 seconds long."
     with pytest.raises(InvalidOptionsError) as e:
         config.VIDEO_CONVERT.from_params({"duration_seconds": -1}, target="gif")
     assert e.value.user_message == "Invalid value for duration_seconds: input should be greater than 0."
@@ -145,6 +177,7 @@ VIDEO_ALTERNATIVES = {
     "sample_rate": 48000,
     "wav_bit_depth": 24,
     "flac_compression_level": 8,
+    "metadata": "remove_all",
 }
 DISCRIMINATORS = {"target", "container", "accurate"}
 
@@ -183,7 +216,7 @@ IMAGE_ALTERNATIVES = {
     "resample": "nearest",
     "background_color": (0, 0, 0),
     "auto_orient": False,
-    "keep_exif": True,
+    "metadata": "remove_all",
     "keep_icc": False,
     "preserve_transparency": False,
     "quality": 50,
@@ -205,17 +238,40 @@ def _photo():
     exif[0x010F] = "TestCam"
     buf = io.BytesIO()
     srgb = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
-    img.save(buf, "PNG", exif=exif, icc_profile=srgb)
+    img.save(buf, "PNG", exif=exif, icc_profile=srgb, pnginfo=_comment())
     return Image.open(io.BytesIO(buf.getvalue()))
 
 
+def _comment():
+    info = PngInfo()
+    info.add_text("Comment", "a comment")
+    return info
+
+
+def _carriers():
+    return Carriers(exif=_photo().info["exif"].removeprefix(b"Exif\x00\x00"), comments=[b"a comment"])
+
+
 def _rendered(model, **fields):
-    img, kwargs = _render(_photo(), model(**fields))
-    return img.mode, img.size, img.tobytes(), {k: v for k, v in kwargs.items() if k != "exif"}, "exif" in kwargs
+    img, kwargs, _ = _render(_photo(), model(**fields), _carriers())
+    metadata = {k: v for k, v in kwargs.items() if k in ("exif", "comment", "pnginfo", "xmp", "extra")}
+    others = {k: v for k, v in kwargs.items() if k not in metadata}
+    return img.mode, img.size, img.tobytes(), others, sorted(metadata)
+
+
+def _written(tmp_path, model, **fields):
+    source = tmp_path / "photo.png"
+    if not source.exists():
+        _photo().save(
+            source, "PNG", exif=_photo().getexif(), icc_profile=_photo().info["icc_profile"], pnginfo=_comment()
+        )
+    out = tmp_path / "out"
+    image.convert(source, out, model(**fields))
+    return out.read_bytes()
 
 
 @pytest.mark.parametrize("model", config.IMAGE_CONVERT.models, ids=lambda m: m.__name__)
-def test_every_image_option_changes_the_output(model):
+def test_every_image_option_changes_the_output(model, tmp_path):
     for name in set(model.model_fields) - DISCRIMINATORS:
         context = {k: v for k, v in IMAGE_CONTEXT.get(name, {}).items() if k in model.model_fields}
         if model is config.TiffImageConfig and name == "quality":
@@ -223,3 +279,5 @@ def test_every_image_option_changes_the_output(model):
         default = model.model_fields[name].default
         alternative = (not default) if isinstance(default, bool) else IMAGE_ALTERNATIVES[name]
         assert _rendered(model, **context) != _rendered(model, **context, **{name: alternative}), name
+        written = _written(tmp_path, model, **context)
+        assert written != _written(tmp_path, model, **context, **{name: alternative}), name

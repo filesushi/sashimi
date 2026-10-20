@@ -100,13 +100,11 @@ def thumbs_cmd(
     ] = None,
     cols: Annotated[
         Optional[str],
-        _option(
-            "--cols", help="Columns, 1-20, or 'auto': from the aspect ratio; animated 3, portrait 4 [default: auto]."
-        ),
+        _option("--cols", help="Columns, or 'auto': from the aspect ratio; animated 3, portrait 4 [default: auto]."),
     ] = None,
     rows: Annotated[
         Optional[str],
-        _option("--rows", help="Rows, 1-20, or 'auto': from the aspect ratio; animated 3, portrait 2 [default: auto]."),
+        _option("--rows", help="Rows, or 'auto': from the aspect ratio; animated 3, portrait 2 [default: auto]."),
     ] = None,
     gap: Annotated[Optional[int], _option("--gap", help="Pixels between tiles [default: 5].")] = None,
     quality: Annotated[
@@ -119,7 +117,7 @@ def thumbs_cmd(
     clip_length: Annotated[
         Optional[float], _option("--clip-length", help="[Animated] Seconds per clip [default: 2].")
     ] = None,
-    fps: Annotated[Optional[int], _option("--fps", help="[Animated] Frame rate, 1-30 [default: 12].")] = None,
+    fps: Annotated[Optional[int], _option("--fps", help="[Animated] Frame rate, 1-50 [default: 12].")] = None,
     no_loop: Annotated[bool, _option("--no-loop", help="[Animated] Play once instead of looping.")] = False,
     no_header: Annotated[
         bool, _option("--no-header", help="Leave out the file details header.", panel=opt.STYLE)
@@ -167,6 +165,8 @@ def thumbs_cmd(
             panel=opt.STYLE,
         ),
     ] = None,
+    max_sheet_pixels: opt.MaxSheetPixels = None,
+    max_frame_bytes: opt.MaxFrameBytes = None,
 ):
     """
     Make video contact sheets: a header with the file's details above a grid of timestamped
@@ -217,8 +217,10 @@ def thumbs_cmd(
 
     from sashimi.api._batch import VIDEO_EXTENSIONS
     from sashimi.api.thumbs import make_thumbs_generator
-    from sashimi.cli import settings
+    from sashimi.cli import _limits, settings
     from sashimi.errors import InvalidOptionsError
+
+    limits = _limits.resolve(max_sheet_pixels=max_sheet_pixels, max_frame_bytes=max_frame_bytes)
 
     try:
         config, resources, unused = settings.resolve_sheet(animated, overrides)
@@ -246,6 +248,7 @@ def thumbs_cmd(
         output=output,
         output_dir=output_dir,
         dry_run=dry_run,
+        limits=limits,
     )
     runner.run(gen, paths)
 
@@ -292,9 +295,7 @@ def preview_cmd(
     workers: opt.Workers = None,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
-    samples: Annotated[
-        Optional[int], _option("--samples", help="Clips to take, 1-10 [default: 5].", panel=PREVIEW)
-    ] = None,
+    samples: Annotated[Optional[int], _option("--samples", help="Clips to take [default: 5].", panel=PREVIEW)] = None,
     clip_length: Annotated[
         Optional[float], _option("--clip-length", help="Seconds per clip [default: 2].", panel=PREVIEW)
     ] = None,
@@ -313,22 +314,25 @@ def preview_cmd(
     crop: Annotated[
         Optional[Crop], _option("--crop", help="Crop the centre to this shape first [default: none].", panel=PREVIEW)
     ] = None,
-    fps: Annotated[Optional[int], _option("--fps", help="Frame rate, 1-30 [default: 15].", panel=PREVIEW)] = None,
+    fps: Annotated[Optional[int], _option("--fps", help="Frame rate, 1-50 [default: 15].", panel=PREVIEW)] = None,
     quality: Annotated[
         Optional[str], _option("--quality", "-q", help="WebP quality: 75, 75% or 0.75 [default: 75].", panel=PREVIEW)
     ] = None,
     no_loop: Annotated[bool, _option("--no-loop", help="Play once instead of looping.", panel=PREVIEW)] = False,
+    max_frame_bytes: opt.MaxFrameBytes = None,
 ):
     """
     Make a short preview of each video: [bold]--samples[/bold] clips of [bold]--clip-length[/bold]
     seconds taken from across the video (skipping the first and last 10%), played one after
-    another as an animated WebP or GIF, at most 30 seconds in all. Writes
+    another as an animated WebP or GIF. Writes
     [cyan]<name>.preview.webp[/cyan] next to each video, under --output-dir, or to -o for a single video.
     """
     from sashimi.api.preview import make_previews_generator
+    from sashimi.cli import _limits
     from sashimi.config import VIDEO_PREVIEW
 
     opt.single_file_or_fail(paths, output)
+    limits = _limits.resolve(max_frame_bytes=max_frame_bytes)
     suffixes = {".webp": "webp", ".gif": "gif"}
     fmt = opt.format_from_output(output_format.value if output_format else None, output, suffixes) or "webp"
     model = VIDEO_PREVIEW.model_for(target=fmt)
@@ -351,7 +355,7 @@ def preview_cmd(
     try:
         config = model.model_validate(data)
     except ValidationError as e:
-        exit_on_invalid_options(e, PREVIEW_FLAGS, model)
+        exit_on_invalid_options(e, PREVIEW_FLAGS)
     runner = BatchRunner("preview", "Previews", json_output, limit_output, dry_run=dry_run)
     gen = make_previews_generator(
         paths,
@@ -363,5 +367,6 @@ def preview_cmd(
         output=output,
         output_dir=output_dir,
         dry_run=dry_run,
+        limits=limits,
     )
     runner.run(gen, paths)

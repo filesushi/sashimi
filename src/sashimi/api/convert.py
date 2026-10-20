@@ -26,6 +26,7 @@ from sashimi.config import (
     IcoConfig,
     ImageConvertConfig,
     JpegImageConfig,
+    Limits,
     PngImageConfig,
     VideoConvertConfig,
 )
@@ -34,8 +35,6 @@ from sashimi.config._base import normalize_target
 from sashimi.errors import InvalidOptionsError, UnsupportedMediaError
 
 __all__ = [
-    "Target",
-    "TARGET_SUFFIX",
     "convert_files",
     "convert_files_generator",
     "convert_images",
@@ -102,6 +101,7 @@ def convert_files_generator(
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
     dry_run: bool = False,
+    limits: Limits | None = None,
 ) -> Iterator[YieldType]:
     """
     Converts every file found to `target`, writing ``<stem>.<ext>`` next to each input (``.jpg``
@@ -113,7 +113,7 @@ def convert_files_generator(
     or MP4) and animated GIFs (to WebM or MP4) through :func:`sashimi.video.convert`, and audio targets through
     :func:`sashimi.audio.convert`. Pass a config per kind to set options; its ``target`` must match.
     Kinds without a config use that target's defaults. Files already in the target format aren't
-    picked up unless `extensions` says so.
+    picked up unless `extensions` says so. `limits` (default ``Limits()``) is passed to each converter.
     """
     target = normalize_target(str(target))
     if target not in TARGET_SUFFIX:
@@ -128,18 +128,18 @@ def convert_files_generator(
     def process(src: pathlib.Path, dst: pathlib.Path, progress: Callable[[float, str], None] | None) -> str | None:
         kind = _kind(src)
         if target in AUDIO_TARGETS and kind in ("video", "audio") and audio_cfg:
-            audio.convert(src, dst, audio_cfg, max_workers=max_workers, on_progress=progress)
+            audio.convert(src, dst, audio_cfg, max_workers=max_workers, limits=limits, on_progress=progress)
         elif (
             target in VIDEO_TARGETS
             and (kind == "video" or (kind == "image" and target in ("webm", "mp4")))
             and video_cfg
         ):
-            route = video.convert(src, dst, video_cfg, max_workers=max_workers, on_progress=progress)
+            route = video.convert(src, dst, video_cfg, max_workers=max_workers, limits=limits, on_progress=progress)
             return ROUTE_MESSAGES.get(route)
         elif target == "ico" and kind == "image":
-            image.to_ico(src, dst, ico_config, on_progress=progress)
+            image.to_ico(src, dst, ico_config, limits=limits, on_progress=progress)
         elif kind == "image" and image_cfg:
-            image.convert(src, dst, image_cfg, on_progress=progress)
+            image.convert(src, dst, image_cfg, limits=limits, on_progress=progress)
         else:
             raise UnsupportedMediaError(f"Can't convert {src.suffix or 'this file'} to {target.upper()}.")
         return None
@@ -194,6 +194,7 @@ def convert_images_generator(
     extensions: Iterable[str] | None = None,
     output_dir: PathInput | None = None,
     dry_run: bool = False,
+    limits: Limits | None = None,
 ) -> Iterator[YieldType]:
     """Image-only conversion: every image found is converted to `config.target`."""
     if extensions is None:
@@ -208,6 +209,7 @@ def convert_images_generator(
         extensions=extensions,
         output_dir=output_dir,
         dry_run=dry_run,
+        limits=limits,
     )
 
 
@@ -221,10 +223,18 @@ def convert_images(
     extensions: Iterable[str] | None = None,
     output_dir: PathInput | None = None,
     dry_run: bool = False,
+    limits: Limits | None = None,
 ) -> dict[str, Any]:
     """Like :func:`convert_images_generator`, but runs to completion and returns a summary."""
     gen = convert_images_generator(
-        paths, config, recursive=recursive, force=force, extensions=extensions, output_dir=output_dir, dry_run=dry_run
+        paths,
+        config,
+        recursive=recursive,
+        force=force,
+        extensions=extensions,
+        output_dir=output_dir,
+        dry_run=dry_run,
+        limits=limits,
     )
     return consume_generator(gen, show_progress, f"Converting to {config.target.upper()}", "convert", dry_run=dry_run)
 

@@ -113,11 +113,19 @@ def test_mp3_refuses_rates_lame_cannot_encode():
 
 
 @pytest.mark.parametrize("target", ["wav", "flac"])
-def test_pcm_and_flac_take_any_rate_in_range(target):
-    assert AUDIO_CONVERT.from_params({"sample_rate": 192000}, target=target).sample_rate == 192000
+def test_pcm_and_flac_take_any_rate_their_format_holds(target):
+    assert AUDIO_CONVERT.from_params({"sample_rate": 384000}, target=target).sample_rate == 384000
     assert AUDIO_CONVERT.from_params({"sample_rate": 9000}, target=target).sample_rate == 9000
+    assert AUDIO_CONVERT.from_params({"sample_rate": 1_048_575}, target=target).sample_rate == 1_048_575
     with pytest.raises(InvalidOptionsError):
-        AUDIO_CONVERT.from_params({"sample_rate": 192001}, target=target)
+        AUDIO_CONVERT.from_params({"sample_rate": 7999}, target=target)
+
+
+def test_flac_stops_at_its_highest_rate():
+    assert AUDIO_CONVERT.from_params({"sample_rate": 2_000_000}, target="wav").sample_rate == 2_000_000
+    with pytest.raises(InvalidOptionsError) as e:
+        AUDIO_CONVERT.from_params({"sample_rate": 1_048_576}, target="flac")
+    assert e.value.user_message == "Invalid value for sample_rate: input should be less than or equal to 1048575."
 
 
 @pytest.mark.parametrize(
@@ -135,22 +143,22 @@ def test_bad_colours_are_rejected(bad):
 
 @pytest.mark.parametrize(
     "model, expected",
-    [(JpegImageConfig, True), (WebpImageConfig, True), (PngImageConfig, False), (GifImageConfig, False)],
+    [(JpegImageConfig, True), (PngImageConfig, False), (GifImageConfig, False)],
 )
 def test_optimize_defaults_per_format(model, expected):
     assert model.model_fields["optimize"].default is expected
-    _, kwargs = _render(Image.new("RGB", (8, 8)), model())
+    _, kwargs, _ = _render(Image.new("RGB", (8, 8)), model())
     assert kwargs["optimize"] is expected
-    _, forced = _render(Image.new("RGB", (8, 8)), model(optimize=not expected))
+    _, forced, _ = _render(Image.new("RGB", (8, 8)), model(optimize=not expected))
     assert forced["optimize"] is (not expected)
 
 
 def test_jpeg_and_webp_specific_options():
-    _, jpeg = _render(Image.new("RGB", (8, 8)), JpegImageConfig(jpeg_subsampling="4:4:4", progressive=True))
+    _, jpeg, _ = _render(Image.new("RGB", (8, 8)), JpegImageConfig(jpeg_subsampling="4:4:4", progressive=True))
     assert jpeg["subsampling"] == "4:4:4" and jpeg["progressive"] is True
-    _, webp = _render(Image.new("RGB", (8, 8)), WebpImageConfig(webp_method=6))
+    _, webp, _ = _render(Image.new("RGB", (8, 8)), WebpImageConfig(webp_method=6))
     assert webp["method"] == 6
-    _, defaults = _render(Image.new("RGB", (8, 8)), JpegImageConfig())
+    _, defaults, _ = _render(Image.new("RGB", (8, 8)), JpegImageConfig())
     assert defaults["subsampling"] == "4:2:0"
 
 
@@ -161,8 +169,11 @@ def test_jpeg_and_webp_specific_options():
         ("jpeg", "preserve_transparency"),
         ("png", "quality"),
         ("png", "webp_method"),
-        ("gif", "keep_exif"),
+        ("gif", "keep_icc"),
+        ("bmp", "metadata"),
+        ("jpeg", "keep_exif"),
         ("bmp", "optimize"),
+        ("webp", "optimize"),
         ("tiff", "progressive"),
         ("webp", "png_compress_level"),
     ],
@@ -181,13 +192,13 @@ def test_background_colour_and_bmp_flattening(tmp_path):
         assert out.format == "BMP" and out.convert("RGB").getpixel((1, 1)) == (0, 255, 0)
 
 
-def test_exif_is_dropped_unless_kept(tmp_path):
+def test_exif_is_kept_unless_removed(tmp_path):
     src = tmp_path / "original.blob"
     exif = Image.Exif()
     exif[0x010F] = "TestCam"
     Image.new("RGB", (10, 10)).save(src, "JPEG", exif=exif)
-    image.convert(src, tmp_path / "dropped", JpegImageConfig())
-    image.convert(src, tmp_path / "kept", JpegImageConfig(keep_exif=True))
+    image.convert(src, tmp_path / "kept", JpegImageConfig())
+    image.convert(src, tmp_path / "dropped", JpegImageConfig(metadata="remove_all"))
     assert 0x010F not in Image.open(tmp_path / "dropped").getexif()
     assert Image.open(tmp_path / "kept").getexif()[0x010F] == "TestCam"
 

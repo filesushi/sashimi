@@ -11,8 +11,8 @@ Output naming, the same for every function here:
 - a conversion writes ``<stem>.<ext>`` (``photo.png`` → ``photo.webp``; ``remux_files`` too);
 - a derived output writes ``<stem>.<role>.<ext>``: ``.sheet`` and ``.animated-sheet``
   (``make_thumbs``), ``.preview`` (``make_previews``), ``.resized``, ``.rotated``,
-  ``.extracted``, ``.favicons`` (``make_favicon_packs``, a ``.zip``) and ``.edited``
-  (``edit_images`` and ``edit_frames``);
+  ``.extracted``, ``.favicons`` (``make_favicon_packs``, a ``.zip``), ``.edited``
+  (``edit_images`` and ``edit_frames``) and ``.stripped`` (``strip_files``, in the file's own format);
 - outputs go next to each input, or under ``output_dir`` (keeping the subfolders of searched
   directories), or to ``output`` when exactly one file is processed;
 - when two inputs would get the same output (``a.png`` and ``a.jpeg`` → ``a.webp``), both keep
@@ -25,7 +25,9 @@ Output naming, the same for every function here:
   without processing anything.
 
 Every ``*_generator`` yields the protocol described in ``YieldType``; the other functions run it
-and return :func:`build_report`'s report, the same JSON the CLI prints with ``--json``.
+and return :func:`build_report`'s report, the same JSON the CLI prints with ``--json``. Every
+batch function takes ``limits`` (a :class:`sashimi.config.Limits`; default ``Limits()``) and
+passes it to the converters; a file over a limit is an ``error`` result whose message states it.
 """
 
 import importlib
@@ -49,6 +51,7 @@ if TYPE_CHECKING:
     from .preview import make_previews, make_previews_generator
     from .remux import remux_files, remux_files_generator
     from .resize import resize_images, resize_images_generator, source_target
+    from .strip import STRIP_EXTENSIONS, strip_files, strip_files_generator
     from .thumbs import make_thumbs, make_thumbs_generator, sheet_name
     from .transform import transform_videos, transform_videos_generator
 
@@ -86,6 +89,9 @@ _EXPORTS = {
     "source_target": ".resize",
     "transform_videos": ".transform",
     "transform_videos_generator": ".transform",
+    "strip_files": ".strip",
+    "strip_files_generator": ".strip",
+    "STRIP_EXTENSIONS": ".strip",
 }
 
 __all__ = list(_EXPORTS)

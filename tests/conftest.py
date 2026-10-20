@@ -70,8 +70,8 @@ def audio_blob(tmp_path_factory) -> pathlib.Path:
     return _blob(
         tmp_path_factory,
         "audio",
-        *("-f", "lavfi", "-i", "sine=f=440:d=4", "-f", "lavfi", "-i", "testsrc2=s=64x64:d=1"),
-        *("-map", "0", "-map", "1", "-ac", "2", "-c:a", "libmp3lame", "-c:v", "mjpeg", "-frames:v", "1"),
+        *("-f", "lavfi", "-i", "sine=f=440:d=4", "-f", "lavfi", "-i", "testsrc2=s=64x64:r=25:d=0.04"),
+        *("-map", "0", "-map", "1", "-ac", "2", "-c:a", "libmp3lame", "-c:v", "mjpeg"),
         *("-disposition:v", "attached_pic"),
         fmt="mp3",
     )

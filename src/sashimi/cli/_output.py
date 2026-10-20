@@ -45,9 +45,8 @@ def fail(message: str, code: int = 2) -> NoReturn:
     raise typer.Exit(code=code)
 
 
-def exit_on_invalid_options(err: ValidationError, flags: dict[str, str], model: Any = None) -> NoReturn:
+def exit_on_invalid_options(err: ValidationError, flags: dict[str, str]) -> NoReturn:
     """Reports config validation errors (from CLI options or TOML files) without a traceback."""
-    bound_messages = getattr(model, "bound_messages", {})
     seen = set()
     for detail in err.errors():
         field = str(detail["loc"][0]) if detail["loc"] else "options"
@@ -59,8 +58,7 @@ def exit_on_invalid_options(err: ValidationError, flags: dict[str, str], model: 
             continue
         flag = flags.get(field)
         name = f"{flag} ({field})" if flag else field
-        reason = bound_messages.get(field) if detail["type"].startswith("less_than") else None
-        err_console.print(f"[bold red]Invalid value for {name}:[/bold red] {reason or detail['msg']}")
+        err_console.print(f"[bold red]Invalid value for {name}:[/bold red] {detail['msg']}")
     raise typer.Exit(code=2)
 
 

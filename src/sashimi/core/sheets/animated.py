@@ -9,7 +9,8 @@ import math
 from collections.abc import Iterator
 from PIL import Image
 
-from sashimi.config import MAX_FRAME_BYTES, AnimatedGifSheetConfig, AnimatedSheetConfig
+from sashimi.config import AnimatedGifSheetConfig, AnimatedSheetConfig, Limits
+from sashimi.config._limits import megabytes, resolve_limits
 from sashimi.core._atomic import PathLike, atomic_output
 from sashimi.core._ffmpeg import (
     INPUT_PROTOCOLS,
@@ -34,10 +35,7 @@ logger = logging.getLogger("sashimi")
 TOO_SHORT_FOR_ANIMATED = "This video is too short for an animated contact sheet."
 MIN_ANIMATED_SECONDS = 1.0
 LABEL_PADDING = 4
-TOO_BIG_TO_RENDER = (
-    "These settings would make the animated sheet too large to render. Use a smaller width, a lower "
-    "frame rate or shorter clips."
-)
+TOO_BIG_TO_RENDER = "These settings would make the animated sheet too large to render"
 
 
 def build_clip_command(
@@ -144,6 +142,7 @@ def render_animated(
     emoji_dir: PathLike | None = None,
     max_workers: int | None = None,
     scratch_dir: PathLike | None = None,
+    limits: Limits | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> None:
     """
@@ -152,7 +151,7 @@ def render_animated(
     Clips are decoded by up to `max_workers` single-threaded ffmpeg processes at once (default
     min(4, CPUs)), then composited in Python and encoded by one ffmpeg process using
     `max_workers` threads; ``max_workers=2`` stays near 20 threads in total. Decoded frames are
-    held in memory (bounded at 400 MB) and nothing but the output is written to disk.
+    held in memory (at most ``limits.max_frame_bytes``) and nothing but the output is written to disk.
 
     A video shorter than one clip (but at least a second long) gets a single tile of the whole video.
     """
@@ -168,12 +167,19 @@ def render_animated(
     check_tiles(layout)
     frames_per_clip = max(1, round(clip_length * config.fps))
     frame_bytes = layout.thumb_w * layout.thumb_h * 3
-    if layout.cells * frames_per_clip * frame_bytes > MAX_FRAME_BYTES:
-        raise InvalidOptionsError(TOO_BIG_TO_RENDER)
+    needed = layout.cells * frames_per_clip * frame_bytes
+    budget = resolve_limits(limits).max_frame_bytes
+    if budget is not None and needed > budget:
+        raise InvalidOptionsError(
+            f"{TOO_BIG_TO_RENDER}: its frames would take {megabytes(needed)} of memory, and the limit is "
+            f"{megabytes(budget)}. Use a smaller width, a lower frame rate or shorter clips.",
+            detail=f"{layout.cells} clips of {frames_per_clip} frames of {layout.thumb_w}x{layout.thumb_h}",
+            limit="max_frame_bytes",
+        )
     header_style = HeaderStyle(load_font(optional_path(header_font), config.header_font_size), config.header_font_size)
     header_h = header_style.height if config.show_header else 0
     sheet_w, sheet_h = layout.grid_width, header_h + layout.grid_height
-    check_sheet_size(sheet_w, sheet_h, TOO_BIG_TO_RENDER)
+    check_sheet_size(sheet_w, sheet_h, config.target, limits, TOO_BIG_TO_RENDER)
     starts = (
         [0.0]
         if single

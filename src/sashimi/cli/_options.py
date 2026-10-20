@@ -20,6 +20,7 @@ VIDEO = "Video options"
 AUDIO = "Audio options"
 SHEET = "Sheet layout"
 STYLE = "Sheet style"
+LIMITS = "Limits"
 
 
 class Resample(str, Enum):
@@ -67,6 +68,17 @@ class PaletteMode(str, Enum):
     diff = "diff"
     full = "full"
     single = "single"
+
+
+class Metadata(str, Enum):
+    keep = "keep"
+    remove_location = "remove_location"
+    remove_all = "remove_all"
+
+
+class StripMode(str, Enum):
+    remove_location = "remove_location"
+    remove_all = "remove_all"
 
 
 class IcoFit(str, Enum):
@@ -199,7 +211,7 @@ Optimize = Annotated[
     Optional[bool],
     option(
         "--optimize/--no-optimize",
-        help="Extra compression pass [default: on for JPEG/WebP, off for PNG/GIF].",
+        help="Extra compression pass [default: on for JPEG, off for PNG/GIF].",
         show_default=False,
         panel=IMAGE,
     ),
@@ -224,7 +236,16 @@ ResampleOpt = Annotated[
     Optional[Resample], option("--resample", help="Scaling filter [default: lanczos].", panel=IMAGE)
 ]
 NoOrient = Annotated[bool, option("--no-orient", help="Don't apply the EXIF orientation tag.", panel=IMAGE)]
-KeepExif = Annotated[bool, option("--keep-exif", help="Keep EXIF metadata (camera, date, GPS).", panel=IMAGE)]
+MetadataOpt = Annotated[
+    Optional[Metadata],
+    option(
+        "--metadata",
+        help="The source's metadata (camera, dates, GPS, titles, comments): keep it, remove_location "
+        "(GPS and place names) or remove_all [default: keep].",
+        panel=GENERAL,
+        show_default=False,
+    ),
+]
 StripIcc = Annotated[bool, option("--strip-icc", help="Drop the colour profile.", panel=IMAGE)]
 IcoSizes = Annotated[
     Optional[str],
@@ -235,7 +256,7 @@ IcoFitOpt = Annotated[
     option("--ico-fit", help="ICO: pad or crop non-square images [default: pad].", panel=IMAGE),
 ]
 
-Fps = Annotated[Optional[int], option("--fps", help="GIF/WebP frame rate, 1-30 [default: 12].", panel=VIDEO)]
+Fps = Annotated[Optional[int], option("--fps", help="GIF/WebP frame rate, 1-50 [default: 12].", panel=VIDEO)]
 Crf = Annotated[
     Optional[int],
     option("--crf", help="WebM/MP4 quality, lower is better [default: WebM 34, MP4 23].", panel=VIDEO),
@@ -254,6 +275,44 @@ NoLoop = Annotated[bool, option("--no-loop", help="GIF/WebP: play once instead o
 DitherOpt = Annotated[Optional[Dither], option("--dither", help="GIF dithering [default: bayer].", panel=VIDEO)]
 PaletteOpt = Annotated[
     Optional[PaletteMode], option("--palette", help="GIF palette mode [default: diff].", panel=VIDEO)
+]
+
+MaxPixels = Annotated[
+    Optional[str],
+    option(
+        "--max-pixels",
+        metavar="PIXELS",
+        help="Refuse images with more pixels than this, e.g. 200M, or none for no limit [default: 64M].",
+        panel=LIMITS,
+    ),
+]
+MaxFrameBytes = Annotated[
+    Optional[str],
+    option(
+        "--max-frame-bytes",
+        metavar="SIZE",
+        help="Memory for the video frames a GIF, GIF preview or animated sheet holds at once, e.g. 4G, "
+        "or none [default: 1G].",
+        panel=LIMITS,
+    ),
+]
+MaxAnimationBytes = Annotated[
+    Optional[str],
+    option(
+        "--max-animation-bytes",
+        metavar="SIZE",
+        help="Memory for the frames of an animated GIF or WebP being edited, e.g. 4G, or none [default: 1G].",
+        panel=LIMITS,
+    ),
+]
+MaxSheetPixels = Annotated[
+    Optional[str],
+    option(
+        "--max-sheet-pixels",
+        metavar="PIXELS",
+        help="Refuse contact sheets with more pixels than this, e.g. 200M, or none [default: 64M].",
+        panel=LIMITS,
+    ),
 ]
 
 Bitrate = Annotated[

@@ -7,7 +7,7 @@ from typing import Any
 
 from sashimi.api._batch import VIDEO_EXTENSIONS, FileProgress, PathInput, YieldType, output_name, run_batch
 from sashimi.api._consume import consume_generator
-from sashimi.config import JpegSheetConfig, SheetConfig
+from sashimi.config import JpegSheetConfig, Limits, SheetConfig
 from sashimi.core.sheets import render
 
 __all__ = ["make_thumbs", "make_thumbs_generator", "sheet_name"]
@@ -36,6 +36,7 @@ def make_thumbs_generator(
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
     dry_run: bool = False,
+    limits: Limits | None = None,
 ) -> Iterator[YieldType]:
     """
     A contact sheet for every video found, still or animated as `config` says (a JPEG sheet by
@@ -58,6 +59,7 @@ def make_thumbs_generator(
             timestamp_font=timestamp_font,
             emoji_dir=emoji_dir,
             max_workers=max_workers,
+            limits=limits,
             on_progress=progress,
         ),
         on_file_progress=on_file_progress,

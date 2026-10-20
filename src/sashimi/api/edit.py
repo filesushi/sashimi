@@ -11,7 +11,7 @@ from sashimi.api._batch import IMAGE_EXTENSIONS, FileProgress, PathInput, YieldT
 from sashimi.api._consume import consume_generator
 from sashimi.api.convert import _SAME_FORMAT, TARGET_SUFFIX
 from sashimi.api.resize import source_target
-from sashimi.config import FramesConfig, ImageEditConfig
+from sashimi.config import FramesConfig, ImageEditConfig, Limits
 from sashimi.core import edit as core
 from sashimi.errors import InvalidOptionsError
 
@@ -41,6 +41,7 @@ def edit_images_generator(
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
     dry_run: bool = False,
+    limits: Limits | None = None,
 ) -> Iterator[YieldType]:
     """
     Edits every image found (see :func:`sashimi.image.edit`), writing ``<stem>.edited.<ext>``
@@ -68,12 +69,12 @@ def edit_images_generator(
     def process(src: pathlib.Path, dst: pathlib.Path, progress: Callable[[float, str], None] | None) -> None:
         chosen = config_for(src)
         if crop_aspect is not None:
-            info = core.frames_info(src)
+            info = core.frames_info(src, limits=limits)
             width, height = (info.height, info.width) if chosen.rotate in (90, 270) else (info.width, info.height)
             left, top, crop_width, crop_height = core.aspect_crop(width, height, crop_aspect)
             box = {"crop_left": left, "crop_top": top, "crop_width": crop_width, "crop_height": crop_height}
             chosen = type(chosen).model_validate({**chosen.model_dump(), **box})
-        core.edit(src, dst, chosen, on_progress=progress)
+        core.edit(src, dst, chosen, limits=limits, on_progress=progress)
 
     return run_batch(
         paths,
@@ -114,6 +115,7 @@ def edit_frames_generator(
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
     dry_run: bool = False,
+    limits: Limits | None = None,
 ) -> Iterator[YieldType]:
     """
     Keeps some frames of every animated GIF and WebP found and changes its speed (see
@@ -136,7 +138,7 @@ def edit_frames_generator(
     def process(src: pathlib.Path, dst: pathlib.Path, progress: Callable[[float, str], None] | None) -> None:
         chosen = config_for(src)
         if dropped:
-            total = core.frames_info(src).frames
+            total = core.frames_info(src, limits=limits).frames
             if max(dropped) >= total:
                 raise InvalidOptionsError(
                     f"Some of the frames to drop aren't in this animation, which has {total} frames."
@@ -145,7 +147,7 @@ def edit_frames_generator(
             if not keep:
                 raise InvalidOptionsError("That would drop every frame; keep at least one.")
             chosen = type(chosen).model_validate({**chosen.model_dump(), "keep": keep})
-        core.select_frames(src, dst, chosen, on_progress=progress)
+        core.select_frames(src, dst, chosen, limits=limits, on_progress=progress)
 
     return run_batch(
         paths,

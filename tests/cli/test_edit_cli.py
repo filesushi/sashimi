@@ -17,7 +17,7 @@ from tests.conftest import needs_ffmpeg
 
 runner = CliRunner()
 COMMANDS = typer.main.get_command(app).commands  # type: ignore[attr-defined]
-PROCESSING = sorted(set(COMMANDS) - {"config", "info", "trim"})
+PROCESSING = sorted(set(COMMANDS) - {"config", "info", "metadata", "trim"})
 
 
 @pytest.fixture(autouse=True)
@@ -82,8 +82,9 @@ def test_edit_aspect_and_crop_syntax(tmp_path):
         report(outside)["results"][0]["message"]
         == "The crop area must fit inside the picture, which is 400x300 pixels."
     )
-    limit = runner.invoke(app, ["edit", "a.png", "--brightness", "3"])
-    assert limit.exit_code == 2 and "--brightness" in limit.stderr
+    assert runner.invoke(app, ["edit", "a.png", "--brightness", "3", "-f"]).exit_code == 0
+    negative = runner.invoke(app, ["edit", "a.png", "--brightness", "-0.5", "-f"])
+    assert negative.exit_code == 2 and "--brightness" in negative.stderr
 
 
 def test_edit_warns_about_options_a_format_ignores(tmp_path):
@@ -177,7 +178,7 @@ def test_config_defaults_for_edit_and_frames():
     edit = json.loads(runner.invoke(app, ["config", "defaults", "edit", "jpg", "--json"]).stdout)
     fields = {row["field"]: row for row in edit[0]["fields"]}
     assert edit[0]["model"] == "JpegEditConfig" and fields["quality"]["default"] == 92
-    assert fields["crop_left"]["option"] == "--crop" and fields["saturation"]["accepted"] == "0-2"
+    assert fields["crop_left"]["option"] == "--crop" and fields["saturation"]["accepted"] == "at least 0"
     frames = json.loads(runner.invoke(app, ["config", "defaults", "frames", "--json"]).stdout)
     assert [section["model"] for section in frames] == ["GifFramesConfig", "WebpFramesConfig"]
 

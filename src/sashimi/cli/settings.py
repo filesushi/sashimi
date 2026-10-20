@@ -7,6 +7,8 @@ CLI settings: TOML config files and their mapping onto the core config models.
 This is the only place sashimi reads or writes config files. The library core never does.
 Precedence: CLI flags > project ``sashimi.toml``/``.sashimi.toml`` (searched upward from the
 working directory) > global ``~/.sashimi/sashimi.toml`` > defaults. Only ``sashimi config set`` writes either file.
+Sections: ``[thumbs]`` and ``[animated_thumbs]`` (contact sheet defaults) and ``[limits]`` (the
+limits every command runs with; see :mod:`sashimi.cli._limits`).
 """
 
 import copy
@@ -191,13 +193,17 @@ PATH_KEYS = {"header_font_path": "header_font", "timestamp_font_path": "timestam
 """TOML keys naming local files, and the :func:`sashimi.sheets.render` arguments they become."""
 
 
-SECTIONS = ("thumbs", "animated_thumbs")
+SECTIONS = ("thumbs", "animated_thumbs", "limits")
 
 
 def known_keys(section: str) -> frozenset[str]:
     """The keys sashimi reads from one section of a sashimi.toml file (none for an unknown section)."""
     if section not in SECTIONS:
         return frozenset()
+    if section == "limits":
+        from sashimi.cli._limits import KINDS
+
+        return frozenset(KINDS)
     from sashimi.config import CONTACT_SHEET
 
     animated = section == "animated_thumbs"
@@ -269,6 +275,18 @@ def resolve_sheet(
     unused = [key for key in given if key not in model.model_fields and key not in PATH_KEYS]
     config = model.model_validate({key: value for key, value in data.items() if key in model.model_fields})
     return config, {key: str(value) if value is not None else None for key, value in paths.items()}, unused
+
+
+def limit_settings(raw: dict[str, Any] | None = None) -> dict[str, Any]:
+    """
+    The ``[limits]`` section: ``sashimi.config.Limits`` field names to values as written (numbers,
+    or strings such as "200M", "2G", "10m" or "none"), for :func:`sashimi.cli._limits.resolve`.
+    Unknown keys are left out (and warned about once). Reads the config files unless `raw` is given.
+    """
+    if raw is None:
+        raw, _ = load_raw_config()
+    known = known_keys("limits")
+    return {key: value for key, value in _section(raw, "limits").items() if key in known}
 
 
 def video_extensions() -> list[str] | None:

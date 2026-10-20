@@ -1,10 +1,118 @@
 # Migrating from 0.5 to 0.6
 
 0.6.0 is the first release on PyPI (`pip install sashimi-convert`). If you used a private 0.5.1
-build, replace it with 0.6.0. Conversion outputs are unchanged, except contact sheets and MP4s of
-H.264 videos, as described in the next sections. The single-file functions take the same
-arguments; the batch API and the CLI changed more, below. Image editing and frame selection are
-new (`sashimi.image.edit`, `select_frames`, `frames_info`; see the changelog).
+build, replace it with 0.6.0. Conversion outputs are unchanged, except contact sheets, MP4s of
+H.264 videos, PNG and TIFF outputs with `keep_icc=False`, images whose source has metadata (now
+kept by default), and icons of images with a colour profile, as described in the next sections.
+The single-file functions take the same arguments, except that limits are now yours to pass
+(`limits=` instead of `max_pixels=`); the batch API and the CLI changed more, below. Image editing
+and frame selection are new (`sashimi.image.edit`, `select_frames`, `frames_info`; see the
+changelog).
+
+## Metadata: `keep_exif` is now `metadata`, and keeping is the default
+
+Every output that can carry the source's metadata has one `metadata` field: `"keep"` (the
+default), `"remove_location"` or `"remove_all"`. It replaces `keep_exif`, which is gone: passing it
+raises "Unknown option: keep_exif.". **Images now keep EXIF, XMP, IPTC, comments and PNG text by
+default**, where 0.5 dropped EXIF unless `keep_exif=True`.
+
+| You want | 0.5 | 0.6 |
+|---|---|---|
+| 0.5's default for images (no EXIF) | `JpegImageConfig()` | `JpegImageConfig(metadata="remove_all")` (it also drops XMP, IPTC and comments, which 0.5 dropped too, mostly) |
+| EXIF kept | `keep_exif=True` | the default, `metadata="keep"` (XMP, IPTC and comments come too) |
+| No GPS, but the camera and date | not possible | `metadata="remove_location"` |
+| A video or song without its tags | not possible | `metadata="remove_all"` on any video, trim, rotate or audio config |
+| The colour profile dropped | `keep_icc=False` | unchanged: `keep_icc` is separate from `metadata` |
+| On the command line | `--keep-exif` | `--metadata keep`, the default; `--metadata remove_all` for 0.5's images |
+
+```python
+from sashimi.config import IMAGE_CONVERT, VIDEO_CONVERT
+
+IMAGE_CONVERT.from_params({"metadata": "remove_location"}, target="jpeg")
+VIDEO_CONVERT.from_params({"metadata": "remove_all"}, target="mp4")
+```
+
+When sashimi applies the orientation (`auto_orient`, and always in edits), the orientation tag is
+now set to 1 in the output's EXIF and XMP; edits used to remove it. To show what a file holds, use
+`sashimi.metadata.read(path)`; to remove metadata without re-encoding, `sashimi.metadata.strip(path,
+out, "remove_all")` (`sashimi strip` on the command line).
+
+## Icons are sRGB
+
+`to_ico` and `favicon_pack` convert an image with a colour profile to sRGB, and no icon carries the
+profile. 0.5 copied the profile into the icons (except the Apple touch icon) without converting the
+colours. Images without a profile give the same bytes as before. Nothing to change.
+
+## Opus bitrates above 256 kb/s for mono
+
+An OGG `bitrate_kbps`, or a WebM `audio_bitrate_kbps`, above 256 for mono audio failed in ffmpeg
+with `ProcessingError`. It is now lowered to 256 kb/s per channel
+(`sashimi.config.OPUS_MAX_KBPS_PER_CHANNEL`), so stereo can still use up to 512. If you caught that
+error, there is nothing to catch any more.
+
+## Limits are yours to set
+
+0.5 enforced fixed limits: 10-minute videos, 60-minute audio, 30-second GIFs and previews, 10
+preview clips, and memory budgets for frames. 0.6.0 enforces only the limits you pass, in one
+`sashimi.config.Limits`, as `limits=` on every converter, command builder and batch function.
+The defaults protect the machine and leave lengths alone, so **with no `limits`, a two-hour video
+converts**.
+
+| You want | 0.5 | 0.6 |
+|---|---|---|
+| 0.5's limits | (always on) | `Limits(max_video_seconds=600, max_audio_seconds=3600, max_gif_seconds=30, max_preview_clips=10, max_frame_bytes=400 * 1024**2, max_animation_bytes=256 * 1024**2)` |
+| A pixel limit | `image.convert(..., max_pixels=24_000_000)` | `image.convert(..., limits=Limits(max_pixels=24_000_000))` |
+| No limits at all | not possible | `limits=Limits.unlimited()`, or any field `None` |
+| The 30 s GIF bound | `MAX_GIF_SECONDS`, `Le(30)` on `duration_seconds` | `Limits(max_gif_seconds=30)`; the field has no upper bound |
+| A refusal before reading the file | `from_params` raised for a 31 s GIF | `from_params` accepts it; `limits.check(config)` raises the same `InvalidOptionsError` |
+| Which limit refused a file | parse the message | `error.limit`, e.g. `"max_video_seconds"` |
+
+```python
+from sashimi import video
+from sashimi.config import VIDEO_CONVERT, Limits
+from sashimi.errors import UserInputError
+
+LIMITS = Limits(max_video_seconds=600, max_gif_seconds=30)
+config = VIDEO_CONVERT.from_params({"duration_seconds": 45}, target="gif")
+try:
+    LIMITS.check(config)
+    video.convert("upload.blob", "out.gif", config, limits=LIMITS)
+except UserInputError as e:
+    print(e.user_message, e.limit)   # GIFs can be at most 30 seconds long. max_gif_seconds
+```
+
+The constants `MAX_GIF_SECONDS`, `MAX_VIDEO_SECONDS`, `MAX_AUDIO_SECONDS`, `MAX_PREVIEW_SAMPLES`,
+`MAX_FRAME_BYTES`, `MAX_ANIMATION_BYTES`, `MAX_SHEET_PIXELS` and `MAX_SHEET_HEIGHT` are gone:
+define your own, or read `Limits()`'s defaults. `max_pixels=` is now `limits=` on
+`image.convert`, `to_ico`, `favicon_pack`, `edit`, `select_frames`, `frame_strip` and
+`frames_info`. The config models keep only format limits as bounds, so code that read a length,
+width, grid or speed bound from `model_fields` (`annotated_types.Le`) finds none; set your own in
+your forms. GIFs made from a video now count against `max_frame_bytes` (1 GiB by default); pass
+`max_frame_bytes=None` to convert them with no memory budget, as 0.5 did. The refusals that state
+a limit read differently (they now give the number in force); the length ones read as before
+when the limit is the same.
+
+On the command line, the limits a desktop user can meet have flags: `--max-pixels 200M`,
+`--max-frame-bytes 4G`, `--max-animation-bytes 4G`, `--max-sheet-pixels 200M`, or `none` to turn
+one off. Every limit, lengths included, can be set in `sashimi.toml`:
+
+```sh
+sashimi config set limits.max_pixels 200M            # project sashimi.toml; -g for ~/.sashimi
+sashimi config set limits.max_video_seconds 10m      # 0.5's 10-minute limit, back on
+sashimi config defaults limits                       # every limit, its flag, default and setting
+```
+
+## WebP `optimize`
+
+`WebpImageConfig.optimize` (and `WebpResizeConfig.optimize`) is gone: Pillow's WebP writer
+ignores it, so it never changed a file. Drop it from WebP params; `from_params` now refuses it
+("Unknown option: optimize."). For a smaller WebP, raise `webp_method` (0-6).
+
+## Colour profiles with `keep_icc=False`
+
+PNG and TIFF outputs now lose the profile when `keep_icc=False`, as JPEG and WebP already did
+(Pillow's PNG and TIFF writers used to copy it anyway). A CMYK source's profile no longer lands on
+an RGB PNG. Nothing to change unless you relied on the profile surviving `keep_icc=False`.
 
 ## MP4 conversions copy when they can
 

@@ -26,7 +26,7 @@ mkdir -p "$F"
 gen() { docker run --rm --user "$(id -u):$(id -g)" -v "$F:/f" "$IMAGE" "$@"; }
 gen ffmpeg -loglevel error -f lavfi -i testsrc2=s=1280x720:r=25:d=103 -f lavfi -i sine=f=440:d=103 \
     -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -c:a aac -b:a 128k -f matroska /f/ref.mkv
-gen ffmpeg -loglevel error -f lavfi -i anoisesrc=d=180:c=pink:a=0.3 -f lavfi -i anoisesrc=d=180:c=brown:a=0.3:seed=7 \
+gen ffmpeg -loglevel error -f lavfi -i anoisesrc=d=180:c=pink:a=0.3:seed=3 -f lavfi -i anoisesrc=d=180:c=brown:a=0.3:seed=7 \
     -filter_complex "[0][1]amerge=inputs=2" -c:a libmp3lame -b:a 192k -f mp3 /f/audio.mp3
 gen ffmpeg -loglevel error -f lavfi -i testsrc2=s=4000x3000:d=1 -frames:v 1 -f image2 -c:v mjpeg -q:v 2 /f/photo.jpg
 gen python -c "
@@ -110,12 +110,22 @@ run image-edit-webp "$WORK/out/video-to-webp/result.webp"
 run image-edit-gif-budget "$F/budget.gif"
 run image-edit-webp-budget "$F/budget.webp"
 run image-edit-over-budget "$F/over-budget.gif"
+run image-edit-raised-budget "$F/over-budget.gif"
+run video-to-gif-over-limit "$F/ref.mkv"
+run video-to-gif-raised-limit "$F/ref.mkv"
 run image-frames-gif "$WORK/out/video-to-gif/result.gif"
 run image-frames-webp "$WORK/out/video-to-webp/result.webp"
 run image-frame-strip "$WORK/out/video-to-gif/result.gif"
 run video-to-mp4-copy "$F/ref.mkv"
 run video-to-mp4-copy-video "$F/ref-opus.mkv"
 run video-to-mp4-encode "$F/ref-vp9.webm"
+run audio-to-ogg-mono-320 "$F/ref.mkv"
+run video-to-webm-mono-320 "$F/ref.mkv"
+run image-remove-location "$F/photo.jpg"
+run video-to-mp4-remove-all "$F/ref.mkv"
+run strip-photo "$F/photo.jpg"
+run strip-video "$F/ref.mkv"
+run read-metadata "$F/ref.mkv"
 
 if [ -n "$FAILED" ]; then
     echo "--- FAILED:$FAILED ---"

@@ -13,15 +13,129 @@ that match CSS filters, for still images and every frame of animated GIFs and We
 selection and speed for animations, and an MP4 conversion that copies the streams when it can,
 and settles the batch and CLI behaviour before it goes public: one output-naming policy, one
 meaning per flag, one JSON report, `--dry-run` everywhere and exit codes that report skipped
-files you named. [MIGRATION.md](MIGRATION.md) shows what to change.
+files you named. Every limit is now the caller's to set (`sashimi.config.Limits`, passed as
+`limits=`; on the command line, `--max-*` flags and a `[limits]` section in `sashimi.toml`), with
+defaults that protect the machine and no limit on lengths. Every output that can carry the
+source's metadata has one `metadata` setting (`keep`, the default, `remove_location` or
+`remove_all`), `sashimi.metadata` reads what a file holds and removes it without re-encoding, and
+the last known bugs are fixed. [MIGRATION.md](MIGRATION.md) shows what to change.
 
 Outputs are byte-identical to 0.5.1 except: animated contact sheets (a 3x3 grid by default, 4x2
 for portrait videos, and padded time labels), still sheets of videos with an aspect ratio from
 0.55 to 0.6 such as 9:16 (8x2 instead of 7x2), animated sheets of clips shorter than one tile's
-clip (one tile instead of an error), and MP4 conversions of 8-bit H.264 videos with default
-encoder settings, which are now copied instead of re-encoded (see Breaking).
+clip (one tile instead of an error), MP4 conversions of 8-bit H.264 videos with default
+encoder settings, which are now copied instead of re-encoded (see Breaking), and PNG and TIFF
+conversions of images with a colour profile and `keep_icc=False`, and PNG conversions of CMYK
+images, which now carry no profile (see Fixed; the pixels are the same); images whose source has
+metadata, which now keep it by default (see Breaking; the pixels are the same); ICO files and
+favicon packs of images with a colour profile, whose colours are now converted to sRGB; and
+lossless cuts and remuxes of MOVs with chapters, and mono Opus audio above 256 kb/s, which used
+to fail. Files the old limits refused may now succeed, since the limits are the caller's and
+lengths have none by default.
 
 ### Breaking
+
+- **One `metadata` setting replaces `keep_exif`, and keeps the source's metadata by default.**
+  Every model whose output can carry the source's metadata has `metadata: MetadataMode =
+  "keep"`, one of `"keep"`, `"remove_location"` and `"remove_all"` (`sashimi.config.METADATA_MODES`):
+  the image models for JPEG, PNG, WebP, TIFF and GIF (convert, resize, edit, frames), WebM and MP4
+  conversions, rotate and flip, every trim (lossless and accurate, so remuxes too) and every
+  audio format. `keep_exif` is removed (passing it raises "Unknown option: keep_exif."); the CLI's
+  `--keep-exif` is `--metadata keep|remove_location|remove_all`. **Image outputs now keep EXIF,
+  XMP, IPTC, comments and PNG text by default**, where they used to drop EXIF (`keep_exif=False`);
+  pass `metadata="remove_all"` for the old behaviour. Video and audio kept their tags before and
+  still do by default. `keep_icc` still decides the colour profile alone.
+  - `keep` carries everything the output format holds: EXIF (camera, dates, GPS; byte for byte in
+    JPEG, PNG and WebP, rewritten in TIFF), XMP, IPTC and Photoshop resources (JPEG and TIFF),
+    comments (JPEG, PNG and GIF) and PNG text (PNG to PNG); for video and audio, the global and
+    stream tags and chapters the container holds. The README's "Metadata" section lists what
+    each format can't hold.
+  - `remove_location` removes every location carrier sashimi knows of and keeps the rest: EXIF's
+    GPS directory, XMP's GPS, latitude, longitude, altitude, city, state, country and location
+    properties, IPTC's place fields, PNG text that names a place, the QuickTime, MP4, Matroska,
+    ID3 and Vorbis location tags, and timed metadata tracks (GPS tracks) on copies.
+  - `remove_all` keeps only what showing or playing the file needs: the pixels and streams, the
+    colour profile (as `keep_icc` says), the orientation when sashimi doesn't apply it, stream
+    languages and dispositions, and the display rotation on copies.
+  - When sashimi applies the orientation (`auto_orient`, and always in edits), the EXIF and XMP
+    orientation is reset to 1 rather than removed, and the EXIF thumbnail, which shows the picture
+    before the change, is dropped. Edits and frame selection drop embedded thumbnails always.
+- **ICO files and favicon packs are converted to sRGB.** An image with a colour profile has its
+  colours converted from it to sRGB (browsers treat icons as sRGB), and no icon carries the
+  profile or any metadata. Pillow's ICO writer used to copy the profile into the PNG frames, and
+  the pack's PNGs carried it too, except the Apple touch icon. Images without a profile are
+  unchanged, byte for byte.
+- `MediaInfo` and `StreamInfo` gain fields (`MediaInfo.tags` and `audio_channels`;
+  `StreamInfo.language`, `attached_pic`, `channels`, `tags` and `codec_tag`), so `sashimi info
+  --json` for video and audio prints them too. Code that builds them with keywords is unaffected.
+- The command builders take `source=` (the probed `MediaInfo`), which carries out `metadata` and
+  the Opus ceiling below; without it they build the commands they did, plus the fixed list of
+  location tags for `remove_location`.
+
+- **Limits are configuration, set by the caller.** The fixed limits (10-minute videos,
+  60-minute audio, 30-second GIFs and previews, 10 preview clips, 400 MiB of frames for animated
+  sheets and GIF previews, 256 MiB for animated edits, 64 MP images and sheets) are replaced by a
+  `sashimi.config.Limits` object that every converter, command builder and batch function takes
+  as `limits=` (`None` means `Limits()`):
+
+  | Field | Default | Limits | Was |
+  |---|---|---|---|
+  | `max_pixels` | 64,000,000 | images, by decoded pixels | `max_pixels=` argument, 64 MP |
+  | `max_frame_bytes` | 1 GiB | video frames held at once: animated sheets, GIF previews and (new) GIFs made from a video | `MAX_FRAME_BYTES`, 400 MiB |
+  | `max_animation_bytes` | 1 GiB | frames of an animated GIF or WebP being edited | `MAX_ANIMATION_BYTES`, 256 MiB |
+  | `max_sheet_pixels` | 64,000,000 | contact sheets | `MAX_SHEET_PIXELS` |
+  | `max_video_seconds` | none | WebM/MP4 conversions (re-encodes and MP4 copies), rotate and flip, accurate cuts | `MAX_VIDEO_SECONDS`, 600 |
+  | `max_audio_seconds` | none | audio conversions | `MAX_AUDIO_SECONDS`, 3600 |
+  | `max_gif_seconds` | none | GIFs and animated WebPs made from a video, and a preview's clips together | `MAX_GIF_SECONDS`, 30 |
+  | `max_preview_clips` | none | a preview's `samples` | `MAX_PREVIEW_SAMPLES`, 10 |
+
+  Every limit can be raised, or turned off with `None` (`Limits.unlimited()` turns them all off).
+  A refusal states the limit in force ("Video clips can be at most 2 hours long.", "This image
+  is too large to process: it has 120 megapixels (12000x10000), and the limit is 64.") and names
+  the field in the new `UserInputError.limit`. `limits.check(config)` applies the limits a config
+  breaks without a file, so a web app can refuse a job when it is queued.
+- **`max_pixels=` is now `limits=`** on `image.convert`, `to_ico`, `favicon_pack`, `edit`,
+  `select_frames`, `frame_strip` and `frames_info`: pass `limits=Limits(max_pixels=…)`. A
+  `max_pixels` above Pillow's own limit (about 179 MP), or `None`, now works: sashimi raises
+  Pillow's limit for that call.
+- **The limit constants are gone:** `MAX_GIF_SECONDS`, `MAX_VIDEO_SECONDS`, `MAX_AUDIO_SECONDS`,
+  `MAX_PREVIEW_SAMPLES`, `MAX_FRAME_BYTES`, `MAX_ANIMATION_BYTES`, `MAX_SHEET_PIXELS` and
+  `MAX_SHEET_HEIGHT`. A name sashimi no longer enforces would mislead; read `Limits()`'s fields
+  for the defaults. `DEFAULT_MAX_PIXELS` stays, as `Limits.max_pixels`'s default.
+- **Config fields keep only format limits as bounds.** Removed: the length bounds above (so
+  `from_params` no longer refuses a 31-second GIF, a 601-second clip or a 3601-second audio
+  clip; `Limits.check` and the converters do, when the caller sets the limit), the preview's
+  `samples` (10), `sample_duration` (10 s), `max_height` (2160) and `max_width` (3840), the video
+  `max_width` (3840), the sheets' `cols`/`rows` (20), `gap` (100), `width` (8000 still, 3840
+  animated) and `sample_duration` (10 s), the edits' `brightness`, `contrast` and `saturation`
+  (2; CSS has no upper bound), the frames' `speed` (0.25-4; now any speed above 0), the frame
+  strip's `tile_height` (256) and `columns` (50), WAV and FLAC `sample_rate` (192000; FLAC now
+  stops at its format's 1048575, `FLAC_MAX_SAMPLE_RATE`), and the favicon manifest names' 100
+  characters. Widened to the codec's limit: M4A and OGG `bitrate_kbps` (320 → 512, as for the
+  video models' audio). Animated outputs' `fps` (30 → 50, `MAX_ANIMATION_FPS`: browsers play
+  frames under 20 ms at 100 ms). Lower bounds are unchanged, and every number field now refuses
+  infinity and NaN. Code that read these bounds from `model_fields` (`annotated_types.Le`) gets
+  none, or 50 for `fps`.
+- **`WebpImageConfig.optimize` (and `WebpResizeConfig.optimize`) is removed.** Pillow's WebP
+  writer ignores it, so it never changed an output; `webp_method` is WebP's effort setting.
+  Passing `optimize` for WebP now raises "Unknown option: optimize.", and the CLI warns that
+  `--optimize` doesn't apply to WebP.
+- **GIFs made from a video count against `max_frame_bytes`.** ffmpeg keeps every frame of a GIF
+  until its palette is built, so with no length limit a GIF needs a memory budget. A GIF whose
+  frames (width × height × 3 × frames, `video.gif_frame_bytes`) exceed it raises
+  `InvalidOptionsError` before ffmpeg runs. At the default 1 GiB this refuses GIFs the old 30 s
+  cap allowed only above about 1 GiB of frames (30 s at 1280 px and 15 fps or more).
+- **Refusal messages state the limit**, so these read differently: "This image is too large to
+  process." (now "…: it has 30 megapixels (6000x5000), and the limit is 24."), "This animation
+  is too large to edit. …", and the preview, animated sheet and contact sheet size refusals. The
+  length refusals read as before when the limit is the old one ("Videos longer than 10 minutes
+  aren't supported yet. …").
+- **Still JPEG and PNG contact sheets may be taller than 16,383 px**, WebP's limit, which used to
+  apply to every format: JPEG now stops at 65,500 px (`JPEG_MAX_SIDE`) and PNG only at
+  `max_sheet_pixels`. A sheet too big for its format raises "These settings would make the
+  contact sheet too large for WebP, which can be at most 16383 pixels on a side (…)".
+  `MAX_SHEET_HEIGHT` is replaced by `WEBP_MAX_SIDE`, with `JPEG_MAX_SIDE` and `GIF_MAX_SIDE`.
+- `ParamsModel.bound_messages` is removed: no field bound is a product limit any more.
 
 - **"To MP4" copies the streams when it can.** `video.convert` with an `Mp4VideoConfig` now picks
   the fastest route that gives what a re-encode would, as far as anyone watching can tell
@@ -35,7 +149,7 @@ encoder settings, which are now copied instead of re-encoded (see Breaking).
     than the defaults (23, `veryfast`) asks for a re-encode; HEVC, VP9, AV1, 10-bit and 4:4:4
     video are always re-encoded, since many browsers can't play them in MP4.
   The copy routes keep the re-encode's streams (the first video and audio track; no subtitles
-  or data), its length limit (`-t`, `MAX_VIDEO_SECONDS`) and `+faststart`, and keep the
+  or data), its length limit (`-t`, `Limits.max_video_seconds`) and `+faststart`, and keep the
   source's display rotation as metadata. If ffmpeg can't copy a file, it is re-encoded instead.
   `video.convert` returns the route taken (`VideoRoute`: `"copy"`, `"copy_video"` or
   `"encode"`; always `"encode"` for other targets), where it returned `None`. There is no
@@ -122,12 +236,45 @@ encoder settings, which are now copied instead of re-encoded (see Breaking).
 
 ### Added
 
-- **Image editing:** `sashimi.image.edit(input, output, config, *, scratch_dir, max_pixels,
+- **`sashimi.metadata`:** `read(path, *, limits)` returns a `MetadataInfo` for showing a file's
+  metadata to people: the carriers found (`EXIF`, `GPS`, `XMP`, `IPTC`, `QuickTime/MP4 tags`,
+  `ID3`, `Vorbis comments`, `chapters`, …), whether it has a location and its coordinates or
+  place, the camera, date taken, software, title, artist, album, creation time and comment,
+  whether it has a colour profile, and other named tags. It decodes no pixels or samples and
+  works on outputs too; it reports what it found, not a promise that nothing else is there.
+  `strip(input, output, mode="remove_all", *, keep_icc=True, …)` writes a copy without the
+  metadata, re-encoding nothing: JPEG segments, PNG chunks, WebP chunks, GIF extensions and TIFF
+  tags are dropped or filtered with the compressed pixels copied byte for byte, and video and
+  audio streams are copied (MKV, WebM, MP4, MOV, M4A, MP3, FLAC, OGG, WAV). It returns the
+  format's extension, which `strip_format(path)` gives beforehand; `build_strip_command` is the
+  pure ffmpeg command. An MPO keeps only its main picture.
+- **CLI:** `sashimi strip` (`--remove remove_location|remove_all`, `--strip-icc`, `-n`, writing
+  `<stem>.stripped.<ext>`), `sashimi metadata <file>` (`--json`), and `--metadata` on `convert`,
+  `resize`, `rotate`, `edit`, `frames`, `extract` and `remux`. Batch: `sashimi.api.strip_files(_generator)`
+  and `STRIP_EXTENSIONS`, and `metadata=` on `extract(_generator)` and `remux_files(_generator)`.
+- `sashimi.config.MetadataMode`, `METADATA_MODES` and `OPUS_MAX_KBPS_PER_CHANNEL`;
+  `sashimi.image.to_srgb`; `sashimi.audio.output_channels`.
+- `frames_info` reads animated PNGs' frame count, frame durations and loop count from their
+  `acTL` and `fcTL` chunks (they were `[0, 0, …]`); `animated` stays False, as PNG animations
+  can't be edited.
+- **`sashimi.config.Limits`** (see Breaking): `Limits(...)`, `Limits.from_params(params)`
+  (numbers or strings; `None`, `""` or `"none"` turns a limit off), `Limits.unlimited()` and
+  `limits.check(config)`. Importable without Pillow or ffmpeg, like the rest of `sashimi.config`.
+  Also `UserInputError.limit`, `video.gif_frame_bytes`, `WEBP_MAX_SIDE`, `JPEG_MAX_SIDE`,
+  `GIF_MAX_SIDE`, `MAX_ANIMATION_FPS` and `FLAC_MAX_SAMPLE_RATE`.
+- **Limits on the command line:** `--max-pixels` (`convert`, `resize`, `favicon`, `edit`,
+  `frames`), `--max-frame-bytes` (`convert`, `thumbs`, `preview`), `--max-animation-bytes`
+  (`edit`, `frames`) and `--max-sheet-pixels` (`thumbs`), taking `200M` (pixels), `4G` or `512M`
+  (bytes), or `none`; and a `[limits]` section in `sashimi.toml` for every limit, including the
+  lengths (`sashimi config set limits.max_video_seconds 2h`). Flags win over the files.
+  `sashimi config defaults limits` lists each limit, its flag, default and `sashimi.toml` value.
+  `sashimi info` reads images of any size (it decodes nothing).
+- **Image editing:** `sashimi.image.edit(input, output, config, *, scratch_dir, limits,
   on_progress)` applies, in this order: the EXIF orientation (so the picture is as it is shown),
   `rotate` (0, 90, 180, 270, clockwise) and `flip` (`horizontal`, `vertical`), the crop box
   (`crop_left`, `crop_top`, `crop_width`, `crop_height`, in pixels of the rotated and flipped
-  picture; unset means no crop), then `brightness`, `contrast` and `saturation` (multipliers,
-  0-2, 1 unchanged). The adjustments are CSS `filter: brightness() contrast() saturate()` as the
+  picture; unset means no crop), then `brightness`, `contrast` and `saturation` (multipliers of
+  at least 0, 1 unchanged). The adjustments are CSS `filter: brightness() contrast() saturate()` as the
   Filter Effects spec defines them (in sRGB, unpremultiplied, clamped after each step), not
   Pillow's `ImageEnhance`, so a browser preview with the same CSS matches: brightness and
   contrast exactly, saturation within one 8-bit level, all three together within two
@@ -146,14 +293,14 @@ encoder settings, which are now copied instead of re-encoded (see Breaking).
   edit, keeping each frame's duration and the loop count. GIF frames keep their colours exactly
   when they have at most 256 (any edit of a GIF source does), with transparency and disposal 2
   when a frame has transparent pixels. Animations whose decoded frames would take more than
-  `MAX_ANIMATION_BYTES` (256 MiB: width × height × 4 × frames) raise `MediaTooLargeError` before
-  any frame is decoded. Animated PNGs raise `UnsupportedMediaError`; saved as a still format, an
+  `Limits.max_animation_bytes` (1 GiB by default: width × height × 4 × frames) raise
+  `MediaTooLargeError` before any frame is decoded. Animated PNGs raise `UnsupportedMediaError`; saved as a still format, an
   animation gives its first frame.
 - **Frame selection:** `sashimi.image.select_frames(input, output, config, …)` keeps some frames
   of an animated GIF or WebP (`keep`: frame numbers from 0, "0-9,12" or a list; unset keeps all;
-  kept frames play in their original order) and changes its `speed` (0.25-4, dividing every
-  frame's duration; frames browsers would play at 100 ms count as 100 ms, and none gets shorter
-  than `MIN_FRAME_MS`, 20 ms). Frames are as shown in the animation, so dropping some never leaves
+  kept frames play in their original order) and changes its `speed` (above 0, dividing every
+  frame's duration; frames browsers would play at 100 ms count as 100 ms, none gets shorter
+  than `MIN_FRAME_MS`, 20 ms, and none longer than the format stores). Frames are as shown in the animation, so dropping some never leaves
   holes. Config: `IMAGE_FRAMES` by `target` (`GifFramesConfig`, `WebpFramesConfig`).
 - **Frame information:** `sashimi.image.frames_info(path) -> FramesInfo` gives the format,
   `edit_target`, size as shown, frame count, each frame's duration and the loop count, read from
@@ -185,11 +332,11 @@ encoder settings, which are now copied instead of re-encoded (see Breaking).
   short videos get fewer; a video shorter than one clip becomes one clip; under half a second is
   `MediaTooShortError`. One ffmpeg run, ffmpeg only (no moviepy or numpy), with the pure
   `build_preview_command` and `plan_preview`. Config: `VIDEO_PREVIEW` (`GifPreviewConfig`,
-  `WebpPreviewConfig`, `PreviewConfig`, `PreviewCrop`), the clips' total limited to 30 s
-  (`MAX_GIF_SECONDS`) and the count to `MAX_PREVIEW_SAMPLES` (10). Batch: `make_previews` and
+  `WebpPreviewConfig`, `PreviewConfig`, `PreviewCrop`), the clips' total limited by
+  `Limits.max_gif_seconds` and their number by `Limits.max_preview_clips`. Batch: `make_previews` and
   `make_previews_generator`. CLI: `sashimi preview`.
 - **Favicon packs:** `sashimi.image.favicon_pack(input, output_zip, config, *, scratch_dir,
-  max_pixels, on_progress)` writes a .zip with `favicon.ico`, PNGs at 16, 32, 48, 180 (Apple
+  limits, on_progress)` writes a .zip with `favicon.ico`, PNGs at 16, 32, 48, 180 (Apple
   touch icon, filled with `background_color` because iOS shows transparency as black), 192 and
   512 px (`FAVICON_PNG_SIZES`), `site.webmanifest` and `favicon.html` with the `<head>` tags.
   Paths inside are relative; the manifest is written with `json` and the HTML escaped, so names
@@ -228,7 +375,7 @@ encoder settings, which are now copied instead of re-encoded (see Breaking).
 - Every config field has a description, available as `model_fields[name].description` and in
   `model_json_schema()` (the docstrings under each field, via pydantic's
   `use_attribute_docstrings`).
-- `GridValue` (`cols`, `rows`) carries its 1-20 bound in the type, so it appears in the schema.
+- `GridValue` (`cols`, `rows`) carries its lower bound of 1 in the type, so it appears in the schema.
 - `sashimi config defaults <command> [format]` lists each option's flag, default, accepted values
   and description, per output format (`--json` for scripts); for `thumbs` it also shows values
   set in `sashimi.toml`.
@@ -282,7 +429,43 @@ encoder settings, which are now copied instead of re-encoded (see Breaking).
 
 ### Fixed
 
+- **`keep_exif=False` didn't remove everything.** Before it was replaced by `metadata`, it left
+  the source's XMP, IPTC, Photoshop and description tags in TIFF to TIFF conversions without
+  `auto_orient` (Pillow copies a TIFF's tags when nothing transforms the picture), and with
+  compression every other tag of the source (camera, software, artist, GPS pointer); a JPEG's,
+  GIF's or PNG's comment in JPEG and GIF outputs; and the source's colour profile in ICO files and
+  favicon packs. Outputs now carry only what `metadata` and `keep_icc` say, whatever Pillow's
+  writers would copy, and byte-level tests pin every carrier for every function.
+- **Mono Opus above 256 kb/s failed** in ffmpeg (Opus allows 256 kb/s per channel): OGG audio
+  conversions and the Opus audio of WebM conversions, WebM rotations and accurate WebM cuts now
+  lower the bitrate to 256 kb/s per output channel (`OPUS_MAX_KBPS_PER_CHANNEL`), and log it, so
+  a mono source at 320 gives the file 256 gives. Stereo is unchanged up to 512. MP3 (LAME) and
+  AAC accept any allowed bitrate for mono and clamp it themselves, so they were never affected.
+- **`frames_info` decoded PNGs** (Pillow's `getexif` loads a PNG to look for an `eXIf` chunk after
+  the image data), although it promised to decode nothing. It now reads the chunks itself, so no
+  format is decoded.
+- **Lossless cuts and remuxes of MOVs with chapters failed:** the QuickTime chapter track made
+  MKV and MP4 refuse the file ("can't be trimmed … without re-encoding. Try MOV instead.") and MOV
+  fail in the muxer. The chapter track is no longer copied as a stream; the chapters are written
+  from the chapter list, as for every other container.
+- **TIFF outputs with EXIF directories failed** with compression (`RuntimeError: Error setting
+  from dictionary` from Pillow's libtiff writer, with `keep_exif=True` and the default LZW): the
+  EXIF and GPS directories are now added after Pillow writes the file.
+- `sashimi.api.convert.__all__` no longer lists `Target` and `TARGET_SUFFIX`, which aren't public.
+- The test suite's `audio_blob` is the 4 s it says (it was 0.026 s), and the sandbox's audio
+  fixture is seeded noise, so its outputs' sizes repeat.
+
 - A file named on the command line that was skipped no longer exits 0 (see Breaking).
+- **`keep_icc=False` strips the colour profile from PNG and TIFF outputs too.** Pillow's PNG and
+  TIFF writers copied the source's profile when sashimi passed none, so only JPEG and WebP
+  outputs lost it. The same fallback put a CMYK source's profile on RGB PNGs; a CMYK profile is
+  now kept only on CMYK output (TIFF). Pixels are unchanged.
+- `WebpImageConfig.optimize` did nothing; it is removed (see Breaking).
+- Frame selection at a very slow speed no longer crashes on frames longer than the format
+  stores (655.35 s for GIF, about 4.7 hours for WebP); they stop at that length.
+- `max_pixels` above Pillow's own limit (about 179 MP) is honoured; Pillow refused such images
+  whatever `max_pixels` said.
+
 - **`flatten` is safe** (it was ftool's code, with ftool's bugs):
   - symbolic links are left where they are, and so are the files and folders a link in the tree
     points to, so no link ends up dangling (relative links used to be moved and broken);

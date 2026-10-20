@@ -6,11 +6,11 @@
 import random
 
 import pytest
+from PIL.PngImagePlugin import PngInfo
 from PIL import Image, ImageCms
 
 from sashimi import config, image
-from sashimi.config import IMAGE_EDIT, IMAGE_FRAMES, FrameStripConfig
-from sashimi.core import edit as edit_module
+from sashimi.config import IMAGE_EDIT, IMAGE_FRAMES, FrameStripConfig, Limits
 from sashimi.errors import InvalidOptionsError, MediaTooLargeError, UnsupportedMediaError
 
 from tests.conftest import leftovers
@@ -87,7 +87,7 @@ def test_exif_orientation_comes_first(tmp_path):
     out = run_edit(src, tmp_path / "a", "jpeg", crop_top=0, crop_height=20)
     assert out.size == (20, 20)
     assert out.getpixel((15, 5))[0] > 200 and out.getpixel((3, 5))[2] > 200
-    assert 0x0112 not in out.getexif()
+    assert out.getexif()[0x0112] == 1
 
 
 @pytest.mark.parametrize(
@@ -270,22 +270,22 @@ def test_jpeg_is_resaved_at_high_quality(tmp_path):
     assert (tmp_path / "low").stat().st_size < (tmp_path / "high").stat().st_size
 
 
-def test_metadata_is_dropped_unless_kept(tmp_path):
+def test_metadata_is_kept_unless_removed(tmp_path):
     exif = Image.Exif()
     exif[0x010F] = "TestCam"
     srgb = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
     for fmt, target in (("JPEG", "jpeg"), ("PNG", "png"), ("WEBP", "webp"), ("TIFF", "tiff")):
         src = save(tmp_path, quadrants(), fmt, name=f"in.{target}", exif=exif, icc_profile=srgb)
-        plain = run_edit(src, tmp_path / f"plain.{target}", target, keep_icc=False)
+        plain = run_edit(src, tmp_path / f"plain.{target}", target, keep_icc=False, metadata="remove_all")
         assert not plain.info.get("icc_profile") and 0x010F not in plain.getexif(), fmt
-        kept = run_edit(src, tmp_path / f"kept.{target}", target, keep_exif=True)
+        kept = run_edit(src, tmp_path / f"kept.{target}", target)
         assert kept.info.get("icc_profile") == srgb and kept.getexif().get(0x010F) == "TestCam", fmt
 
 
 def test_edit_respects_max_pixels_and_refuses_non_images(tmp_path):
     src = save(tmp_path, quadrants(), "PNG")
     with pytest.raises(MediaTooLargeError):
-        image.edit(src, tmp_path / "out", config.PngEditConfig(), max_pixels=100)
+        image.edit(src, tmp_path / "out", config.PngEditConfig(), limits=Limits(max_pixels=100))
     junk = tmp_path / "junk"
     junk.write_bytes(b"not an image")
     with pytest.raises(UnsupportedMediaError):
@@ -303,14 +303,16 @@ def test_every_edit_option_changes_the_output(tmp_path):
     srgb = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
     alternatives = {
         "rotate": 90, "flip": "vertical", "crop_left": 2, "crop_top": 2, "crop_width": 10, "crop_height": 10,
-        "brightness": 1.5, "contrast": 0.5, "saturation": 0.0, "keep_exif": True, "keep_icc": False, "quality": 20,
+        "brightness": 1.5, "contrast": 0.5, "saturation": 0.0, "metadata": "remove_all", "keep_icc": False, "quality": 20,
         "optimize": True, "progressive": True, "jpeg_subsampling": "4:4:4", "png_compress_level": 1, "lossless": True,
         "webp_method": 0, "tiff_compression": "none",
     }  # fmt: skip
     for model in IMAGE_EDIT.models:
         target = model.model_fields["target"].default
         src = save(tmp_path, img if target not in ("jpeg", "bmp") else img.convert("RGB"), "PNG", name="src.png")
-        src = save(tmp_path, Image.open(src), "PNG", name="src.png", exif=exif, icc_profile=srgb)
+        comment = PngInfo()
+        comment.add_text("Comment", "a comment")
+        src = save(tmp_path, Image.open(src), "PNG", name="src.png", exif=exif, icc_profile=srgb, pnginfo=comment)
         image.edit(src, tmp_path / "ref", model())
         for name in set(model.model_fields) - {"target"}:
             fields = {name: alternatives[name]}
@@ -416,21 +418,37 @@ def test_animated_png_is_refused(tmp_path):
     assert e.value.user_message == "Animated PNGs can't be edited yet."
 
 
-def test_animation_budget(tmp_path, monkeypatch):
+def test_animation_budget(tmp_path):
     path, _, _ = animation(tmp_path, "GIF")
-    monkeypatch.setattr(edit_module, "MAX_ANIMATION_BYTES", 24 * 16 * 4 * 6 - 1)
+    tight = Limits(max_animation_bytes=24 * 16 * 4 * 6 - 1)
     for call in (
-        lambda: image.edit(path, tmp_path / "out", config.GifEditConfig()),
-        lambda: image.select_frames(path, tmp_path / "out", config.GifFramesConfig()),
-        lambda: image.frame_strip(path, tmp_path / "out"),
+        lambda limits: image.edit(path, tmp_path / "out", config.GifEditConfig(), limits=limits),
+        lambda limits: image.select_frames(path, tmp_path / "out", config.GifFramesConfig(), limits=limits),
+        lambda limits: image.frame_strip(path, tmp_path / "out", limits=limits),
     ):
         with pytest.raises(MediaTooLargeError) as e:
-            call()
-        assert (
-            e.value.user_message
-            == "This animation is too large to edit. Try one with fewer frames or smaller pictures."
+            call(tight)
+        assert e.value.user_message == (
+            "This animation is too large to edit: its frames would take 0 MB of memory, and the limit is 0 MB. "
+            "Try one with fewer frames or smaller pictures."
         )
-    assert not (tmp_path / "out").exists()
+        assert e.value.limit == "max_animation_bytes"
+        assert not (tmp_path / "out").exists()
+        call(Limits(max_animation_bytes=24 * 16 * 4 * 6))
+        call(Limits(max_animation_bytes=None))
+        (tmp_path / "out").unlink()
+
+
+def test_animation_budget_message_states_the_limit(tmp_path):
+    frames = [Image.new("RGB", (1024, 1024), (i, 0, 0)) for i in range(3)]
+    frames[0].save(tmp_path / "big.gif", save_all=True, append_images=frames[1:], duration=100)
+    with pytest.raises(MediaTooLargeError) as e:
+        image.edit(
+            tmp_path / "big.gif", tmp_path / "out", config.GifEditConfig(), limits=Limits(max_animation_bytes=2**23)
+        )
+    assert e.value.user_message.startswith(
+        "This animation is too large to edit: its frames would take 12 MB of memory, and the limit is 8 MB."
+    )
 
 
 @pytest.mark.parametrize("fmt, target", [("GIF", "gif"), ("WEBP", "webp")])
@@ -496,8 +514,17 @@ def test_select_frames_validation(tmp_path):
             config.GifFramesConfig.from_params({"keep": keep})
         assert e.value.user_message == message
     assert config.GifFramesConfig.from_params({"keep": [3, 1, 1]}).keep == (1, 3)
-    with pytest.raises(InvalidOptionsError):
-        config.GifFramesConfig.from_params({"speed": 5})
+    assert config.GifFramesConfig.from_params({"speed": 10}).speed == 10
+    for speed in (0, -1, "nan"):
+        with pytest.raises(InvalidOptionsError):
+            config.GifFramesConfig.from_params({"speed": speed})
+
+
+@pytest.mark.parametrize("fmt, target, longest", [("GIF", "gif", 655350), ("WEBP", "webp", 0xFFFFFF)])
+def test_very_slow_speeds_stop_at_the_longest_frame_the_format_holds(tmp_path, fmt, target, longest):
+    path, _, durations = animation(tmp_path, fmt)
+    image.select_frames(path, tmp_path / "slow", IMAGE_FRAMES.from_params({"speed": 0.000001}, target=target))
+    assert image.frames_info(tmp_path / "slow").durations_ms == [longest] * len(durations)
 
 
 def test_frame_strip(tmp_path):
@@ -552,9 +579,21 @@ def test_edit_models_follow_the_family_rules():
         assert list(model.model_fields)[:9] == edit_fields
         assert "max_width" not in model.model_fields and "auto_orient" not in model.model_fields
     assert IMAGE_EDIT.from_params({"rotate": "270", "brightness": "1.5"}, target="png").rotate == 270
+    assert IMAGE_EDIT.from_params({"brightness": 2.5, "contrast": 4, "saturation": 10}, target="png").saturation == 10
     with pytest.raises(InvalidOptionsError) as e:
-        IMAGE_EDIT.from_params({"brightness": 2.5}, target="png")
-    assert e.value.user_message == "Invalid value for brightness: input should be less than or equal to 2."
+        IMAGE_EDIT.from_params({"brightness": -0.5}, target="png")
+    assert e.value.user_message == "Invalid value for brightness: input should be greater than or equal to 0."
+    with pytest.raises(InvalidOptionsError) as e:
+        IMAGE_EDIT.from_params({"contrast": "inf"}, target="png")
+    assert e.value.user_message == "Invalid value for contrast: input should be a finite number."
+
+
+def test_adjustments_above_two_follow_css(tmp_path):
+    src = save(tmp_path, Image.new("RGB", (4, 4), (40, 120, 200)), "PNG")
+    out = run_edit(src, tmp_path / "bright.png", "png", brightness=3)
+    assert out.getpixel((0, 0)) == (120, 255, 255)
+    flat = run_edit(src, tmp_path / "contrast.png", "png", contrast=5)
+    assert flat.getpixel((0, 0)) == (0, 90, 255)
 
 
 def test_cmyk_and_16_bit_sources(tmp_path):

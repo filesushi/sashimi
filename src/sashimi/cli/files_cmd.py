@@ -63,6 +63,7 @@ def extract_cmd(
     speed: opt.Speed = None,
     audio_bitrate: opt.AudioBitrate = None,
     mute: opt.Mute = False,
+    metadata: opt.MetadataOpt = None,
 ):
     """
     Cut a section out of a video, from START (default the beginning) to END, or for --duration;
@@ -83,8 +84,10 @@ def extract_cmd(
         fail(f"{', '.join(used)} only {'applies' if len(used) == 1 else 'apply'} with --accurate (a re-encoded cut).")
 
     from sashimi.api.extract import extract_generator
+    from sashimi.cli import _limits
     from sashimi.errors import UserInputError
 
+    limits = _limits.resolve()
     runner = BatchRunner("extract", "Extract", json_output, limit_output, dry_run=dry_run)
     try:
         gen = extract_generator(
@@ -99,6 +102,7 @@ def extract_cmd(
             speed=speed,
             audio_bitrate_kbps=audio_bitrate,
             mute=mute,
+            metadata=opt.enum_value(metadata) or "keep",
             recursive=recursive,
             force=force,
             max_workers=workers,
@@ -106,6 +110,7 @@ def extract_cmd(
             output=output,
             output_dir=output_dir,
             dry_run=dry_run,
+            limits=limits,
         )
     except UserInputError as e:
         fail(e.user_message)
@@ -124,6 +129,7 @@ def remux_cmd(
     dry_run: opt.DryRun = False,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
+    metadata: opt.MetadataOpt = None,
 ):
     """
     Copy each video into another container without re-encoding: instant, lossless, and every
@@ -133,20 +139,24 @@ def remux_cmd(
     video. Source files are never changed or removed.
     """
     from sashimi.api.remux import remux_files_generator
+    from sashimi.cli import _limits
 
     opt.single_file_or_fail(paths, output)
+    limits = _limits.resolve()
     suffixes = {".mkv": "mkv", ".mp4": "mp4", ".m4v": "mp4", ".webm": "webm", ".mov": "mov"}
     container = opt.format_from_output(opt.enum_value(output_format), output, suffixes) or "mkv"
     runner = BatchRunner("remux", f"Remux to {container.upper()}", json_output, limit_output, dry_run=dry_run)
     gen = remux_files_generator(
         paths,
         container,  # type: ignore[arg-type]
+        metadata=opt.enum_value(metadata) or "keep",
         recursive=recursive,
         force=force,
         on_file_progress=runner.file_progress,
         output=output,
         output_dir=output_dir,
         dry_run=dry_run,
+        limits=limits,
     )
     runner.run(gen, paths)
 
@@ -224,12 +234,13 @@ def info_cmd(
     """
     opt.exists_or_fail(path)
     from sashimi import probe
+    from sashimi.config import Limits
     from sashimi.core.edit import frames_info
     from sashimi.core.sheets._render import format_duration, format_size
     from sashimi.errors import SashimiError, UnsupportedMediaError, UserInputError
 
     try:
-        image_info = frames_info(path)
+        image_info = frames_info(path, limits=Limits.unlimited())
     except UnsupportedMediaError:
         image_info = None
     except UserInputError as e:

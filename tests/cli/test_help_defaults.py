@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 from sashimi import config
 from sashimi.cli import settings
 from sashimi.cli._defaults import DISCRIMINATORS, flags_for, format_value
+from sashimi.cli._limits import format_limit
 from sashimi.cli.main import app
 
 runner = CliRunner()
@@ -47,7 +48,7 @@ EXPECTED = {
         "--duration": f"to the end; GIF/WebP {d(C.GifVideoConfig, 'duration_seconds')}s",
         "--quality": f"{d(C.JpegImageConfig, 'quality')}; animated WebP {d(C.WebpVideoConfig, 'quality')}",
         "--background": f"{d(C.JpegImageConfig, 'background_color')}; ICO transparent",
-        "--optimize": f"{on(C.JpegImageConfig, 'optimize')} for JPEG/WebP, {on(C.PngImageConfig, 'optimize')} for PNG/GIF",
+        "--optimize": f"{on(C.JpegImageConfig, 'optimize')} for JPEG, {on(C.PngImageConfig, 'optimize')} for PNG/GIF",
         "--subsampling": d(C.JpegImageConfig, "jpeg_subsampling"),
         "--webp-method": d(C.WebpImageConfig, "webp_method"),
         "--compress-level": d(C.PngImageConfig, "png_compress_level"),
@@ -176,6 +177,26 @@ EXPECTED["frames"] = {
     "--optimize": on(C.GifFramesConfig, "optimize"),
 }
 EXPECTED["remux"] = {"--format": "mkv, or from -o", "--output": "<name>.mkv next to the input"}
+EXPECTED["strip"] = {"--remove": "remove_all", "--output": "<name>.stripped.<ext> next to the input"}
+for command in ("convert", "resize", "rotate", "extract", "remux", "edit", "frames"):
+    EXPECTED[command]["--metadata"] = d(C.JpegImageConfig, "metadata")
+L = C.Limits()
+LIMIT_NOTES = {
+    "--max-pixels": format_limit("max_pixels", L.max_pixels),
+    "--max-frame-bytes": format_limit("max_frame_bytes", L.max_frame_bytes),
+    "--max-animation-bytes": format_limit("max_animation_bytes", L.max_animation_bytes),
+    "--max-sheet-pixels": format_limit("max_sheet_pixels", L.max_sheet_pixels),
+}
+for command, flags in {
+    "convert": ("--max-pixels", "--max-frame-bytes"),
+    "resize": ("--max-pixels",),
+    "favicon": ("--max-pixels",),
+    "edit": ("--max-pixels", "--max-animation-bytes"),
+    "frames": ("--max-pixels", "--max-animation-bytes"),
+    "thumbs": ("--max-sheet-pixels", "--max-frame-bytes"),
+    "preview": ("--max-frame-bytes",),
+}.items():
+    EXPECTED[command].update({flag: LIMIT_NOTES[flag] for flag in flags})
 for notes in EXPECTED.values():
     notes["--output-dir"] = "next to each input"
 EXPECTED["extract"].update({flag: EXPECTED["rotate"][flag] for flag in ("--crf", "--preset", "--audio-bitrate")})
@@ -194,7 +215,8 @@ MODELS = {
     "favicon": [C.FaviconPackConfig],
     "edit": list(C.IMAGE_EDIT.models),
     "frames": list(C.IMAGE_FRAMES.models),
-    "remux": [],
+    "remux": [C.CopyTrimConfig],
+    "strip": [],
 }
 
 
@@ -294,7 +316,7 @@ def test_config_defaults_unknown_format():
 
 
 @pytest.mark.parametrize(
-    "operation", ["convert", "resize", "rotate", "favicon", "edit", "frames", "extract", "thumbs", "preview"]
+    "operation", ["convert", "resize", "rotate", "favicon", "edit", "frames", "extract", "thumbs", "preview", "limits"]
 )
 def test_config_defaults_renders_every_command(operation):
     result = runner.invoke(app, ["config", "defaults", operation], env={"COLUMNS": "200"})

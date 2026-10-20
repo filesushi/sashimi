@@ -3,18 +3,26 @@
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Annotated, Any, ClassVar, Generic, Literal, Self, TypeVar, cast
+from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, Self, TypeVar, cast
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, model_validator
 from pydantic_core import PydanticCustomError
 
 from sashimi.errors import InvalidOptionsError
 
+if TYPE_CHECKING:
+    from sashimi.config._limits import Limits
+
 _SENTENCE = "sashimi_sentence"
-_UPPER_BOUND_ERRORS = frozenset({"less_than", "less_than_equal"})
 _TRUE = frozenset({"true", "1", "on", "yes"})
 _FALSE = frozenset({"false", "0", "off", "no"})
 TARGET_ALIASES: Mapping[str, str] = MappingProxyType({"jpg": "jpeg", "tif": "tiff"})
+
+
+MetadataMode = Literal["keep", "remove_location", "remove_all"]
+"""What an output does with the source's metadata: keep it, remove location data, or remove all of it."""
+METADATA_MODES: tuple[MetadataMode, ...] = ("keep", "remove_location", "remove_all")
+"""The values of every ``metadata`` field, from the most kept to the least."""
 
 
 def sentence(text: str) -> PydanticCustomError:
@@ -29,12 +37,10 @@ class ParamsModel(BaseModel):
     - Unknown keys are rejected.
     - A key that is omitted or set to ``None`` means "use the default".
     - Models are immutable, so a config can be shared between calls.
+    - Numbers must be finite: infinity and NaN are rejected.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True, use_attribute_docstrings=True)
-
-    bound_messages: ClassVar[Mapping[str, str]] = MappingProxyType({})
-    """User-facing sentences for fields whose upper bounds are product limits, keyed by field name."""
+    model_config = ConfigDict(extra="forbid", frozen=True, use_attribute_docstrings=True, allow_inf_nan=False)
 
     @model_validator(mode="before")
     @classmethod
@@ -54,20 +60,20 @@ class ParamsModel(BaseModel):
         try:
             return cls.model_validate(data)
         except ValidationError as e:
-            raise invalid_options_error(e, cls.bound_messages) from e
+            raise invalid_options_error(e) from e
+
+    def _check_limits(self, limits: "Limits") -> None:
+        """Raises InvalidOptionsError for a limit this config breaks by itself; see :meth:`Limits.check`."""
 
 
-def invalid_options_error(err: ValidationError, bound_messages: Mapping[str, str] | None = None) -> InvalidOptionsError:
+def invalid_options_error(err: ValidationError) -> InvalidOptionsError:
     """Turns the first validation error into an :class:`InvalidOptionsError` with a readable sentence."""
-    bound_messages = bound_messages or {}
     first = err.errors()[0]
     field = ".".join(str(part) for part in first["loc"]) or "options"
     if first["type"] == _SENTENCE:
         message = first["msg"]
     elif first["type"] == "extra_forbidden":
         message = f"Unknown option: {field}."
-    elif first["type"] in _UPPER_BOUND_ERRORS and field in bound_messages:
-        message = bound_messages[field]
     else:
         reason = first["msg"].removeprefix("Value error, ")
         if not reason[1:2].isupper():
@@ -224,3 +230,8 @@ def parse_flag(key: str, value: Any) -> bool:
     if not isinstance(parsed, bool):
         raise InvalidOptionsError(f"Invalid value for {key}: input should be a valid boolean.")
     return parsed
+
+
+class SourceMetadata(ParamsModel):
+    metadata: MetadataMode = "keep"
+    """The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all"."""

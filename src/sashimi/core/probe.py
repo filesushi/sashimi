@@ -31,6 +31,21 @@ class StreamInfo(BaseModel):
     """ffprobe's codec type: ``video``, ``audio``, ``subtitle``, ``data`` or ``attachment``."""
     codec: str
     """ffprobe's codec name, e.g. ``h264``; ``unknown`` when ffprobe has none (e.g. a timecode track)."""
+    language: str | None = None
+    """The stream's language tag (e.g. ``eng``), if it has one other than ``und``."""
+    attached_pic: bool = False
+    """True for embedded cover art (a still picture stored as a video stream)."""
+    channels: int | None = None
+    """Audio channels (1 for mono, 2 for stereo), for audio streams."""
+    tags: dict[str, str] = {}
+    """The stream's metadata tags as ffprobe shows them (title, handler name, …)."""
+    codec_tag: str | None = None
+    """ffprobe's codec tag (e.g. ``avc1``; ``text`` for a QuickTime chapter track)."""
+
+    @property
+    def chapter_track(self) -> bool:
+        """True for a QuickTime chapter track, which holds the chapter titles (not a stream to copy)."""
+        return self.type == "data" and self.codec_tag == "text"
 
 
 class MediaInfo(BaseModel):
@@ -61,6 +76,10 @@ class MediaInfo(BaseModel):
     """Codec names of every stream, in stream order."""
     streams: list[StreamInfo] = []
     """Every stream's type and codec, in stream order."""
+    audio_channels: int | None = None
+    """Channels of the first audio stream (1 for mono, 2 for stereo)."""
+    tags: dict[str, str] = {}
+    """The file's global metadata tags as ffprobe shows them (title, artist, location, …)."""
 
     @property
     def container_names(self) -> frozenset[str]:
@@ -99,6 +118,29 @@ def _rotation(stream: dict[str, Any]) -> int:
     return int(round(degrees / 90.0)) * 90 % 360
 
 
+def _int(value: Any) -> int | None:
+    return value if isinstance(value, int) and value > 0 else None
+
+
+def _tags(entry: dict[str, Any]) -> dict[str, str]:
+    tags = entry.get("tags")
+    return {str(k): str(v) for k, v in tags.items()} if isinstance(tags, dict) else {}
+
+
+def _stream(stream: dict[str, Any]) -> StreamInfo:
+    tags = _tags(stream)
+    language = next((v for k, v in tags.items() if k.lower() == "language"), None)
+    return StreamInfo(
+        type=stream.get("codec_type", "unknown"),
+        codec=stream.get("codec_name", "unknown"),
+        language=language if language and language != "und" else None,
+        attached_pic=bool(stream.get("disposition", {}).get("attached_pic")),
+        channels=_int(stream.get("channels")) if stream.get("codec_type") == "audio" else None,
+        tags=tags,
+        codec_tag=stream.get("codec_tag_string") or None,
+    )
+
+
 def parse_ffprobe_json(data: dict[str, Any]) -> MediaInfo:
     """Builds a MediaInfo from ``ffprobe -show_format -show_streams -of json`` output. Pure function."""
     fmt = data.get("format", {})
@@ -119,10 +161,10 @@ def parse_ffprobe_json(data: dict[str, Any]) -> MediaInfo:
         "has_video": bool(videos),
         "has_audio": bool(audios),
         "codecs": [s.get("codec_name", "unknown") for s in streams],
-        "streams": [
-            StreamInfo(type=s.get("codec_type", "unknown"), codec=s.get("codec_name", "unknown")) for s in streams
-        ],
+        "streams": [_stream(s) for s in streams],
         "audio_codec": audios[0].get("codec_name") if audios else None,
+        "audio_channels": _int(audios[0].get("channels")) if audios else None,
+        "tags": _tags(fmt),
     }
 
     if videos:

@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections.abc import Mapping
-from types import MappingProxyType
-from typing import Annotated, Any, ClassVar, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import Field, model_validator
 
@@ -13,26 +12,19 @@ from sashimi.config._base import (
     FormBool,
     ParamsModel,
     Rotation,
+    SourceMetadata,
     TargetName,
     parse_flag,
     sentence,
 )
-from sashimi.config._limits import (
-    DEFAULT_GIF_SECONDS,
-    GIF_TOO_LONG,
-    MAX_GIF_SECONDS,
-    MAX_PREVIEW_SAMPLES,
-    MAX_VIDEO_SECONDS,
-    PREVIEW_TOO_LONG,
-    VIDEO_CLIP_TOO_LONG,
-    WEBP_TOO_LONG,
-)
+from sashimi.config._limits import DEFAULT_GIF_SECONDS, MAX_ANIMATION_FPS, Limits, duration_text
+from sashimi.errors import InvalidOptionsError
 
 X264Preset = Literal["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"]
 _AudioBitrate = Annotated[int, Field(ge=32, le=512)]
 
 
-class _H264Options(ParamsModel):
+class _H264Options(SourceMetadata):
     """H.264 video with AAC audio."""
 
     crf: int = Field(default=23, ge=0, le=51)
@@ -45,7 +37,7 @@ class _H264Options(ParamsModel):
     """Drop the audio track."""
 
 
-class _Vp9Options(ParamsModel):
+class _Vp9Options(SourceMetadata):
     """VP9 video with Opus audio."""
 
     crf: int = Field(default=34, ge=0, le=63)
@@ -53,7 +45,7 @@ class _Vp9Options(ParamsModel):
     speed: int = Field(default=8, ge=0, le=8)
     """libvpx ``-cpu-used``: higher is faster and lower quality."""
     audio_bitrate_kbps: _AudioBitrate = 96
-    """Opus audio bitrate in kb/s."""
+    """Opus audio bitrate in kb/s. Opus allows at most 256 per channel, so mono audio gets at most 256."""
     mute: bool = False
     """Drop the audio track."""
 
@@ -63,24 +55,38 @@ class _Clip(ParamsModel):
     """Where to start, in seconds from the beginning."""
 
 
+def video_clip_too_long(limit: float) -> InvalidOptionsError:
+    """The refusal of a video clip longer than ``Limits.max_video_seconds``."""
+    return InvalidOptionsError(f"Video clips can be at most {duration_text(limit)} long.", limit="max_video_seconds")
+
+
 class _Animated(_Clip):
-    duration_seconds: float = Field(default=DEFAULT_GIF_SECONDS, gt=0, le=MAX_GIF_SECONDS)
-    """Length in seconds, at most 30."""
-    max_width: int = Field(default=480, ge=64, le=3840)
+    duration_seconds: float = Field(default=DEFAULT_GIF_SECONDS, gt=0)
+    """Length in seconds."""
+    max_width: int = Field(default=480, ge=64)
     """Never upscales; keeps the aspect ratio."""
-    fps: int = Field(default=12, ge=1, le=30)
+    fps: int = Field(default=12, ge=1, le=MAX_ANIMATION_FPS)
     """Frames per second."""
     loop: bool = True
     """Loop forever, or play once."""
 
+    def _check_limits(self, limits: Limits) -> None:
+        limit = limits.max_gif_seconds
+        if limit is not None and self.duration_seconds > limit:
+            kind = "GIFs" if isinstance(self, GifVideoConfig) else "Animated WebPs"
+            raise InvalidOptionsError(f"{kind} can be at most {duration_text(limit)} long.", limit="max_gif_seconds")
+
 
 class _Transcode(_Clip):
-    duration_seconds: float | None = Field(default=None, gt=0, le=MAX_VIDEO_SECONDS)
-    """``None`` converts to the end of the video (which may be at most 10 minutes long)."""
-    max_width: int | None = Field(default=None, ge=64, le=3840)
+    duration_seconds: float | None = Field(default=None, gt=0)
+    """``None`` converts to the end of the video."""
+    max_width: int | None = Field(default=None, ge=64)
     """``None`` keeps the source's width. Never upscales; keeps the aspect ratio."""
 
-    bound_messages: ClassVar[Mapping[str, str]] = MappingProxyType({"duration_seconds": VIDEO_CLIP_TOO_LONG})
+    def _check_limits(self, limits: Limits) -> None:
+        limit = limits.max_video_seconds
+        if limit is not None and self.duration_seconds is not None and self.duration_seconds > limit:
+            raise video_clip_too_long(limit)
 
 
 class GifVideoConfig(_Animated):
@@ -93,8 +99,6 @@ class GifVideoConfig(_Animated):
     palette_mode: Literal["diff", "full", "single"] = "diff"
     """Build the palette from moving parts ("diff"), all pixels ("full"), or per frame ("single")."""
 
-    bound_messages: ClassVar[Mapping[str, str]] = MappingProxyType({"duration_seconds": GIF_TOO_LONG})
-
 
 class WebpVideoConfig(_Animated):
     """An animated WebP made from part of a video: no sound."""
@@ -105,8 +109,6 @@ class WebpVideoConfig(_Animated):
     """Lossy quality, or compression effort when ``lossless``."""
     lossless: bool = False
     """Lossless frames (much bigger files)."""
-
-    bound_messages: ClassVar[Mapping[str, str]] = MappingProxyType({"duration_seconds": WEBP_TOO_LONG})
 
 
 class WebmVideoConfig(_Vp9Options, _Transcode):
@@ -175,21 +177,16 @@ class _TrimRange(ParamsModel):
 
 
 class _AccurateRange(_TrimRange):
-    duration_seconds: float | None = Field(default=None, gt=0, le=MAX_VIDEO_SECONDS)
-    """The clip's length, instead of ``end_seconds``."""
     accurate: Annotated[Literal[True], FormBool] = True
     """Re-encode for a frame-accurate cut."""
 
-    bound_messages: ClassVar[Mapping[str, str]] = MappingProxyType({"duration_seconds": VIDEO_CLIP_TOO_LONG})
-
-    @model_validator(mode="after")
-    def _check_length(self) -> Self:
-        if (self.length or 0) > MAX_VIDEO_SECONDS:
-            raise sentence(VIDEO_CLIP_TOO_LONG)
-        return self
+    def _check_limits(self, limits: Limits) -> None:
+        limit = limits.max_video_seconds
+        if limit is not None and (self.length or 0) > limit:
+            raise video_clip_too_long(limit)
 
 
-class CopyTrimConfig(_TrimRange):
+class CopyTrimConfig(SourceMetadata, _TrimRange):
     """
     A lossless trim: streams are copied into `container`, so the cut is instant but starts at the
     keyframe at or before `start_seconds` (see :data:`KEYFRAME_NOTE`). The container must be able
@@ -220,30 +217,37 @@ PreviewCrop = Literal["none", "9:16", "1:1"]
 
 
 class _Preview(ParamsModel):
-    samples: int = Field(default=5, ge=1, le=MAX_PREVIEW_SAMPLES)
+    samples: int = Field(default=5, ge=1)
     """How many clips to take from across the video. Short videos get fewer, so clips never overlap."""
-    sample_duration: float = Field(default=2.0, gt=0, le=10)
+    sample_duration: float = Field(default=2.0, gt=0)
     """Length of each clip in seconds."""
     start_offset_percent: float = Field(default=10.0, ge=0.0, le=100.0)
     """Skip this much of the start of the video (intros, logos)."""
     end_offset_percent: float = Field(default=10.0, ge=0.0, le=100.0)
     """Skip this much of the end of the video (credits)."""
-    max_height: int = Field(default=360, ge=64, le=2160)
+    max_height: int = Field(default=360, ge=64)
     """Scale down to at most this height. Never upscales; keeps the aspect ratio."""
-    max_width: int | None = Field(default=None, ge=64, le=3840)
+    max_width: int | None = Field(default=None, ge=64)
     """Also scale down to at most this width. Blank sets no width limit."""
     crop: PreviewCrop = "none"
     """Crop the centre of the picture to this shape first, e.g. "9:16" for vertical video sites."""
-    fps: int = Field(default=15, ge=1, le=30)
+    fps: int = Field(default=15, ge=1, le=MAX_ANIMATION_FPS)
     """Frames per second."""
     loop: bool = True
     """Loop forever, or play once."""
 
-    @model_validator(mode="after")
-    def _check_length(self) -> Self:
-        if self.samples * self.sample_duration > MAX_GIF_SECONDS:
-            raise sentence(PREVIEW_TOO_LONG)
-        return self
+    def _check_limits(self, limits: Limits) -> None:
+        clips = limits.max_preview_clips
+        if clips is not None and self.samples > clips:
+            raise InvalidOptionsError(
+                f"Previews can have at most {clips} {'clip' if clips == 1 else 'clips'}.", limit="max_preview_clips"
+            )
+        limit = limits.max_gif_seconds
+        if limit is not None and self.samples * self.sample_duration > limit:
+            raise InvalidOptionsError(
+                f"Previews can be at most {duration_text(limit)} long. Use fewer clips or shorter ones.",
+                limit="max_gif_seconds",
+            )
 
 
 class GifPreviewConfig(_Preview):
@@ -282,7 +286,7 @@ VIDEO_PREVIEW: ConfigFamily[PreviewConfig] = ConfigFamily(
 )
 """
 Previews (short clips sampled from across a video, played in turn), by ``target``: gif or webp.
-The clips' total length is at most :data:`MAX_GIF_SECONDS`.
+``Limits.max_gif_seconds`` limits the clips' total length, and ``Limits.max_preview_clips`` their number.
 """
 
 VIDEO_TRANSFORM: ConfigFamily[TransformConfig] = ConfigFamily(

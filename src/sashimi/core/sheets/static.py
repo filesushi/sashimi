@@ -10,12 +10,15 @@ import os
 from PIL import Image
 
 from sashimi.config import (
-    MAX_SHEET_HEIGHT,
-    MAX_SHEET_PIXELS,
+    GIF_MAX_SIDE,
+    JPEG_MAX_SIDE,
+    WEBP_MAX_SIDE,
     JpegSheetConfig,
+    Limits,
     StillSheetConfig,
     WebpSheetConfig,
 )
+from sashimi.config._limits import megapixels, resolve_limits
 from sashimi.core._atomic import PathLike, atomic_output
 from sashimi.core._ffmpeg import (
     INPUT_PROTOCOLS,
@@ -53,7 +56,10 @@ logger = logging.getLogger("sashimi")
 NOT_A_VIDEO = "This file doesn't look like a video we can read."
 TOO_SHORT_FOR_SHEET = "This video is too short to make a contact sheet."
 NO_FRAMES = "We couldn't read any frames from this video. The file may be damaged."
-TOO_BIG_SHEET = "These settings would make the contact sheet too large. Use fewer rows or a smaller width."
+TOO_BIG_SHEET = "These settings would make the contact sheet too large"
+FORMAT_MAX_SIDE = {"jpeg": JPEG_MAX_SIDE, "webp": WEBP_MAX_SIDE, "gif": GIF_MAX_SIDE}
+"""The widest and tallest image each sheet format can hold, in pixels (PNG has no practical limit)."""
+_FORMAT_NAMES = {"jpeg": "JPEG", "webp": "WebP", "gif": "GIF"}
 
 
 def optional_path(path: PathLike | None) -> str | None:
@@ -77,10 +83,26 @@ def probe_sheet_source(input_path: PathLike, min_duration: float, too_short: str
     return info
 
 
-def check_sheet_size(width: int, height: int, message: str = TOO_BIG_SHEET) -> None:
-    """Refuses sheets taller than :data:`MAX_SHEET_HEIGHT` or larger than :data:`MAX_SHEET_PIXELS`."""
-    if height > MAX_SHEET_HEIGHT or width * height > MAX_SHEET_PIXELS:
-        raise MediaTooLargeError(message, detail=f"{width}x{height}")
+def check_sheet_size(width: int, height: int, target: str, limits: Limits | None, too_big: str = TOO_BIG_SHEET) -> None:
+    """
+    Refuses sheets wider or taller than `target`'s format allows (:data:`FORMAT_MAX_SIDE`), or
+    larger than ``limits.max_sheet_pixels``, with MediaTooLargeError. `too_big` starts the message.
+    """
+    side = FORMAT_MAX_SIDE.get(target)
+    if side is not None and max(width, height) > side:
+        raise MediaTooLargeError(
+            f"{too_big} for {_FORMAT_NAMES[target]}, which can be at most {side} pixels on a side ({width}x{height}). "
+            "Use fewer rows or a smaller width.",
+            detail=f"{width}x{height}",
+        )
+    budget = resolve_limits(limits).max_sheet_pixels
+    if budget is not None and width * height > budget:
+        raise MediaTooLargeError(
+            f"{too_big}: it would have {megapixels(width * height)} megapixels ({width}x{height}), and the limit "
+            f"is {megapixels(budget)}. Use fewer rows or a smaller width.",
+            detail=f"{width}x{height}",
+            limit="max_sheet_pixels",
+        )
 
 
 def header_lines(input_path: PathLike, info: MediaInfo, display_name: str | None) -> list[str]:
@@ -149,6 +171,7 @@ def render_still(
     emoji_dir: PathLike | None = None,
     max_workers: int | None = None,
     scratch_dir: PathLike | None = None,
+    limits: Limits | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> None:
     """
@@ -168,7 +191,7 @@ def render_still(
     header_style = HeaderStyle(load_font(optional_path(header_font), config.header_font_size), config.header_font_size)
     header_h = header_style.height if config.show_header else 0
     ts_font = load_font(optional_path(timestamp_font), config.timestamp_font_size)
-    check_sheet_size(config.width, header_h + layout.grid_height)
+    check_sheet_size(config.width, header_h + layout.grid_height, config.target, limits)
     sheet = Image.new("RGB", (config.width, header_h + layout.grid_height), config.grid_bg_color)
     if config.show_header:
         lines = header_lines(input_path, info, display_name)

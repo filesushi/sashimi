@@ -17,17 +17,20 @@ from PIL import Image, ImageOps
 from pydantic import BaseModel, ConfigDict
 
 from sashimi.config import (
-    DEFAULT_MAX_PIXELS,
-    MAX_ANIMATION_BYTES,
     MIN_FRAME_MS,
+    WEBP_MAX_SIDE,
     FramesConfig,
     FrameStripConfig,
     GifEditConfig,
     ImageEditConfig,
+    Limits,
 )
+from sashimi.config._base import SourceMetadata
 from sashimi.config._image import _BmpSave, _GifSave, _JpegSave, _Metadata, _WebpSave
+from sashimi.config._limits import megabytes, resolve_limits
 from sashimi.core._atomic import PathLike, atomic_output
 from sashimi.core._ffmpeg import ProgressCallback
+from sashimi.core._imagemeta import Carriers, add_tiff_groups, apply_mode, read_carriers, save_arguments, tiff_groups
 from sashimi.core.image import _flatten, _has_alpha, _open_image, encode_for
 from sashimi.errors import InvalidOptionsError, MediaTooLargeError, ProcessingError, UnsupportedMediaError
 
@@ -58,7 +61,10 @@ EDIT_TARGETS = {
     "TIFF": "tiff",
 }
 """The edit target that keeps each input format (HEIC/HEIF has no writer, so it becomes JPEG)."""
-MAX_STRIP_SIDE = 16383
+GIF_MAX_FRAME_MS = 655350
+"""The longest frame a GIF can store, in milliseconds (65535 hundredths of a second)."""
+WEBP_MAX_FRAME_MS = 0xFFFFFF
+"""The longest frame an animated WebP can store, in milliseconds."""
 
 ANIMATION_TOO_LARGE = "This animation is too large to edit. Try one with fewer frames or smaller pictures."
 NOT_ANIMATED = "This image isn't animated."
@@ -187,6 +193,53 @@ def _orientation(img: Image.Image) -> Image.Transpose | None:
         return None
 
 
+def _png_header(path: PathLike) -> tuple[list[int], int | None, bytes | None]:
+    """
+    An (A)PNG's frame durations (ms) and loop count, from its ``acTL`` and ``fcTL`` chunks, and
+    its ``eXIf`` chunk, read by skipping over the image data (so it decodes nothing).
+    """
+    durations: list[int] = []
+    plays: int | None = None
+    exif: bytes | None = None
+    default_in_animation = False
+    seen_data = False
+    with open(os.fspath(path), "rb") as f:
+        f.seek(8)
+        while header := f.read(8):
+            if len(header) < 8:
+                break
+            length, kind = struct.unpack(">I4s", header)
+            if kind in (b"acTL", b"fcTL", b"eXIf"):
+                payload = f.read(length)
+                f.seek(4, os.SEEK_CUR)
+                if kind == b"acTL" and len(payload) >= 8:
+                    plays = struct.unpack_from(">I", payload, 4)[0]
+                elif kind == b"fcTL" and len(payload) >= 26:
+                    numerator, denominator = struct.unpack_from(">HH", payload, 20)
+                    durations.append(round(numerator * 1000 / (denominator or 100)))
+                    if not seen_data:
+                        default_in_animation = True
+                elif kind == b"eXIf" and exif is None:
+                    exif = payload
+            else:
+                if kind == b"IDAT":
+                    seen_data = True
+                if kind == b"IEND":
+                    break
+                f.seek(length + 4, os.SEEK_CUR)
+    if plays is None or not durations:
+        return [0], None, exif
+    if not default_in_animation:
+        durations = [0, *durations]
+    return durations, (None if plays == 1 else max(0, plays - 1) if plays else 0), exif
+
+
+def _png_orientation(img: Image.Image, exif: bytes | None) -> Image.Transpose | None:
+    """A PNG's orientation without loading it (Pillow's ``getexif`` decodes a PNG to find a late ``eXIf``)."""
+    img.info.setdefault("exif", exif or b"")
+    return _orientation(img)
+
+
 def _frame_count(img: Image.Image) -> int:
     return int(getattr(img, "n_frames", 1))
 
@@ -200,20 +253,27 @@ def _is_animated(img: Image.Image) -> bool:
     return img.format in ANIMATED_FORMATS and _frame_count(img) > 1
 
 
-def frames_info(input_path: PathLike, *, max_pixels: int = DEFAULT_MAX_PIXELS) -> FramesInfo:
+def frames_info(input_path: PathLike, *, limits: Limits | None = None) -> FramesInfo:
     """
     The format, size as shown, frame count, frame durations and loop count of an image, read from
     its headers: no pixels are decoded, so it is quick even for long animations. Raises
     UnsupportedMediaError for files that aren't images sashimi reads, and MediaTooLargeError for
-    images with more than `max_pixels` pixels.
+    images with more than ``limits.max_pixels`` pixels (pass ``Limits.unlimited()`` to read any).
     """
-    with _open_image(input_path, max_pixels, load=False) as img:
+    with _open_image(input_path, limits, load=False) as img:
         fmt = str(img.format)
         width, height = img.size
-        if _orientation(img) in _SWAPS_SIDES:
+        loop: int | None = None
+        if fmt == "PNG":
+            durations, loop, exif = _png_header(input_path)
+            frames = len(durations)
+            orientation = _png_orientation(img, exif)
+        else:
+            orientation = _orientation(img)
+            frames = _frame_count(img) if fmt in ("MPO", "TIFF") else 1
+            durations = [0] * frames
+        if orientation in _SWAPS_SIDES:
             width, height = height, width
-        frames = _frame_count(img) if fmt in ("PNG", "MPO", "TIFF") else 1
-        durations, loop = [0] * frames, None
         if fmt in ANIMATED_FORMATS:
             with open(os.fspath(input_path), "rb") as f:
                 data = f.read()
@@ -336,10 +396,16 @@ def adjust_colors(
     return colour
 
 
-def _check_budget(img: Image.Image, frames: int) -> None:
+def _check_budget(img: Image.Image, frames: int, limits: Limits | None) -> None:
+    budget = resolve_limits(limits).max_animation_bytes
     needed = img.width * img.height * 4 * frames
-    if needed > MAX_ANIMATION_BYTES:
-        raise MediaTooLargeError(ANIMATION_TOO_LARGE, detail=f"{img.width}x{img.height} x {frames} frames")
+    if budget is not None and needed > budget:
+        raise MediaTooLargeError(
+            f"This animation is too large to edit: its frames would take {megabytes(needed)} of memory, and the "
+            f"limit is {megabytes(budget)}. Try one with fewer frames or smaller pictures.",
+            detail=f"{img.width}x{img.height} x {frames} frames",
+            limit="max_animation_bytes",
+        )
 
 
 def _frames(img: Image.Image, keep: frozenset[int] | None = None) -> Iterator[tuple[int, Image.Image, int]]:
@@ -392,8 +458,8 @@ def _palette_frame(frame: Image.Image) -> Image.Image:
 
 
 def _gif_duration(ms: float) -> int:
-    """GIFs store hundredths of a second, so durations are rounded to 10 ms."""
-    return int(ms / 10 + 0.5) * 10
+    """GIFs store hundredths of a second, so durations are rounded to 10 ms, up to the longest a GIF holds."""
+    return min(int(ms / 10 + 0.5) * 10, GIF_MAX_FRAME_MS)
 
 
 def _for_target(frame: Image.Image, config: object) -> Image.Image:
@@ -419,9 +485,10 @@ def _save_animation(
             kwargs["disposal"] = 2
         if loop is not None:
             kwargs["loop"] = loop
+        kwargs.update(metadata)
         fmt = "GIF"
     else:
-        kwargs["duration"] = [int(d + 0.5) for d in durations]
+        kwargs["duration"] = [min(int(d + 0.5), WEBP_MAX_FRAME_MS) for d in durations]
         kwargs.update(quality=config.quality, lossless=config.lossless, method=config.webp_method)
         kwargs["loop"] = 1 if loop is None else loop
         kwargs.update(metadata)
@@ -433,22 +500,33 @@ def _save_animation(
         raise ProcessingError(f"Cannot write {os.fspath(output_path)}: {e}") from e
 
 
-def _metadata(img: Image.Image, config: object) -> dict[str, Any]:
-    """The ICC profile and EXIF (orientation removed) to keep, as save() keyword arguments."""
+def _metadata(
+    img: Image.Image, config: object, carriers: Carriers, size: tuple[int, int], pil_format: str
+) -> dict[str, Any]:
+    """
+    The colour profile and the source's metadata to keep, as save() keyword arguments. Edits
+    always apply the orientation, so it is reset to 1, and drop embedded thumbnails, which show
+    the unedited picture.
+    """
     kept: dict[str, Any] = {}
-    if isinstance(config, _Metadata):
-        if config.keep_icc and img.mode != "CMYK" and img.info.get("icc_profile"):
-            kept["icc_profile"] = img.info["icc_profile"]
-        if config.keep_exif:
-            exif = img.getexif()
-            exif.pop(_EXIF_ORIENTATION, None)
-            if len(exif):
-                kept["exif"] = exif
+    if isinstance(config, _Metadata) and config.keep_icc and img.mode != "CMYK" and img.info.get("icc_profile"):
+        kept["icc_profile"] = img.info["icc_profile"]
+    if isinstance(config, SourceMetadata):
+        carried = apply_mode(carriers, config.metadata, upright=True, edited=True, size=size)
+        kept.update(save_arguments(carried, pil_format))
+        if pil_format == "TIFF":
+            kept["_groups"] = tiff_groups(carried)
     return kept
 
 
-def _edit_still(img: Image.Image, config: ImageEditConfig, output_path: PathLike, scratch_dir: PathLike | None) -> None:
-    metadata = _metadata(img, config)
+def _edit_still(
+    img: Image.Image,
+    config: ImageEditConfig,
+    carriers: Carriers,
+    output_path: PathLike,
+    scratch_dir: PathLike | None,
+) -> None:
+    source = img
     img = ImageOps.exif_transpose(img)
     img = _geometry(img, config)
     img = adjust_colors(img, config.brightness, config.contrast, config.saturation)
@@ -458,10 +536,13 @@ def _edit_still(img: Image.Image, config: ImageEditConfig, output_path: PathLike
         img = _palette_frame(img.convert("RGBA"))
     img, kwargs = encode_for(img, config, WHITE)
     img.info = {key: value for key, value in img.info.items() if key == "transparency"}
-    kwargs.update(metadata)
+    kwargs.update(_metadata(source, config, carriers, img.size, _PIL_FORMAT[config.target]))
+    groups = kwargs.pop("_groups", None)
     try:
         with atomic_output(output_path, scratch_dir) as temp:
             img.save(temp, format=_PIL_FORMAT[config.target], **kwargs)
+            if groups:
+                add_tiff_groups(temp, groups)
     except OSError as e:
         raise ProcessingError(f"Cannot write {os.fspath(output_path)}: {e}") from e
 
@@ -475,7 +556,7 @@ def edit(
     config: ImageEditConfig,
     *,
     scratch_dir: PathLike | None = None,
-    max_pixels: int = DEFAULT_MAX_PIXELS,
+    limits: Limits | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> None:
     """
@@ -488,18 +569,18 @@ def edit(
     The output format comes from the config: pass the source's own format to keep it
     (:func:`frames_info` gives it as ``edit_target``). Transparency is kept by formats that hold
     it. An animated GIF or WebP saved as GIF or WebP has every frame edited, keeping each
-    frame's duration and the loop count; one larger than
-    :data:`~sashimi.config.MAX_ANIMATION_BYTES` raises MediaTooLargeError. Saved as anything else,
-    an animation gives its first frame; animated PNGs raise UnsupportedMediaError. A crop box
-    outside the picture raises InvalidOptionsError. With nothing to change, a valid copy is still
-    written. Written atomically.
+    frame's duration and the loop count; one whose frames need more than
+    ``limits.max_animation_bytes`` raises MediaTooLargeError. Saved as anything else, an animation
+    gives its first frame; animated PNGs raise UnsupportedMediaError. A crop box outside the
+    picture raises InvalidOptionsError. Images over ``limits.max_pixels`` raise MediaTooLargeError.
+    With nothing to change, a valid copy is still written. Written atomically.
     """
-    with _open_image(input_path, max_pixels) as img:
+    with _open_image(input_path, limits) as img:
         if img.format == "PNG" and _frame_count(img) > 1:
             raise UnsupportedMediaError(ANIMATED_PNG)
+        carriers = read_carriers(input_path, img) if isinstance(config, SourceMetadata) else Carriers()
         if _is_animated(img) and isinstance(config, (_GifSave, _WebpSave)):
-            _check_budget(img, _frame_count(img))
-            metadata = _metadata(img, config)
+            _check_budget(img, _frame_count(img), limits)
             transpose = _orientation(img)
             loop = img.info.get("loop")
             frames: list[Image.Image] = []
@@ -514,9 +595,10 @@ def edit(
                 durations.append(duration)
                 if on_progress:
                     on_progress((index + 1) / (total + 1), "editing")
+            metadata = _metadata(img, config, carriers, frames[0].size, _PIL_FORMAT[config.target])
             _save_animation(frames, durations, loop, config, output_path, scratch_dir, metadata)
         else:
-            _edit_still(img, config, output_path, scratch_dir)
+            _edit_still(img, config, carriers, output_path, scratch_dir)
     if on_progress:
         on_progress(1.0, "done")
 
@@ -534,34 +616,36 @@ def select_frames(
     config: FramesConfig,
     *,
     scratch_dir: PathLike | None = None,
-    max_pixels: int = DEFAULT_MAX_PIXELS,
+    limits: Limits | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> None:
     """
     Keeps some frames of an animated GIF or WebP, and changes its speed, as `config` says (see
     :data:`~sashimi.config.IMAGE_FRAMES`). Kept frames play in their original order, each for its
     own duration divided by ``speed``; when the speed changes, frames browsers would play at
-    100 ms (under 20 ms) count as 100 ms, and no frame gets shorter than
-    :data:`~sashimi.config.MIN_FRAME_MS`. The loop count is kept. Every frame is as shown in the
-    source (the full canvas), so dropping frames never leaves holes.
+    100 ms (under 20 ms) count as 100 ms, no frame gets shorter than
+    :data:`~sashimi.config.MIN_FRAME_MS`, and none longer than the format can store. The loop
+    count is kept. Every frame is as shown in the source (the full canvas), so dropping frames
+    never leaves holes.
 
     The output format comes from the config: pass the source's own format to keep it. With every
     frame kept and a speed of 1 the animation is unchanged. Raises UnsupportedMediaError for an
     image that isn't animated, InvalidOptionsError for frames the animation doesn't have, and
-    MediaTooLargeError above :data:`~sashimi.config.MAX_ANIMATION_BYTES`. Written atomically.
+    MediaTooLargeError over ``limits.max_animation_bytes`` or ``limits.max_pixels``. Written
+    atomically.
     """
-    with _open_image(input_path, max_pixels) as img:
+    with _open_image(input_path, limits) as img:
         if not _is_animated(img):
             raise UnsupportedMediaError(NOT_ANIMATED, detail=f"Pillow format {img.format}")
         total = _frame_count(img)
-        _check_budget(img, total)
+        _check_budget(img, total, limits)
         keep = config.keep if config.keep is not None else tuple(range(total))
         if keep[-1] >= total:
             raise InvalidOptionsError(
                 f"Some of the frames to keep aren't in this animation, which has {total} frames.",
                 detail=f"keep {keep}",
             )
-        metadata = _metadata(img, config)
+        carriers = read_carriers(input_path, img) if isinstance(config, SourceMetadata) else Carriers()
         transpose = _orientation(img)
         loop = img.info.get("loop")
         frames: list[Image.Image] = []
@@ -571,6 +655,7 @@ def select_frames(
             durations.append(_speed(duration, config.speed))
             if on_progress:
                 on_progress((index + 1) / (total + 1), "selecting")
+        metadata = _metadata(img, config, carriers, frames[0].size, _PIL_FORMAT[config.target])
         _save_animation(frames, durations, loop, config, output_path, scratch_dir, metadata)
     if on_progress:
         on_progress(1.0, "done")
@@ -580,16 +665,16 @@ def plan_frame_strip(width: int, height: int, frames: int, config: FrameStripCon
     """
     The layout :func:`frame_strip` uses for `frames` frames of `width` x `height`. Pure. Tiles
     are ``tile_height`` tall (never taller than the frames) with widths that keep the shape; more
-    columns are used if the strip would be taller than WebP allows. Raises MediaTooLargeError if
-    it can't fit either way.
+    columns are used if the strip would be taller than WebP allows
+    (:data:`~sashimi.config.WEBP_MAX_SIDE`). Raises MediaTooLargeError if it can't fit either way.
     """
     config = config or FrameStripConfig()
-    tile_height = max(1, min(config.tile_height, height))
+    tile_height = max(1, min(config.tile_height, height, WEBP_MAX_SIDE))
     tile_width = max(1, round(width * tile_height / height))
     columns = max(1, min(config.columns, frames))
-    if math.ceil(frames / columns) * tile_height > MAX_STRIP_SIDE:
-        columns = math.ceil(frames / (MAX_STRIP_SIDE // tile_height))
-    if columns * tile_width > MAX_STRIP_SIDE:
+    if math.ceil(frames / columns) * tile_height > WEBP_MAX_SIDE:
+        columns = math.ceil(frames / (WEBP_MAX_SIDE // tile_height))
+    if columns * tile_width > WEBP_MAX_SIDE:
         raise MediaTooLargeError(ANIMATION_TOO_LARGE, detail=f"{frames} tiles of {tile_width}x{tile_height}")
     return FrameStrip(
         tile_width=tile_width,
@@ -606,21 +691,21 @@ def frame_strip(
     config: FrameStripConfig | None = None,
     *,
     scratch_dir: PathLike | None = None,
-    max_pixels: int = DEFAULT_MAX_PIXELS,
+    limits: Limits | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> FrameStrip:
     """
     Draws every frame of an image (one for a still image) as a small tile in one still WebP, left
     to right and top to bottom, so a UI can show the frames to pick from, and returns the layout
     (see :func:`plan_frame_strip`). Tiles are as shown (EXIF orientation applied); transparent
-    areas stay transparent. Refused above :data:`~sashimi.config.MAX_ANIMATION_BYTES` like edits.
-    Written atomically.
+    areas stay transparent. Refused over ``limits.max_animation_bytes`` and ``limits.max_pixels``,
+    like edits. Written atomically.
     """
     config = config or FrameStripConfig()
-    with _open_image(input_path, max_pixels) as img:
+    with _open_image(input_path, limits) as img:
         animated = _is_animated(img)
         total = _frame_count(img) if animated else 1
-        _check_budget(img, total)
+        _check_budget(img, total, limits)
         transpose = _orientation(img)
         width, height = (img.height, img.width) if transpose in _SWAPS_SIDES else img.size
         layout = plan_frame_strip(width, height, total, config)

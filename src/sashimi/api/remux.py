@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from sashimi.api._batch import VIDEO_EXTENSIONS, FileProgress, PathInput, YieldType, output_name, run_batch
 from sashimi.api._consume import consume_generator
-from sashimi.config import CopyTrimConfig
+from sashimi.config import CopyTrimConfig, Limits, MetadataMode
 from sashimi.core.video import trim
 
 __all__ = ["remux_files", "remux_files_generator"]
@@ -25,6 +25,7 @@ def remux_files_generator(
     paths: PathInput | Sequence[PathInput],
     container: Container = "mkv",
     *,
+    metadata: MetadataMode = "keep",
     recursive: bool = False,
     force: bool = False,
     extensions: Iterable[str] | None = None,
@@ -32,16 +33,19 @@ def remux_files_generator(
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
     dry_run: bool = False,
+    limits: Limits | None = None,
 ) -> Iterator[YieldType]:
     """
     Copies every video found into `container` without re-encoding (a whole-file
     :func:`sashimi.video.trim` with a :class:`~sashimi.config.CopyTrimConfig` and no end), writing
     ``<stem>.<container>`` next to each video, under `output_dir`, or to `output` for a single
-    video. Every stream is kept; text subtitles the container can't hold are converted. Videos
+    video. Every stream is kept (but timed metadata tracks when `metadata` removes anything, and
+    cover art for ``remove_all``); text subtitles the container can't hold are converted. Videos
     whose streams the container can't hold are reported as errors before anything is written.
     Sources are never changed or removed. Files already in that container aren't picked up.
+    `metadata` keeps the source's tags (the default) or removes location tags or all of them.
     """
-    config = CopyTrimConfig.from_params(container=container)
+    config = CopyTrimConfig.from_params(container=container, metadata=metadata)
     own = CONTAINER_EXTENSIONS[config.container]
     label = config.container.upper()
 
@@ -54,7 +58,7 @@ def remux_files_generator(
         recursive=recursive,
         force=force,
         name_for=lambda _, stem: output_name(stem, own[0]),
-        process=lambda src, dst, progress: trim(src, dst, config, on_progress=progress),
+        process=lambda src, dst, progress: trim(src, dst, config, limits=limits, on_progress=progress),
         success_message="Remuxed to {name}",
         on_file_progress=on_file_progress,
         reject_reason=reject_reason,

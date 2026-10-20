@@ -12,12 +12,12 @@ from typing import TYPE_CHECKING, Any
 
 import annotated_types
 
-from sashimi.cli import convert_cmd, edit_cmd, thumbs_cmd
+from sashimi.cli import _limits, convert_cmd, edit_cmd, thumbs_cmd
 
 if TYPE_CHECKING:
-    from sashimi.config import ParamsModel
+    from pydantic import BaseModel
 
-OPERATIONS = ("convert", "resize", "rotate", "favicon", "edit", "frames", "extract", "thumbs", "preview")
+OPERATIONS = ("convert", "resize", "rotate", "favicon", "edit", "frames", "extract", "thumbs", "preview", "limits")
 DISCRIMINATORS = frozenset({"target", "container", "accurate", "animated"})
 NONE_MEANS = {
     "max_width": "source width",
@@ -62,11 +62,15 @@ def flags_for(operation: str) -> dict[str, str]:
         return FAVICON_FLAGS
     if operation in ("edit", "frames"):
         return edit_cmd.FLAGS
+    if operation == "limits":
+        return _limits.FLAGS
     return convert_cmd.FLAGS
 
 
 def format_value(value: Any, field: str = "", operation: str = "") -> str:
     """A value as the CLI writes it: colours as hex, whole floats without '.0', booleans as true/false."""
+    if operation == "limits":
+        return _limits.format_limit(field, value)
     if value is None:
         return NONE_MEANS.get(f"{operation}.{field}") or NONE_MEANS.get(field, "none")
     if isinstance(value, bool):
@@ -138,13 +142,13 @@ def describe(field: Any) -> str:
     return text.replace("``", "")
 
 
-def models_for(operation: str, fmt: str | None = None) -> list[tuple[str, type[ParamsModel]]]:
+def models_for(operation: str, fmt: str | None = None) -> list[tuple[str, type[BaseModel]]]:
     """The config models behind one command, titled, optionally only those for one output format."""
     from sashimi import config
     from sashimi.config._base import normalize_target
 
     fmt = normalize_target(fmt)
-    found: list[tuple[str, type[ParamsModel]]] = []
+    found: list[tuple[str, type[BaseModel]]] = []
 
     def add(family: Any, kind: str) -> None:
         for target in family.targets:
@@ -176,6 +180,8 @@ def models_for(operation: str, fmt: str | None = None) -> list[tuple[str, type[P
                 found.append((f"Lossless cut → {container.upper()}", config.CopyTrimConfig))
                 accurate = config.VIDEO_TRIM.model_for(container=container, accurate=True)
                 found.append((f"Accurate cut (--accurate) → {container.upper()}", accurate))
+    elif operation == "limits":
+        found.append(("Limits (every command)", config.Limits))
     elif operation == "thumbs":
         for animated, kind in ((False, "Still sheets"), (True, "Animated sheets (--animated)")):
             for target in ("jpeg", "png", "webp") if not animated else ("webp", "gif"):
@@ -183,6 +189,19 @@ def models_for(operation: str, fmt: str | None = None) -> list[tuple[str, type[P
                     found.append(
                         (f"{kind} → {target.upper()}", config.CONTACT_SHEET.model_for(animated=animated, target=target))
                     )
+    return found
+
+
+def limit_overrides(raw: dict[str, Any]) -> dict[str, Any]:
+    """The limits set in `raw` (merged sashimi.toml), parsed, by field; unparsable values as written."""
+    from sashimi.cli import settings
+
+    found = {}
+    for key, value in settings.limit_settings(raw).items():
+        try:
+            found[key] = _limits.parse(key, value)
+        except ValueError:
+            found[key] = value
     return found
 
 
@@ -251,7 +270,7 @@ def with_toml_note(help: str, note: str) -> str:
     return f"{help} \\[sashimi.toml: {note}]"
 
 
-def rows(operation: str, model: type[ParamsModel], overrides: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def rows(operation: str, model: type[BaseModel], overrides: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """One row per option of `model`: field, CLI option, default, accepted values, description and any sashimi.toml value."""
     flags = flags_for(operation)
     cli_defaults = CLI_DEFAULTS.get(operation, {})
@@ -263,7 +282,7 @@ def rows(operation: str, model: type[ParamsModel], overrides: dict[str, Any] | N
             "field": name,
             "option": flags.get(name),
             "default": cli_defaults.get(name, field.default),
-            "accepted": allowed(name, field),
+            "accepted": _limits.accepted(name) if operation == "limits" else allowed(name, field),
             "description": describe(field),
         }
         if name in cli_defaults:

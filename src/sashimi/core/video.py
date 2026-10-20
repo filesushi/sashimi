@@ -9,15 +9,17 @@ from typing import Literal
 
 from sashimi.config import (
     DURATION_TOLERANCE_SECONDS,
-    MAX_VIDEO_SECONDS,
     CopyTrimConfig,
+    MetadataMode,
     GifVideoConfig,
+    Limits,
     Mp4VideoConfig,
     TransformConfig,
     TrimConfig,
     VideoConvertConfig,
     WebpVideoConfig,
 )
+from sashimi.config._limits import duration_text, megabytes, resolve_limits
 from sashimi.config._video import _H264Options, _Vp9Options
 from sashimi.core._atomic import PathLike, atomic_output
 from sashimi.core._ffmpeg import (
@@ -30,6 +32,7 @@ from sashimi.core._ffmpeg import (
     fmt_seconds,
     run_ffmpeg,
 )
+from sashimi.core._mediameta import dropped_streams, first_stream, metadata_args, opus_kbps
 from sashimi.core._resources import resolve_max_workers
 from sashimi.core.probe import VIDEO_CONTAINERS, MediaInfo, probe
 from sashimi.errors import (
@@ -44,6 +47,7 @@ __all__ = [
     "VideoRoute",
     "build_convert_command",
     "convert",
+    "gif_frame_bytes",
     "plan_mp4_route",
     "subtitle_conversions",
     "build_trim_command",
@@ -56,10 +60,14 @@ __all__ = [
 logger = logging.getLogger("sashimi")
 
 NOT_A_VIDEO = "This file doesn't look like a video we can read."
-TOO_LONG_VIDEO = (
-    f"Videos longer than {MAX_VIDEO_SECONDS // 60} minutes aren't supported yet. "
-    "Set a shorter duration to convert part of it."
-)
+
+
+def _too_long(limit: float) -> MediaTooLongError:
+    return MediaTooLongError(
+        f"Videos longer than {duration_text(limit)} aren't supported yet. Set a shorter duration to convert part of it.",
+        limit="max_video_seconds",
+    )
+
 
 _MUXERS = {"gif": "gif", "webp": "webp", "webm": "webm", "mp4": "mp4", "mkv": "matroska", "mov": "mov"}
 _ANY = None
@@ -103,8 +111,13 @@ def subtitle_conversions(subtitles: Sequence[str], container: str) -> list[str]:
     return args
 
 
-def _encoder_args(config: _H264Options | _Vp9Options, *, faststart: bool = True) -> list[str]:
-    """Video and audio codec arguments for a VP9/Opus or H.264/AAC encode."""
+def _encoder_args(
+    config: _H264Options | _Vp9Options, *, faststart: bool = True, audio_channels: int | None = None
+) -> list[str]:
+    """
+    Video and audio codec arguments for a VP9/Opus or H.264/AAC encode. Opus's bitrate is lowered
+    to its ceiling for `audio_channels` (see :data:`~sashimi.config.OPUS_MAX_KBPS_PER_CHANNEL`).
+    """
     crf = str(config.crf)
     if isinstance(config, _Vp9Options):
         video = [
@@ -128,7 +141,29 @@ def _encoder_args(config: _H264Options | _Vp9Options, *, faststart: bool = True)
         tail = ["-movflags", "+faststart"] if faststart else []
     if config.mute:
         return [*video, *tail]
-    return [*video, *audio, "-b:a", f"{config.audio_bitrate_kbps}k", *tail]
+    kbps = config.audio_bitrate_kbps
+    if isinstance(config, _Vp9Options):
+        kbps = opus_kbps(kbps, audio_channels)
+    return [*video, *audio, "-b:a", f"{kbps}k", *tail]
+
+
+def _first_streams(source: MediaInfo | None, mute: bool) -> list[int | None]:
+    """The source streams a re-encode or MP4 copy writes: the first video, then the first audio unless muted."""
+    outputs = [first_stream(source, "video")]
+    if not mute and first_stream(source, "audio") is not None:
+        outputs.append(first_stream(source, "audio"))
+    return outputs
+
+
+def _channels(source: MediaInfo | None) -> int | None:
+    return source.audio_channels if source is not None else None
+
+
+def _log_opus_cap(config: object, info: MediaInfo) -> None:
+    if isinstance(config, _Vp9Options) and not config.mute:
+        capped = opus_kbps(config.audio_bitrate_kbps, info.audio_channels)
+        if capped < config.audio_bitrate_kbps:
+            logger.info(f"Opus allows at most {capped} kb/s for {info.audio_channels} channel(s); using {capped} kb/s.")
 
 
 def _stream_args(mute: bool) -> list[str]:
@@ -152,17 +187,18 @@ def _check_start(start: float, duration: float) -> None:
         raise InvalidOptionsError(f"The start time ({start:g}s) is past the end of the video ({duration:.0f}s).")
 
 
-def _length_limit(requested: float | None, start: float, duration: float) -> float:
+def _length_limit(requested: float | None, start: float, duration: float, limit: float | None) -> float:
     """
     The ``-t`` value for a re-encode: the requested length, or else the rest of the probed video
-    plus :data:`DURATION_TOLERANCE_SECONDS`, capped at :data:`MAX_VIDEO_SECONDS`. Raises
-    MediaTooLongError when the rest of the video is over the limit and no length was requested.
+    plus :data:`DURATION_TOLERANCE_SECONDS`, capped at `limit` (``Limits.max_video_seconds``).
+    Raises MediaTooLongError when the rest of the video is over the limit and no length was requested.
     """
     if requested is not None:
         return requested
-    if duration - start > MAX_VIDEO_SECONDS:
-        raise MediaTooLongError(TOO_LONG_VIDEO)
-    return min(duration - start + DURATION_TOLERANCE_SECONDS, MAX_VIDEO_SECONDS)
+    if limit is not None and duration - start > limit:
+        raise _too_long(limit)
+    rest = duration - start + DURATION_TOLERANCE_SECONDS
+    return rest if limit is None else min(rest, limit)
 
 
 def _progress_args() -> list[str]:
@@ -225,6 +261,7 @@ def _copy_command(
     t_value: float,
     threads: int,
     ffmpeg: str,
+    source: MediaInfo | None,
 ) -> list[str]:
     copy_audio = route == "copy"
     cmd = [ffmpeg, *base_args(1 if copy_audio else threads), *_progress_args(), *INPUT_PROTOCOLS]
@@ -236,6 +273,7 @@ def _copy_command(
     if not copy_audio:
         cmd += ["-threads", str(threads)]
     cmd += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart"]
+    cmd += metadata_args(config.metadata, source, _first_streams(source, config.mute))
     return [*cmd, *OUTPUT_FLAGS, "-f", "mp4", file_arg(output_path)]
 
 
@@ -248,27 +286,36 @@ def build_convert_command(
     threads: int,
     ffmpeg: str = "ffmpeg",
     route: VideoRoute = "encode",
+    limits: Limits | None = None,
+    source: MediaInfo | None = None,
 ) -> list[str]:
     """
     Builds the ffmpeg command for :func:`convert`. Pure: no filesystem or process access.
 
     `duration` is the probed input length in seconds. Raises the same user errors as
-    :func:`convert` for out-of-range options. ``-ss`` and ``-t`` are *input* options (before
-    ``-i``) so ffmpeg stops reading at the end of the clip instead of decoding the rest of the file.
-    Without ``duration_seconds``, ``-t`` is the rest of the probed video (plus
-    :data:`~sashimi.config.DURATION_TOLERANCE_SECONDS`, at most
-    :data:`~sashimi.config.MAX_VIDEO_SECONDS`), so a file whose header understates its length
-    can't be encoded past it.
+    :func:`convert` for out-of-range options and `limits`. ``-ss`` and ``-t`` are *input* options
+    (before ``-i``) so ffmpeg stops reading at the end of the clip instead of decoding the rest of
+    the file. Without ``duration_seconds``, ``-t`` is the rest of the probed video (plus
+    :data:`~sashimi.config.DURATION_TOLERANCE_SECONDS`, and at most ``limits.max_video_seconds``),
+    so a file whose header understates its length can't be encoded past it.
 
     `route` is the MP4 route (see :func:`plan_mp4_route`); the copy routes use ``-c:v copy``
     with the same streams, length, ``+faststart`` and length limits as the re-encode.
+
+    `source` is the probed input, used to carry out ``metadata`` (stream tags and languages) and
+    to keep Opus within its per-channel bitrate; without it, tags named by the mode's fixed list
+    are removed and the bitrate is passed as asked.
     """
+    limits = resolve_limits(limits)
+    limits.check(config)
     _check_start(config.start_seconds, duration)
-    t_value = _length_limit(config.duration_seconds, config.start_seconds, duration)
+    t_value = _length_limit(config.duration_seconds, config.start_seconds, duration, limits.max_video_seconds)
     if route != "encode":
         if not isinstance(config, Mp4VideoConfig) or config.start_seconds > 0:
             raise ValueError(f"route {route!r} is only for MP4 output from the start of the video")
-        return _copy_command(input_path, output_path, config, route, t_value=t_value, threads=threads, ffmpeg=ffmpeg)
+        return _copy_command(
+            input_path, output_path, config, route, t_value=t_value, threads=threads, ffmpeg=ffmpeg, source=source
+        )
 
     cmd = [ffmpeg, *base_args(threads), *_progress_args(), *INPUT_PROTOCOLS, "-threads", str(threads)]
     if config.start_seconds > 0:
@@ -306,9 +353,33 @@ def build_convert_command(
     else:
         width = config.max_width
         scale = f"scale='min({width},iw)':-2:flags=lanczos" if width else "scale=trunc(iw/2)*2:trunc(ih/2)*2"
-        cmd += ["-vf", scale, *_stream_args(config.mute), *_encoder_args(config)]
+        cmd += ["-vf", scale, *_stream_args(config.mute), *_encoder_args(config, audio_channels=_channels(source))]
+        cmd += metadata_args(config.metadata, source, _first_streams(source, config.mute))
     cmd += ["-threads", str(threads), *OUTPUT_FLAGS, "-f", _MUXERS[config.target], file_arg(output_path)]
     return cmd
+
+
+def gif_frame_bytes(info: MediaInfo, config: GifVideoConfig) -> int:
+    """
+    The memory a GIF made from this video needs for its frames, counted as for
+    ``Limits.max_frame_bytes`` (width x height x 3 bytes a frame): ffmpeg keeps every frame
+    until it has built the palette. Pure.
+    """
+    width, height = max(info.width or 2, 2), max(info.height or 2, 2)
+    out_w = min(config.max_width, width)
+    out_h = max(2, round(height * out_w / width / 2) * 2)
+    remaining = max(0.0, (info.duration or 0.0) - config.start_seconds)
+    frames = max(1, round(min(config.duration_seconds, remaining) * config.fps))
+    return frames * out_w * out_h * 3
+
+
+def _too_big_gif(needed: int, limit: int) -> InvalidOptionsError:
+    return InvalidOptionsError(
+        f"These settings would make the GIF too large to render: its frames would take {megabytes(needed)} of "
+        f"memory, and the limit is {megabytes(limit)}. Use a smaller width, a lower frame rate or a shorter length.",
+        detail=f"{needed} bytes of frames",
+        limit="max_frame_bytes",
+    )
 
 
 def convert(
@@ -318,6 +389,7 @@ def convert(
     *,
     max_workers: int | None = None,
     scratch_dir: PathLike | None = None,
+    limits: Limits | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> VideoRoute:
     """
@@ -330,13 +402,30 @@ def convert(
     fails (ffmpeg can't remux the source), it re-encodes instead and returns ``encode``. Every
     other target returns ``encode``.
 
+    `limits` (default ``Limits()``): a GIF or animated WebP longer than ``max_gif_seconds`` and a
+    WebM or MP4 clip longer than ``max_video_seconds`` raise InvalidOptionsError before the file
+    is read; a whole video longer than ``max_video_seconds`` raises MediaTooLongError, and a GIF
+    whose frames need more than ``max_frame_bytes`` (see :func:`gif_frame_bytes`)
+    InvalidOptionsError.
+
+    WebM and MP4 keep the source's tags and chapters as far as the container holds them, unless
+    ``metadata`` says to remove location tags or all of them; GIFs and animated WebPs hold none.
+    An Opus bitrate above what Opus allows for the audio's channels is lowered to it.
+
     `max_workers` is the number of threads each ffmpeg stage may use (default min(4, CPUs)).
     One ffmpeg process runs; with ``max_workers=2`` it uses roughly 15 threads in total.
     The output is written atomically; the input's name and extension are ignored.
     """
+    limits = resolve_limits(limits)
+    limits.check(config)
     threads = resolve_max_workers(max_workers)
     info = _probe_video(input_path)
     assert info.duration is not None
+    if isinstance(config, GifVideoConfig) and limits.max_frame_bytes is not None:
+        _check_start(config.start_seconds, info.duration)
+        needed = gif_frame_bytes(info, config)
+        if needed > limits.max_frame_bytes:
+            raise _too_big_gif(needed, limits.max_frame_bytes)
     remaining = info.duration - config.start_seconds
     expected = min(config.duration_seconds or remaining, remaining)
 
@@ -350,10 +439,13 @@ def convert(
                 threads=threads,
                 ffmpeg=ffmpeg_binary(),
                 route=route,
+                limits=limits,
+                source=info,
             )
             run_ffmpeg(cmd, progress_total=expected, on_progress=on_progress, stage="encoding")
         return route
 
+    _log_opus_cap(config, info)
     planned = plan_mp4_route(info, config) if isinstance(config, Mp4VideoConfig) else "encode"
     try:
         taken = run(planned)
@@ -369,9 +461,11 @@ def convert(
     return taken
 
 
-def _can_copy(info: MediaInfo, container: str) -> bool:
+def _can_copy(info: MediaInfo, container: str, skip: frozenset[int] = frozenset()) -> bool:
     allowed, refused = _COPY_ALLOWED[container], _COPY_REFUSED[container]
-    for stream in info.streams:
+    for index, stream in enumerate(info.streams):
+        if index in skip:
+            continue
         if stream.type == "subtitle" and stream.codec in TEXT_SUBTITLES:
             continue
         if stream.type not in allowed or stream.codec in refused:
@@ -382,16 +476,18 @@ def _can_copy(info: MediaInfo, container: str) -> bool:
     return True
 
 
-def check_copy_compatible(info: MediaInfo, container: str) -> None:
+def check_copy_compatible(info: MediaInfo, container: str, metadata: MetadataMode = "keep") -> None:
     """
     Raises InvalidOptionsError if the streams of `info` can't be copied into `container` (mkv,
     mp4, webm or mov) without re-encoding, e.g. H.264 into WebM, or a timecode track into MKV.
     Text subtitles always pass: the copy converts any the container can't hold (see
-    :func:`subtitle_conversions`).
+    :func:`subtitle_conversions`). Streams a `metadata` mode drops (data streams unless
+    ``keep``, cover art for ``remove_all``) don't count.
     """
-    if _can_copy(info, container):
+    skip = frozenset(dropped_streams(info, metadata))
+    if _can_copy(info, container, skip):
         return
-    others = [other for other in ("mkv", "mp4", "mov", "webm") if other != container and _can_copy(info, other)]
+    others = [other for other in ("mkv", "mp4", "mov", "webm") if other != container and _can_copy(info, other, skip)]
     hint = f" Try {others[0].upper()} instead." if others else ""
     streams = ", ".join(f"{s.type}:{s.codec}" for s in info.streams)
     raise InvalidOptionsError(
@@ -408,6 +504,8 @@ def build_trim_command(
     threads: int = 1,
     ffmpeg: str = "ffmpeg",
     subtitles: Sequence[str] = (),
+    limits: Limits | None = None,
+    source: MediaInfo | None = None,
 ) -> list[str]:
     """
     Builds the ffmpeg command for :func:`trim`. Pure.
@@ -418,8 +516,12 @@ def build_trim_command(
     can't hold are converted (MP4 ``mov_text`` to SRT for MKV, SRT or ASS to ``mov_text`` for
     MP4/MOV, to WebVTT for WebM) while everything else is copied.
     An accurate cut re-encodes with `threads` threads and, like :func:`convert`, is limited to
-    :data:`~sashimi.config.MAX_VIDEO_SECONDS`.
+    ``limits.max_video_seconds``; a stream copy has no length limit. `source` is the probed input,
+    used as in :func:`build_convert_command`; a copy that removes metadata also leaves out timed
+    metadata (data streams, such as GPS tracks), and cover art for ``remove_all``.
     """
+    limits = resolve_limits(limits)
+    limits.check(config)
     _check_start(config.start_seconds, duration)
     length = config.length
 
@@ -429,20 +531,27 @@ def build_trim_command(
             cmd += ["-ss", fmt_seconds(config.start_seconds)]
         if length is not None:
             cmd += ["-t", fmt_seconds(length)]
-        cmd += ["-i", file_arg(input_path), "-map", "0", "-c", "copy"]
+        cmd += ["-i", file_arg(input_path), "-map", "0"]
+        dropped = dropped_streams(source, config.metadata)
+        for index in dropped:
+            cmd += ["-map", f"-0:{index}"]
+        cmd += ["-c", "copy"]
         cmd += [*subtitle_conversions(subtitles, config.container), "-avoid_negative_ts", "make_zero"]
         if config.container in ("mp4", "mov"):
             cmd += ["-movflags", "+faststart"]
+        kept = [index for index in range(len(source.streams)) if index not in dropped] if source else []
+        cmd += metadata_args(config.metadata, source, kept)
         cmd += [*OUTPUT_FLAGS, "-f", _MUXERS[config.container], file_arg(output_path)]
         return cmd
 
-    t_value = _length_limit(length, config.start_seconds, duration)
+    t_value = _length_limit(length, config.start_seconds, duration, limits.max_video_seconds)
     cmd = [ffmpeg, *base_args(threads), *_progress_args(), *INPUT_PROTOCOLS, "-threads", str(threads)]
     if config.start_seconds > 0:
         cmd += ["-ss", fmt_seconds(config.start_seconds)]
     cmd += ["-t", fmt_seconds(t_value), "-i", file_arg(input_path)]
     cmd += ["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", *_stream_args(config.mute)]
-    cmd += _encoder_args(config, faststart=config.container in ("mp4", "mov"))
+    cmd += _encoder_args(config, faststart=config.container in ("mp4", "mov"), audio_channels=_channels(source))
+    cmd += metadata_args(config.metadata, source, _first_streams(source, config.mute))
     cmd += ["-threads", str(threads), *OUTPUT_FLAGS, "-f", _MUXERS[config.container], file_arg(output_path)]
     return cmd
 
@@ -454,6 +563,7 @@ def trim(
     *,
     max_workers: int | None = None,
     scratch_dir: PathLike | None = None,
+    limits: Limits | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> None:
     """
@@ -467,14 +577,22 @@ def trim(
 
     With no end and no length, a copy takes the whole file: a lossless remux into another
     container. Copies convert text subtitles the container can't hold (for example MP4
-    ``mov_text`` into MKV becomes SRT); an accurate cut drops subtitles.
+    ``mov_text`` into MKV becomes SRT); an accurate cut drops subtitles. Tags and chapters are
+    kept unless ``metadata`` says otherwise; a copy that removes metadata also leaves out timed
+    metadata tracks (such as GPS tracks), and cover art for ``remove_all``.
+
+    An accurate cut longer than ``limits.max_video_seconds`` raises InvalidOptionsError, or
+    MediaTooLongError when it runs to the end of a longer video. Copies have no length limit.
     """
+    limits = resolve_limits(limits)
+    limits.check(config)
     info = _probe_video(input_path)
     assert info.duration is not None
     copy = isinstance(config, CopyTrimConfig)
     if copy:
-        check_copy_compatible(info, config.container)
+        check_copy_compatible(info, config.container, config.metadata)
     threads = 1 if copy else resolve_max_workers(max_workers)
+    _log_opus_cap(config, info)
     subtitles = [stream.codec for stream in info.streams if stream.type == "subtitle"]
     with atomic_output(output_path, scratch_dir) as temp:
         cmd = build_trim_command(
@@ -485,6 +603,8 @@ def trim(
             threads=threads,
             ffmpeg=ffmpeg_binary(),
             subtitles=subtitles,
+            limits=limits,
+            source=info,
         )
         if copy:
             run_ffmpeg(cmd)
@@ -513,14 +633,16 @@ def build_transform_command(
     duration: float,
     threads: int,
     ffmpeg: str = "ffmpeg",
+    limits: Limits | None = None,
+    source: MediaInfo | None = None,
 ) -> list[str]:
     """
-    Builds the ffmpeg command for :func:`transform`. Pure. Uses the same encoders as :func:`convert`.
-    ``-t`` is the probed length (plus the tolerance, at most
-    :data:`~sashimi.config.MAX_VIDEO_SECONDS`), so a file whose header understates its length
-    can't run past it.
+    Builds the ffmpeg command for :func:`transform`. Pure. Uses the same encoders as :func:`convert`,
+    and `source` as it does.
+    ``-t`` is the probed length (plus the tolerance, and at most ``limits.max_video_seconds``),
+    so a file whose header understates its length can't run past it.
     """
-    t_value = _length_limit(None, 0.0, duration)
+    t_value = _length_limit(None, 0.0, duration, resolve_limits(limits).max_video_seconds)
     vf = ",".join([*_transform_filters(config), "scale=trunc(iw/2)*2:trunc(ih/2)*2"])
     return [
         ffmpeg,
@@ -536,7 +658,8 @@ def build_transform_command(
         "-vf",
         vf,
         *_stream_args(config.mute),
-        *_encoder_args(config),
+        *_encoder_args(config, audio_channels=_channels(source)),
+        *metadata_args(config.metadata, source, _first_streams(source, config.mute)),
         "-threads",
         str(threads),
         *OUTPUT_FLAGS,
@@ -553,18 +676,29 @@ def transform(
     *,
     max_workers: int | None = None,
     scratch_dir: PathLike | None = None,
+    limits: Limits | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> None:
     """
     Rotates and/or flips a video, re-encoding it as `config.target` (see
-    :data:`~sashimi.config.VIDEO_TRANSFORM`). Display-rotation metadata is applied first.
+    :data:`~sashimi.config.VIDEO_TRANSFORM`). Display-rotation metadata is applied first. Tags
+    follow ``metadata``, as in :func:`convert`. A video longer than ``limits.max_video_seconds``
+    raises MediaTooLongError.
     """
     threads = resolve_max_workers(max_workers)
     info = _probe_video(input_path)
     assert info.duration is not None
+    _log_opus_cap(config, info)
     with atomic_output(output_path, scratch_dir) as temp:
         cmd = build_transform_command(
-            input_path, temp, config, duration=info.duration, threads=threads, ffmpeg=ffmpeg_binary()
+            input_path,
+            temp,
+            config,
+            duration=info.duration,
+            threads=threads,
+            ffmpeg=ffmpeg_binary(),
+            limits=limits,
+            source=info,
         )
         run_ffmpeg(cmd, progress_total=info.duration, on_progress=on_progress, stage="encoding")
     if on_progress:

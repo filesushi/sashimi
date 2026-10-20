@@ -11,6 +11,7 @@ from sashimi.config import (
     VIDEO_TRIM,
     CopyTrimConfig,
     H264TrimConfig,
+    Limits,
     Mp4TransformConfig,
     Vp9TrimConfig,
 )
@@ -36,11 +37,13 @@ WEBM = ["-c:v", "libvpx-vp9", "-crf", "34", "-b:v", "0", "-deadline", "realtime"
 WEBM += ["-c:a", "libopus", "-b:a", "96k"]
 MP4 = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-b:a", "128k"]
 MP4 += ["-movflags", "+faststart"]
+FILESUSHI = Limits(max_video_seconds=600, max_gif_seconds=30)
+"""FileSushi's limits: 10 minutes of video, 30 s GIFs."""
 
 
-def build(target, duration=103.0, **params):
+def build(target, duration=103.0, limits=None, **params):
     config = VIDEO_CONVERT.from_params(params, target=target)
-    return build_convert_command("in.blob", "out.tmp", config, duration=duration, threads=2)
+    return build_convert_command("in.blob", "out.tmp", config, duration=duration, threads=2, limits=limits)
 
 
 def test_gif_defaults():
@@ -119,35 +122,52 @@ def test_start_past_end_is_a_user_error():
     "target, message",
     [("gif", "GIFs can be at most 30 seconds long."), ("webp", "Animated WebPs can be at most 30 seconds long.")],
 )
-def test_animated_length_limit_is_checked_by_the_config(target, message):
+def test_animated_length_limit_comes_from_the_limits(target, message):
+    config = VIDEO_CONVERT.from_params({"duration_seconds": 31}, target=target)
     with pytest.raises(InvalidOptionsError) as e:
-        VIDEO_CONVERT.from_params({"duration_seconds": 31}, target=target)
-    assert e.value.user_message == message
-    build(target, duration_seconds=30)
+        FILESUSHI.check(config)
+    assert (e.value.user_message, e.value.limit) == (message, "max_gif_seconds")
+    with pytest.raises(InvalidOptionsError):
+        build(target, duration_seconds=31, limits=FILESUSHI)
+    build(target, duration_seconds=30, limits=FILESUSHI)
+    long = build(target, duration=900.0, duration_seconds=600)
+    assert long[long.index("-t") + 1] == "600"
 
 
 @pytest.mark.parametrize("target", ["webm", "mp4"])
-def test_ten_minute_limit(target):
+def test_video_length_limit(target):
     with pytest.raises(MediaTooLongError) as e:
-        build(target, duration=601.0)
+        build(target, duration=601.0, limits=FILESUSHI)
     assert e.value.user_message == (
         "Videos longer than 10 minutes aren't supported yet. Set a shorter duration to convert part of it."
     )
-    build(target, duration=3600.0, duration_seconds=600)
-    cmd = build(target, duration=900.0, start_seconds=300)
+    assert e.value.limit == "max_video_seconds"
+    build(target, duration=3600.0, duration_seconds=600, limits=FILESUSHI)
+    cmd = build(target, duration=900.0, start_seconds=300, limits=FILESUSHI)
     assert cmd[cmd.index("-i") - 4 : cmd.index("-i")] == ["-ss", "300", "-t", "600"]
     with pytest.raises(InvalidOptionsError) as e:
-        VIDEO_CONVERT.from_params({"duration_seconds": 601}, target=target)
+        build(target, duration=3600.0, duration_seconds=601, limits=FILESUSHI)
     assert e.value.user_message == "Video clips can be at most 10 minutes long."
+    with pytest.raises(MediaTooLongError) as e:
+        build(target, duration=7201.0, limits=Limits(max_video_seconds=7200))
+    assert e.value.user_message.startswith("Videos longer than 2 hours aren't supported yet.")
+
+
+@pytest.mark.parametrize("target", ["webm", "mp4"])
+def test_videos_have_no_length_limit_by_default(target):
+    cmd = build(target, duration=7200.0)
+    assert cmd[cmd.index("-t") + 1] == "7201"
+    cmd = build(target, duration=900.0, start_seconds=300)
+    assert cmd[cmd.index("-i") - 4 : cmd.index("-i")] == ["-ss", "300", "-t", "601"]
+    assert build(target, duration=10.0) == build(target, duration=10.0, limits=FILESUSHI)
 
 
 @pytest.mark.parametrize(
     "params",
     [
         {"max_width": 63},
-        {"max_width": 3841},
         {"fps": 0},
-        {"fps": 31},
+        {"fps": 51},
         {"start_seconds": -1},
         {"duration_seconds": 0},
         {"quality": 101},
@@ -156,6 +176,14 @@ def test_ten_minute_limit(target):
 def test_out_of_range_parameters(params):
     with pytest.raises(InvalidOptionsError):
         VIDEO_CONVERT.from_params(params, target="webp")
+
+
+def test_only_format_limits_bound_animations():
+    config = VIDEO_CONVERT.from_params({"max_width": 7680, "fps": 50, "duration_seconds": 600}, target="webp")
+    assert (config.max_width, config.fps, config.duration_seconds) == (7680, 50, 600)
+    with pytest.raises(InvalidOptionsError) as e:
+        VIDEO_CONVERT.from_params({"duration_seconds": float("inf")}, target="gif")
+    assert e.value.user_message == "Invalid value for duration_seconds: input should be a finite number."
 
 
 def test_trim_command_is_stream_copy_with_explicit_container():
@@ -183,9 +211,13 @@ def test_accurate_trim_reencodes_with_container_encoders():
     mp4 = build_trim_command("a", "b", H264TrimConfig(container="mp4"), duration=10.0, threads=1)
     assert mp4[mp4.index("-movflags") + 1] == "+faststart"
     with pytest.raises(MediaTooLongError):
-        build_trim_command("a", "b", H264TrimConfig(container="mp4"), duration=700.0, threads=1)
-    long = build_trim_command("a", "b", H264TrimConfig(container="mp4", start_seconds=100), duration=700.0, threads=1)
+        build_trim_command("a", "b", H264TrimConfig(container="mp4"), duration=700.0, threads=1, limits=FILESUSHI)
+    long = build_trim_command(
+        "a", "b", H264TrimConfig(container="mp4", start_seconds=100), duration=700.0, threads=1, limits=FILESUSHI
+    )
     assert long[long.index("-t") + 1] == "600"
+    whole = build_trim_command("a", "b", H264TrimConfig(container="mp4"), duration=700.0, threads=1)
+    assert whole[whole.index("-t") + 1] == "701"
 
 
 def test_trim_family_picks_the_model():
@@ -204,14 +236,27 @@ def test_trim_family_picks_the_model():
         ({"crf": 20}, "mp4", "Unknown option: crf."),
         ({"crf": 55, "accurate": True}, "mkv", "Invalid value for crf: input should be less than or equal to 51."),
         ({"speed": 4, "accurate": True}, "mp4", "Unknown option: speed."),
-        ({"accurate": True, "end_seconds": 700}, "mkv", "Video clips can be at most 10 minutes long."),
-        ({"accurate": True, "duration_seconds": 601}, "webm", "Video clips can be at most 10 minutes long."),
     ],
 )
 def test_trim_validation(params, container, message):
     with pytest.raises(InvalidOptionsError) as e:
         VIDEO_TRIM.from_params(params, container=container)
     assert e.value.user_message == message
+
+
+@pytest.mark.parametrize(
+    "params, container",
+    [({"accurate": True, "end_seconds": 700}, "mkv"), ({"accurate": True, "duration_seconds": 601}, "webm")],
+)
+def test_accurate_trims_are_limited_by_the_limits(params, container):
+    config = VIDEO_TRIM.from_params(params, container=container)
+    with pytest.raises(InvalidOptionsError) as e:
+        FILESUSHI.check(config)
+    assert (e.value.user_message, e.value.limit) == ("Video clips can be at most 10 minutes long.", "max_video_seconds")
+    with pytest.raises(InvalidOptionsError):
+        build_trim_command("a", "b", config, duration=3600.0, limits=FILESUSHI)
+    build_trim_command("a", "b", config, duration=3600.0)
+    FILESUSHI.check(VIDEO_TRIM.from_params({"end_seconds": 7200}, container=container))
 
 
 def test_copy_trim_has_no_length_limit_and_checks_the_start():
@@ -241,10 +286,12 @@ def test_transform_filters(rotate, flip, vf):
 
 def test_transform_is_capped_at_the_limit():
     config = Mp4TransformConfig(rotate=90)
-    cmd = build_transform_command("a", "b", config, duration=599.5, threads=2)
+    cmd = build_transform_command("a", "b", config, duration=599.5, threads=2, limits=FILESUSHI)
     assert cmd[cmd.index("-i") - 2 : cmd.index("-i")] == ["-t", "600"]
     with pytest.raises(MediaTooLongError):
-        build_transform_command("a", "b", config, duration=600.5, threads=2)
+        build_transform_command("a", "b", config, duration=600.5, threads=2, limits=FILESUSHI)
+    unlimited = build_transform_command("a", "b", config, duration=3600.5, threads=2)
+    assert unlimited[unlimited.index("-i") - 2 : unlimited.index("-i")] == ["-t", "3601.5"]
 
 
 def test_transform_family():
@@ -389,7 +436,9 @@ def test_mp4_copy_video_command_reencodes_only_the_audio():
 
 def test_copy_routes_keep_the_limits():
     with pytest.raises(MediaTooLongError):
-        build_convert_command("i", "o", mp4(), duration=601.0, threads=1, route="copy")
+        build_convert_command("i", "o", mp4(), duration=601.0, threads=1, route="copy", limits=FILESUSHI)
+    long = build_convert_command("i", "o", mp4(), duration=7200.0, threads=1, route="copy")
+    assert long[long.index("-t") + 1] == "7201"
     cmd = build_convert_command("i", "o", mp4(duration_seconds=200), duration=103.0, threads=1, route="copy")
     assert cmd[cmd.index("-t") + 1] == "200"
     with pytest.raises(ValueError):

@@ -4,13 +4,15 @@
 import pytest
 
 from sashimi.audio import build_convert_command
-from sashimi.config import AUDIO_CONVERT, Mp3AudioConfig
+from sashimi.config import AUDIO_CONVERT, Limits, Mp3AudioConfig
 from sashimi.errors import InvalidOptionsError, MediaTooLongError
 
+FILESUSHI = Limits(max_audio_seconds=3600)
 
-def build(target, duration=100.0, **params):
+
+def build(target, duration=100.0, limits=None, **params):
     config = AUDIO_CONVERT.from_params(params, target=target)
-    return build_convert_command("in", "out", config, duration=duration, threads=1)
+    return build_convert_command("in", "out", config, duration=duration, threads=1, limits=limits)
 
 
 def tail_after_input(cmd):
@@ -61,8 +63,10 @@ def test_options():
 def test_whole_file_stops_just_past_the_probed_length():
     cmd = build("mp3")
     assert cmd[cmd.index("-i") - 2 : cmd.index("-i")] == ["-t", "101"]
-    cmd = build("mp3", duration=3599.5)
+    cmd = build("mp3", duration=3599.5, limits=FILESUSHI)
     assert cmd[cmd.index("-i") - 2 : cmd.index("-i")] == ["-t", "3600"]
+    unlimited = build("mp3", duration=3599.5)
+    assert unlimited[unlimited.index("-i") - 2 : unlimited.index("-i")] == ["-t", "3600.5"]
     tail = build("mp3", duration=4000.0, start_seconds=1000)
     assert tail[tail.index("-i") - 4 : tail.index("-i")] == ["-ss", "1000", "-t", "3001"]
     assert cmd[cmd.index("-protocol_whitelist") : cmd.index("-t")] == [
@@ -87,14 +91,35 @@ def test_bitrate_range(bitrate):
         AUDIO_CONVERT.from_params({"bitrate_kbps": bitrate}, target="mp3")
 
 
-def test_sixty_minute_limit():
+@pytest.mark.parametrize("target", ["m4a", "ogg"])
+def test_aac_and_opus_take_their_encoders_bitrates(target):
+    assert "512k" in build(target, bitrate_kbps=512)
+    with pytest.raises(InvalidOptionsError):
+        AUDIO_CONVERT.from_params({"bitrate_kbps": 513}, target=target)
+
+
+def test_audio_length_limit():
     with pytest.raises(MediaTooLongError) as e:
-        build("mp3", duration=3601.0)
-    assert "60 minutes" in e.value.user_message
-    build("mp3", duration=7200.0, duration_seconds=3600)
+        build("mp3", duration=3601.0, limits=FILESUSHI)
+    assert e.value.user_message == (
+        "Audio longer than 60 minutes isn't supported yet. Set a shorter duration to convert part of it."
+    )
+    assert e.value.limit == "max_audio_seconds"
+    build("mp3", duration=7200.0, duration_seconds=3600, limits=FILESUSHI)
+    config = AUDIO_CONVERT.from_params({"duration_seconds": 3601}, target="m4a")
     with pytest.raises(InvalidOptionsError) as e:
-        AUDIO_CONVERT.from_params({"duration_seconds": 3601}, target="m4a")
+        build_convert_command("in", "out", config, duration=7200.0, limits=FILESUSHI)
     assert e.value.user_message == "Audio clips can be at most 60 minutes long."
+    with pytest.raises(InvalidOptionsError) as e:
+        build("mp3", duration=700.0, duration_seconds=600.5, limits=Limits(max_audio_seconds=600))
+    assert e.value.user_message == "Audio clips can be at most 10 minutes long."
+
+
+def test_audio_has_no_length_limit_by_default():
+    cmd = build("flac", duration=14400.0)
+    assert cmd[cmd.index("-t") + 1] == "14401"
+    cut = build("mp3", duration=20000.0, duration_seconds=19999)
+    assert cut[cut.index("-t") + 1] == "19999"
 
 
 def test_start_past_end_names_the_source_kind():

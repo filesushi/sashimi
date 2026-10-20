@@ -1,29 +1,41 @@
 # Hand-back: sashimi 0.6.0 for FileSushi
 
-From the sashimi agent to FileSushi, written 2026-10-19 and updated twice on 2026-10-20 for
-sashimi 0.6.0, its first PyPI release (distribution `sashimi-convert`); the second update added
-image editing, frame selection and the faster "to MP4" (§1 items 9-11, §13). The release isn't published yet: the
-owner builds and uploads it by hand. Until then, a wheel built from sashimi's tree at 0.6.0 is the
-same code.
+From the sashimi agent to FileSushi, written 2026-10-19 and updated three times on 2026-10-20 for
+sashimi 0.6.0, its first PyPI release (distribution `sashimi-convert`). The second update added
+image editing, frame selection and the faster "to MP4" (§1 items 9-11, §13); the third made every
+limit the caller's to set and fixed two bugs (§1 items 14-17, §14); the fourth replaced
+`keep_exif` with one `metadata` setting on every output, added reading and removing metadata, and
+fixed the last known bugs (§1 items 18-23, §15). The release isn't published yet: the owner builds
+and uploads it by hand. Until then, a wheel built from sashimi's tree at 0.6.0 is the same code.
 
-FileSushi vendors an early build of 0.5.1 (`docker/workers/wheels/sashimi_convert-0.5.1-py3-none-any.whl`,
-sha256 `b9bd0581…`). Its `config/`, `core/` and `api/` match the later 0.5.1 build; the
-differences were in the CLI only. 0.6.0 is that code plus the changes below. Every output
-FileSushi makes today is byte-identical, except contact sheets (§1 item 4 and §8): animated sheets
-get a new default grid and new time labels, still sheets of 9:16 videos get 8x2, and an animated
-sheet of a clip shorter than its clip length now succeeds with one tile; and "to MP4" of 8-bit
-H.264 videos, which is now a stream copy (§1 item 9).
+**Start with §1 items 14 and 18.** sashimi no longer enforces FileSushi's limits (10-minute
+videos, 30-second GIFs, …) unless FileSushi passes them, and `tool_params.py` fails to import until
+it stops importing the old limit constants. And images now **keep** the source's metadata by
+default, GPS included, unless FileSushi passes `metadata`.
+
+FileSushi vendors a 0.6.0 wheel built from sashimi `9bc8329`, before image editing
+(`docker/workers/wheels/sashimi_convert-0.6.0-py3-none-any.whl`, sha256 `1c1703d9…`, checked
+2026-10-20). The current 0.6.0 adds image editing, frame selection, the self-routing "to MP4" and
+the caller's limits. Compared with the 0.5.1 FileSushi ran before, every output FileSushi makes is
+byte-identical, except contact sheets (§1 item 4 and §8): animated sheets get a new default grid
+and new time labels, still sheets of 9:16 videos get 8x2, and an animated sheet of a clip shorter
+than its clip length now succeeds with one tile; "to MP4" of 8-bit H.264 videos, which is now a
+stream copy (§1 item 9); PNG and TIFF conversions with `keep_icc` off, which now drop the
+colour profile (§1 item 16); image outputs of sources with metadata, which now keep it unless
+`metadata` says otherwise (§1 item 18; the pixels are identical); and icons and favicon packs of
+images with a colour profile, now converted to sRGB (§1 item 21).
 
 ## 1. What FileSushi must change
 
 1. **Depend on the PyPI release.** Once 0.6.0 is on PyPI, replace the vendored wheel:
    - `pyproject.toml`: drop the `[tool.uv.sources]` entry for `sashimi-convert` (it points at
-     `docker/workers/wheels/sashimi_convert-0.5.1-py3-none-any.whl`) and require
+     `docker/workers/wheels/sashimi_convert-0.6.0-py3-none-any.whl`) and require
      `sashimi-convert==0.6.0`, then re-lock;
    - `docker/workers/sashimi.Dockerfile`: install from the index, wheels only, with hashes, for
      example `pip install --no-cache-dir --only-binary=:all: --require-hashes -r requirements.txt`
-     with `sashimi-convert[heif]==0.6.0` and its dependencies pinned, instead of copying the wheel;
-   - delete `docker/workers/wheels/sashimi_convert-0.5.1-py3-none-any.whl`.
+     with `sashimi-convert==0.6.0` and its dependencies pinned (FileSushi installs it without
+     `[heif]`), instead of copying the wheel;
+   - delete `docker/workers/wheels/sashimi_convert-0.6.0-py3-none-any.whl`.
    Before the upload, a wheel built from the sashimi tree is the same code, if you want to start early.
 2. **Add the ICO background to `IcoParams` (required: a FileSushi test fails without it).**
    `IcoConfig` has a new field, `background_color` (`RGB | None`, default `None` = transparent,
@@ -63,20 +75,22 @@ H.264 videos, which is now a stream copy (§1 item 9).
    no end is now a lossless remux that keeps every stream, if you want to offer one.
 7. **New tool: preview GIF / WebP (optional, when you want it).** `sashimi.video.preview(src, dst,
    VIDEO_PREVIEW.from_params(params, target=target))`, `target` `gif` or `webp`. It joins
-   `samples` clips (default 5, at most 10) of `sample_duration` seconds (default 2) from across the
+   `samples` clips (default 5) of `sample_duration` seconds (default 2) from across the
    video, skipping `start_offset_percent`/`end_offset_percent` (10/10), scaled to `max_height` (360)
    and optionally `max_width`, at `fps` (15), optionally centre-cropped with `crop` `"9:16"` or
-   `"1:1"`; WebP adds `quality` (75). The clips' total is at most 30 s (`InvalidOptionsError`
-   "Previews can be at most 30 seconds long. Use fewer clips or shorter ones."). A params class
+   `"1:1"`; WebP adds `quality` (75). With FileSushi's limits (item 14) the clips' total is at most
+   30 s (`InvalidOptionsError` "Previews can be at most 30 seconds long. Use fewer clips or shorter
+   ones.") and their number at most 10. A params class
    with `upstream = VIDEO_PREVIEW` covers it; models in §4. Sandbox numbers are in §10; at most two
    ffmpeg processes run, whatever the clip count.
 8. **New tool: favicon pack (optional; the owner's "Full favicon pack (.zip)" next to "ICO
    file").** `sashimi.image.favicon_pack(src, dst, FaviconPackConfig.from_params(params),
-   max_pixels=IMAGE_MAX_PIXELS)` writes a .zip (`application/zip`; FileSushi's output name would be
+   limits=LIMITS)` writes a .zip (`application/zip`; FileSushi's output name would be
    `…favicons.zip` or similar) with `favicon.ico` (16, 32, 48 by default, `ico_sizes`), PNGs at 16,
    32, 48, 180, 192 and 512 px, `site.webmanifest` and `favicon.html`. The 180 px Apple touch icon
-   is filled with `background_color` (default white). Optional `name`, `short_name` (single line,
-   at most 100 characters), `theme_color` and `manifest_background_color` go into the manifest
+   is filled with `background_color` (default white). Optional `name`, `short_name` (single line;
+   sashimi sets no length limit, and FileSushi's form keeps its own 100), `theme_color` and
+   `manifest_background_color` go into the manifest
    (and `theme_color` into the HTML); they're written with `json` and escaped HTML, so user text
    can't break either file. Same input and config, same bytes. Paths inside are relative. A params
    class with `upstream = FaviconPackConfig` covers it; model in §4.
@@ -97,14 +111,14 @@ H.264 videos, which is now a stream copy (§1 item 9).
    `crf` is blank by default and its preset and audio-quality selects start on the model defaults
    (`tool_params.py:892-913`, checked 2026-10-20), so a form left alone copies. A user who sets a
    quality or a preset gets a re-encode. The copy routes keep the re-encode's streams (first video
-   and audio only, no subtitles or data), its `-t` limit and 10-minute refusal
-   (`MediaTooLongError`), `+faststart`, and the source's display rotation (as MP4 metadata, which
+   and audio only, no subtitles or data), its `-t` limit and the refusal of videos longer than
+   `limits.max_video_seconds` (`MediaTooLongError`; FileSushi passes 600, item 14), `+faststart`, and the source's display rotation (as MP4 metadata, which
    browsers apply). If ffmpeg can't copy a file, `convert` re-encodes it instead. `convert`
    returns the route (`"copy"`, `"copy_video"`, `"encode"`); the worker can log it
    (`sashimi_worker.py` ignores the return value today, which is fine). `MediaInfo.pixel_format`
    is new. To give users "make it smaller", offer `crf` or `max_width`, which re-encode.
 10. **New tool: "Edit image" (crop, rotate, flip, adjust).** In the worker:
-   `sashimi.image.edit(src, dst, IMAGE_EDIT.from_params(params, target=target), max_pixels=IMAGE_MAX_PIXELS)`,
+   `sashimi.image.edit(src, dst, IMAGE_EDIT.from_params(params, target=target), limits=LIMITS)`,
    with `target` the source's format: `sashimi.image.frames_info(src).edit_target` gives it from
    the content (`jpeg` for JPEG, MPO and HEIC; `png`, `webp`, `gif`, `bmp`, `tiff`). The output's
    extension is that format's. Fields (models in §4, `JpegEditConfig` … `TiffEditConfig`):
@@ -114,12 +128,12 @@ H.264 videos, which is now a stream copy (§1 item 9).
      blank = to the right/bottom edge), **in pixels of the rotated and flipped picture**, i.e.
      what the user sees after the rotate and flip. Outside the picture: `InvalidOptionsError`
      "The crop area must fit inside the picture, which is 400x300 pixels.";
-   - `brightness`, `contrast`, `saturation`: multipliers 0-2, default 1 (`Le(2.0)` in the
-     metadata);
+   - `brightness`, `contrast`, `saturation`: multipliers of at least 0, default 1. sashimi sets no
+     upper bound any more (CSS has none), so give the sliders your own 0-2;
    - the format's save fields, from the image models: JPEG `quality` (default **92**,
      `EDIT_QUALITY`), `optimize`, `progressive`, `jpeg_subsampling`; WebP `quality` (92),
      `lossless`, `webp_method`; PNG `png_compress_level`, `optimize`; GIF `optimize`; TIFF
-     `tiff_compression`, `quality`; and `keep_exif`/`keep_icc` for JPEG, PNG, WebP and TIFF. The
+     `tiff_compression`, `quality`; and `metadata`/`keep_icc` for JPEG, PNG, WebP and TIFF (`metadata` for GIF too). The
      owner's rule ("forms with 8 settings or fewer show everything") suggests leaving the save
      fields out of the form (`not_offered`) or under "More options".
    **The live preview:** draw the picture as the browser shows it (EXIF applied, the default
@@ -133,22 +147,25 @@ H.264 videos, which is now a stream copy (§1 item 9).
    app and the desktop app agree on the starting box). A no-op edit still writes a valid image.
    **Animated GIF and WebP** are edited frame by frame by the same call: every frame gets the
    same rotate, flip, crop and adjustment, and keeps its duration; the loop count is kept; GIF
-   colours are kept exactly and transparency survives. Animations over `MAX_ANIMATION_BYTES`
-   (256 MiB of decoded frames: width × height × 4 × frames) raise `MediaTooLargeError` ("This
-   animation is too large to edit. Try one with fewer frames or smaller pictures.") before
-   decoding; §10 has the time and memory at that limit. Animated PNGs raise
+   colours are kept exactly and transparency survives. Animations whose decoded frames (width ×
+   height × 4 × frames) exceed `limits.max_animation_bytes` (FileSushi passes 256 MiB, item 14;
+   sashimi's default is now 1 GiB) raise `MediaTooLargeError` ("This animation is too large to
+   edit: its frames would take 300 MB of memory, and the limit is 256 MB. Try one with fewer frames
+   or smaller pictures.") before decoding; §10 has the time and memory at that limit. Animated PNGs raise
    `UnsupportedMediaError` ("Animated PNGs can't be edited yet."). SEO pages (`/crop-image`,
    `/rotate-image`, `/flip-image`, `/image-editor`) can all post to this one tool; the page only
    decides which control the editor opens on.
 11. **New tool: GIF frame editor (keep or drop frames, speed).** In the worker:
-   `sashimi.image.select_frames(src, dst, IMAGE_FRAMES.from_params(params, target=target), max_pixels=IMAGE_MAX_PIXELS)`
+   `sashimi.image.select_frames(src, dst, IMAGE_FRAMES.from_params(params, target=target), limits=LIMITS)`
    with `target` `gif` or `webp` (the source's; `frames_info(src).edit_target`). Fields
    (`GifFramesConfig`, `WebpFramesConfig`, §4): `keep`, the frames to keep **numbered from 0**,
    as a list or a string such as `"0-9,12"` (blank keeps all; duplicates are dropped and frames
-   play in their original order, since reordering comes later), and `speed`, 0.25-4 (default 1;
+   play in their original order, since reordering comes later), and `speed`, above 0 (default 1;
+   sashimi sets no upper bound any more, so give the form your own 0.25-4;
    each frame's duration is divided by it; frames under 20 ms, which browsers play at 100 ms,
-   count as 100 ms, and none gets shorter than `MIN_FRAME_MS`, 20 ms); WebP adds `quality` (92),
-   `lossless`, `webp_method`, `keep_exif`, `keep_icc`; GIF adds `optimize`. Errors: a frame the
+   count as 100 ms, none gets shorter than `MIN_FRAME_MS`, 20 ms, and none longer than the
+   format holds); WebP adds `quality` (92),
+   `lossless`, `webp_method`, `metadata`, `keep_icc`; GIF adds `optimize` and `metadata`. Errors: a frame the
    animation doesn't have, `InvalidOptionsError` "Some of the frames to keep aren't in this
    animation, which has 120 frames."; an image that isn't animated, `UnsupportedMediaError`
    "This image isn't animated."; over the budget, as item 10. Every kept frame is the full
@@ -181,7 +198,228 @@ H.264 videos, which is now a stream copy (§1 item 9).
      `Apache-2.0` (PEP 639), and `github.com/filesushi/sashimi`;
    - the batch API (`sashimi.api`) and the CLI changed a lot (one naming policy, 4-tuple results,
      one JSON report with `dry_run`, `--dry-run` everywhere, exit 1 for a named file that was
-     skipped, `edit` and `frames`), but FileSushi uses neither.
+     skipped, `edit` and `frames`, `--max-*` flags and a `[limits]` settings section), but
+     FileSushi uses neither.
+14. **Limits are now FileSushi's to set (required; owner, 2026-10-20: "all limits should be config
+   driven … The sashimi defaults don't need to be aligned with filesushi at all, sashimi just needs
+   to be configurable").** sashimi enforces only the limits its caller passes, in one
+   `sashimi.config.Limits` object (pydantic only, so the web app can import it). Its defaults
+   protect the machine and leave lengths unlimited, so **without changes FileSushi would convert
+   two-hour videos, 10-minute GIFs and 40-clip previews**, and `tool_params.py` would fail to import.
+   The model is in §4 (`Limits`); §14 explains the design.
+
+   **a. The limits to pass, so that FileSushi accepts exactly what it accepted before:**
+
+   | `Limits` field | FileSushi's value | What it limits | sashimi's default | Replaces |
+   |---|---|---|---|---|
+   | `max_pixels` | `24_000_000` | decoded pixels of an image (convert, resize, ICO, favicon pack, edit, frames, `frames_info`, frame strip) | 64,000,000 | `IMAGE_MAX_PIXELS`, passed as `max_pixels=` |
+   | `max_video_seconds` | `600` | a WebM/MP4 conversion (re-encode **and** MP4 copy), rotate/flip, accurate trim: a longer clip is `InvalidOptionsError`, a longer whole video `MediaTooLongError` | none | `MAX_VIDEO_SECONDS` |
+   | `max_audio_seconds` | `3600` | audio conversion and extraction (clip or whole file) | none | `MAX_AUDIO_SECONDS` |
+   | `max_gif_seconds` | `30` | a GIF or animated WebP from a video, and a preview's clips together | none | `MAX_GIF_SECONDS` |
+   | `max_preview_clips` | `10` | a preview's `samples` | none | `MAX_PREVIEW_SAMPLES` |
+   | `max_frame_bytes` | `400 * 1024 * 1024` | decoded frames held at once (width × height × 3 × frames): animated sheets and GIF previews, **and now GIFs made from a video** | 1 GiB | `MAX_FRAME_BYTES` |
+   | `max_animation_bytes` | `256 * 1024 * 1024` | decoded frames of an animated GIF/WebP being edited (width × height × 4 × frames): edit, frames, frame strip | 1 GiB | `MAX_ANIMATION_BYTES` |
+   | `max_sheet_pixels` | `64_000_000` | a contact sheet's pixels | 64,000,000 | `MAX_SHEET_PIXELS` (pass it anyway, so it doesn't follow sashimi's default) |
+
+   As code: `LIMITS = Limits(max_pixels=24_000_000, max_video_seconds=600, max_audio_seconds=3600,
+   max_gif_seconds=30, max_preview_clips=10, max_frame_bytes=400 * 1024 * 1024,
+   max_animation_bytes=256 * 1024 * 1024, max_sheet_pixels=64_000_000)`.
+
+   **GIFs made from a video are the one exception.** They had no frame budget before (only the
+   30 s cap), but ffmpeg holds every frame of a GIF until it has built the palette (measured: 10 s
+   → 162 MB, 40 s → 365 MB of RSS at 480 px and 12 fps), so 0.6.0 checks them against
+   `max_frame_bytes` too. To keep accepting every GIF the form allows (30 s at 30 fps and 800 px,
+   the widest choice, holds about 1.3 GB of frames), pass
+   `LIMITS.model_copy(update={"max_frame_bytes": None})` for `video-to-gif` jobs. With `LIMITS`
+   itself, GIFs over 400 MiB of frames (e.g. 30 s at 30 fps and 640 px: 593 MB) are refused with
+   `InvalidOptionsError` "These settings would make the GIF too large to render: its frames would
+   take 593 MB of memory, and the limit is 400 MB. Use a smaller width, a lower frame rate or a
+   shorter length." instead of risking the worker's memory limit. Which to use is the owner's
+   call (inbox).
+
+   **b. The worker** (`docker/workers/scripts/sashimi_worker.py`, checked 2026-10-20): `max_pixels=`
+   is gone from every function, so the three calls that pass it (`:118`, `:143`, `:150`) raise
+   `TypeError` until they pass `limits=LIMITS` instead. Pass `limits=LIMITS` (or the GIF variant
+   above) to **every** sashimi call: `image.convert`, `image.to_ico`, `image.favicon_pack`,
+   `video.convert`, `video.transform`, `video.trim`, `audio.convert`, `sheets.render`,
+   `video.preview`, and the editor's `image.frames_info`, `image.edit`, `image.select_frames` and
+   `image.frame_strip`. `IMAGE_MAX_PIXELS` (`:78`) becomes `LIMITS.max_pixels`. The worker image
+   has no `filesushi` package, so the worker defines `LIMITS` itself; keep the web app's copy in
+   step with a test (the FileSushi tests already load the worker by path).
+
+   **c. The web app** (`src/filesushi/models/tool_params.py`, checked 2026-10-20):
+   - the imports `MAX_AUDIO_SECONDS`, `MAX_GIF_SECONDS`, `MAX_PREVIEW_SAMPLES` and
+     `MAX_VIDEO_SECONDS` (`:20-56`) no longer exist, so the module fails to import. Define them
+     in FileSushi (or read `LIMITS.max_gif_seconds` …); they set the form bounds and hint text at
+     `:922`, `:975`, `:993`, `:1006`, `:1014`, `:1102`, `:1176`, `:1230`, `:1238`, `:1539`,
+     `:1543` and `:1629`. Keep the values (30, 600, 3600, 10) and the help reads as before.
+     `DEFAULT_GIF_SECONDS`, `KEYFRAME_NOTE` and `OPUS_SAMPLE_RATES` are unchanged;
+   - `_upper(AnimatedGifSheetConfig, "sample_duration")` (`:1484`) and
+     `_upper(GifPreviewConfig, "sample_duration")` (`:1549`) raise `StopIteration` at import: those
+     fields have no upper bound any more. Use your own 10 (the old bound) in both;
+   - `_upper(GifPreviewConfig, "fps")` (`:1579`, `:1583`) is now 50 (`MAX_ANIMATION_FPS`, a
+     browser limit, not a policy), which would offer 1-50 fps. Use your own 30 to keep the form;
+   - `_lower(GifPreviewConfig, "max_height")` (`:1559`, 64) and every `_upper(..., "crf")` (51, 63)
+     are unchanged;
+   - **queue-time checks:** `ToolParams.upstream_parameters` (`:139-157`) validates with
+     `from_params`, which no longer refuses a preview over 30 s in all or an accurate trim over 10
+     minutes (`tests/test_tool_params.py:388` and `:416` expect those messages). Keep the config
+     that `from_params` returns and call `LIMITS.check(config)` on it: it raises the same
+     `InvalidOptionsError`s with the same messages ("Previews can be at most 30 seconds long. Use
+     fewer clips or shorter ones.", "Video clips can be at most 10 minutes long.", and the GIF,
+     clip and audio length ones), before the file is read. Every other form field already has its
+     own bound (widths, fps, grids, gaps, font sizes, bitrates, sample rates; checked 2026-10-20).
+
+   **d. What FileSushi users see differently** with the limits above: only the wording of some
+   refusals, which now state the limit in force:
+   - "This image is too large to process." → "This image is too large to process: it has 30
+     megapixels (6000x5000), and the limit is 24.";
+   - "This animation is too large to edit. Try …" → "This animation is too large to edit: its
+     frames would take 300 MB of memory, and the limit is 256 MB. Try one with fewer frames or
+     smaller pictures.";
+   - the preview, animated-sheet and still-sheet size refusals gain the same kind of clause (§7);
+   - every limit's refusal carries `.limit`, the `Limits` field's name (`"max_video_seconds"`);
+     FileSushi can ignore it.
+
+   **e. One widening FileSushi can't switch off:** still JPEG and PNG contact sheets may be taller
+   than 16,383 px (JPEG up to 65,500, PNG without a format limit), within `max_sheet_pixels`; only
+   WebP keeps 16,383. At FileSushi's widest sheet (3840 px) that admits sheets from 16,384 to
+   16,666 px tall that were refused before.
+15. **`WebpImageConfig.optimize` is gone (required).** It never did anything: Pillow's WebP writer
+   ignores `optimize`, so WebP outputs are byte-identical without it. `WebpResizeConfig` loses it
+   too. In FileSushi:
+   - remove `optimize` from `WebpParams` (`tool_params.py:432`):
+     `test_every_sashimi_option_is_offered_or_deliberately_left_out` fails for the WebP tools
+     until you do ("offered options sashimi doesn't have"). Don't add it to `not_offered`;
+   - `ResizeParams.optimize` (`:737-746`) can stay (JPEG and GIF still have it, and
+     `upstream_parameters` already drops it for WebP), but its help "JPEG, WebP and GIF. On for
+     JPEG and WebP unless set." should read "JPEG and GIF. On for JPEG unless set.".
+16. **`keep_icc` off now strips the profile from PNG and TIFF (nothing to change).** Pillow's PNG
+   and TIFF writers copied the source's profile even when sashimi left it out, so
+   `keep_icc=False` only worked for JPEG and WebP. It now works for every format. The same fix
+   stops a CMYK source's profile landing on an RGB PNG (it is still kept on a CMYK TIFF, which
+   needs it). Those outputs differ from before in their metadata only; the pixels are identical.
+17. **Limits that stay fixed** (format and codec limits and correctness rules, which a form can
+   rely on): `crf` 0-51 (H.264) and 0-63 (VP9), `speed` 0-8, every `quality` 0/1-100, PNG level
+   0-9, `webp_method` 0-6, FLAC level 0-12, the MP3/AAC/Opus sample-rate choices and FLAC's
+   1,048,575 Hz (`FLAC_MAX_SAMPLE_RATE`), MP3 bitrates up to 320 and AAC/Opus up to 512 kb/s
+   (M4A and OGG were 320), `fps` up to 50 for GIF and animated WebP (`MAX_ANIMATION_FPS`; faster
+   frames play at 100 ms in browsers), header and time-label text up to 200 px, offsets 0-100 %,
+   icon sizes 16-256, WebP's 16,383 px side (`WEBP_MAX_SIDE`), tiles of at least 16 px
+   (`MIN_TILE_SIZE`) and frames of at least 20 ms (`MIN_FRAME_MS`). Every other upper bound in
+   the models is gone: GIF/clip/audio lengths, widths and heights, preview clips and their
+   length, sheet grids, gaps, widths and clip lengths, the adjustments, the speed, the frame
+   strip's tile height and columns, WAV and FLAC sample rates (8000-192000), and the manifest
+   names' 100 characters. Lower bounds are unchanged. Infinity and NaN are now refused in every
+   number field.
+
+18. **`keep_exif` is replaced by `metadata`, which keeps everything by default (required; owner,
+   2026-10-20: "In sashimi? keep, of course, but it must be *capable* of full and partial
+   removal").** Every model whose output can carry the source's metadata has `metadata`:
+   `"keep"` (the default), `"remove_location"` or `"remove_all"` (`MetadataMode`,
+   `METADATA_MODES`; description "The source's metadata (camera, dates, GPS, titles): "keep",
+   "remove_location" or "remove_all"."). The models: `JpegImageConfig`, `PngImageConfig`,
+   `WebpImageConfig`, `TiffImageConfig`, **`GifImageConfig`** (comments), their resize and edit
+   twins, `GifFramesConfig`, `WebpFramesConfig`, `WebmVideoConfig`, `Mp4VideoConfig`, both
+   transform models, **all three trim models** (so remuxes too), and **every audio model**. Not
+   on GIF or animated WebP from video, previews, sheets, ICO, favicon packs or frame strips,
+   whose outputs hold no source metadata. In FileSushi (`tool_params.py`, checked 2026-10-20):
+   - remove `keep_exif` from `JpegParams`, `WebpParams`, `PngParams`, `TiffParams` and
+     `ResizeParams` (`:411`, `:435`, `:455`, `:501`, `:810`) and the `KeepExif` alias (`:375`);
+     `from_params` refuses it ("Unknown option: keep_exif.");
+   - offer `metadata` on every tool whose model has it, or list it in `not_offered`:
+     `test_every_sashimi_option_is_offered_or_deliberately_left_out` fails for each of those tools
+     (images, GIF, every video, trim, rotate and audio tool) until you do. The owner chose
+     FileSushi's default (2026-10-20): **"Remove location metadata"**, with "Preserve all
+     metadata" and "Remove all metadata" either side, shown only when the file has something to
+     remove (item 20). sashimi's own default stays `keep`, so FileSushi must **pass** its default;
+   - **until FileSushi passes `metadata`, image outputs keep EXIF (with GPS), XMP, IPTC and
+     comments**, where they dropped EXIF before. To keep exactly today's image behaviour instead,
+     pass `metadata="remove_all"`. Video and audio kept their tags before and still do with
+     `keep`; `remove_location` and `remove_all` are new for them;
+   - the worker needs nothing new: the field travels in the params.
+   What each mode does, and what each format can hold, is in item 23.
+19. **The "Remove metadata" tool (new, when you want it).** In the worker:
+   `ext = sashimi.metadata.strip(src, dst, mode, keep_icc=True, limits=LIMITS)` with `mode`
+   `"remove_location"` or `"remove_all"` (the default). It writes the file in its own format
+   **without re-encoding**: JPEG segments, PNG chunks, WebP chunks, GIF extensions and TIFF tags
+   are dropped or filtered and the compressed pixels copied byte for byte; video and audio are
+   stream copies. It returns the extension (`jpg`, `png`, `webp`, `gif`, `tif`, `mkv`, `webm`,
+   `mp4`, `mov`, `m4a`, `mp3`, `flac`, `ogg`, `wav`); `sashimi.metadata.strip_format(src)` gives it
+   before running, for naming the output. Refusals (`UnsupportedMediaError`, plain sentences):
+   HEIC, BMP (which holds no metadata), BigTIFF, DNG, and other containers ("Removing metadata
+   from this kind of file isn't supported."). `keep` raises `InvalidOptionsError`. An MPO keeps
+   only its main picture. A params class with `mode` (two choices) and, if you want it, `keep_icc`
+   covers it; there is no config model, since the only options are those two.
+20. **The info box (new): `sashimi.metadata.read(path, limits=LIMITS)`** returns a
+   `MetadataInfo` (pydantic, frozen): `kind` (`image`, `video`, `audio`), `carriers` (where
+   metadata was found: `EXIF`, `GPS`, `XMP`, `IPTC`, `Photoshop`, `comment`, `PNG text`,
+   `extended XMP`, `QuickTime/MP4 tags`, `Matroska tags`, `ID3`, `Vorbis comments`, `RIFF INFO`,
+   `tags`, `stream tags`, `chapters`, `cover art`, `timed metadata track`), `has_location`,
+   `latitude`, `longitude`, `altitude`, `place`, `camera_make`, `camera_model`, `date_taken`,
+   `software`, `title`, `artist`, `album`, `creation_time`, `comment`, `has_color_profile` and
+   `tags` (other named fields), plus the property `has_metadata` (`carriers` isn't empty). It
+   decodes no pixels or samples (measured on 3.14: 1-2 ms for an image; one ffprobe run, about
+   0.15 s, for video and audio), and
+   it runs ffprobe, so it belongs **in the worker, never the web app**. Show the three-way
+   selector when `has_metadata` is true. It works on outputs, so the page can show "before" and
+   "after"; after `remove_all`, `carriers` is empty for every format sashimi writes, and after
+   `remove_location`, `has_location` is false. Its docstring says it reports what it found, not
+   a promise that nothing else is there, which matches FileSushi's "best effort" policy.
+21. **Icons are sRGB (nothing to change).** `to_ico` and `favicon_pack` convert an image with a
+   colour profile to sRGB, and no icon carries the profile or any metadata. Pillow used to copy
+   the profile into the ICO's frames and the pack's PNGs (not the Apple touch icon) without
+   converting the colours, so browsers, which treat icons as sRGB, showed wide-gamut sources'
+   colours wrong. Icons of images without a profile are byte-identical; sRGB-tagged sources gave
+   identical icons in the hash check.
+22. **Mono Opus above 256 kb/s works now (nothing to change).** Opus allows 256 kb/s per channel,
+   so a mono source at FileSushi's 320 kb/s choice failed in ffmpeg (OGG: `ProcessingError`, so
+   "Conversion failed"; FileSushi's own sandbox fixture `ref.mkv` has mono audio). sashimi now
+   lowers the bitrate to 256 per output channel (`OPUS_MAX_KBPS_PER_CHANNEL`) and logs it, for
+   OGG audio and the Opus audio of WebM conversions, rotations and accurate cuts. A mono source
+   at 320 gives exactly the file 256 gives (hash-checked). The descriptions of `bitrate_kbps`
+   (OGG) and `audio_bitrate_kbps` (WebM, VP9) say so; if the form explains bitrates, say "up to
+   256 for mono". MP3 (LAME) and AAC accept every allowed bitrate for mono (they clamp
+   themselves). Nothing else to change: the 320 choice can stay.
+23. **What the modes do, and the carriers sashimi handles (for FileSushi's "best effort"
+   policy).**
+   - `keep` carries everything the output format can hold. Images: EXIF (camera, dates, GPS;
+     byte for byte in JPEG, PNG and WebP, rewritten in TIFF), XMP, IPTC and Photoshop resources
+     (JPEG and TIFF), comments (JPEG, PNG, GIF), PNG text (PNG to PNG). Not carried: EXIF or XMP
+     over 64 KB into JPEG, extended XMP, vendor JPEG segments (APP3-APP15 other than IPTC, MPF),
+     PNG `tIME`, anything into BMP. Video and audio: the tags and chapters the container holds —
+     all of them in MKV and WebM; the standard ones and the location in MP4, MOV and M4A (not
+     `com.apple.quicktime.*` keys); ID3 in MP3; Vorbis comments in OGG and FLAC; RIFF INFO in WAV
+     (no location). No output records a creation time (outputs are bit-exact). GIF and animated
+     WebP from video, previews and sheets hold none.
+   - `remove_location` removes: EXIF's GPS directory (also inside Photoshop resources); XMP
+     properties named `GPS…`, `…Latitude`, `…Longitude`, `…Altitude`, `City`, `State`,
+     `Country`, `CountryCode`, `CountryName`, `ProvinceState`, `ProvinceName`, `Sublocation`,
+     `Location…`, `WorldRegion` or containing `geo`, in any namespace (`exif:GPSLatitude`,
+     `photoshop:City`, `Iptc4xmpCore:Location`, `Iptc4xmpExt:LocationCreated`,
+     `drone-dji:GpsLatitude`, …); IPTC 2:26, 2:27, 2:90, 2:92, 2:95, 2:100, 2:101 (location code
+     and name, city, sublocation, province or state, country code and name); PNG text whose
+     keyword contains gps, location, latitude, longitude, geo, city or country, and ImageMagick's
+     raw EXIF, XMP and IPTC profiles in PNG text; JPEG extended XMP and anything after a JPEG's
+     end (removal only); the video and audio tags `location`, `location-eng`,
+     `com.apple.quicktime.location.ISO6709`, `.name`, `.body`, `.note`, `.role`, `.date`,
+     `.accuracy.horizontal`, `com.android.location`, and any global or stream tag whose name
+     contains location, gps, geo, latitude, longitude, coordinates or iso6709 (QuickTime and MP4
+     `©xyz` and `loci`, Matroska `LOCATION`, ID3 `TXXX:location`, Vorbis `LOCATION`); and timed
+     metadata tracks (data streams such as GoPro GPMF or Apple's `mebx`) when streams are copied
+     (re-encodes never copy them). Everything else stays.
+   - `remove_all` keeps only what showing or playing the file needs: the pixels and streams; the
+     colour profile as `keep_icc` says; the EXIF orientation alone when sashimi doesn't apply it
+     (`auto_orient` off, and `strip`); PNG display and animation chunks; JPEG JFIF and Adobe
+     segments; GIF loop extensions; stream languages, dispositions and attachments' file names
+     and types; and the display rotation on copies. Chapters, cover art (on copies) and timed
+     metadata tracks go.
+   - When sashimi applies the orientation it resets it to 1 (EXIF and XMP) and drops the EXIF
+     thumbnail; edits and frame selection always do, and drop Photoshop thumbnails too.
+   - Byte-level tests pin all of this: `tests/core/test_metadata_images.py` (every source format ×
+     target × mode × function, with and without `auto_orient`, and the lossless removal with its
+     pixels compared) and `tests/integration/test_metadata_media.py` (every video and audio route
+     × mode, and the stream-copy removal with its decoded streams compared).
 
 ## 2. What sashimi now pins for FileSushi
 
@@ -195,20 +433,26 @@ beyond field names, defaults and bounds:
 - every `int`/`float` field with an upper bound has exactly one `annotated_types.Le` in
   `model_fields[name].metadata`, equal to the schema's `maximum`, and none uses an exclusive
   maximum (`_upper`, `tool_params.py:692`). Fields that are choices (`Literal`s, such as the MP3,
-  M4A and OGG `sample_rate`) and `cols`/`rows` (`GridValue`, whose 1-20 bound is inside the type)
-  have no `Le` in the field's metadata; read their choices or bounds from `model_json_schema()`;
+  M4A and OGG `sample_rate`) and `cols`/`rows` (`GridValue`, whose lower bound of 1 is inside the
+  type) have no `Le` in the field's metadata; read their choices from `model_json_schema()`;
 - the exact `KEYFRAME_NOTE` text;
 - `MediaTooLargeError(user_message, detail=…)`, and the same constructor and `.detail` on every
   `UserInputError` subclass (worker `:104,185`).
 - new in the editing round (2026-10-20): `IMAGE_EDIT` and `IMAGE_FRAMES` behave like the other
   families (`key`, `model_for`, the `Le` rule, including `FrameStripConfig`); the edit defaults
-  (rotate 0, no crop, adjustments 1.0, JPEG quality 92), `MAX_ANIMATION_BYTES`, `MIN_FRAME_MS`,
+  (rotate 0, no crop, adjustments 1.0, JPEG quality 92), `MIN_FRAME_MS`,
   `CROP_ASPECTS`, the `keep` string form, the `VideoRoute` names, and no route field on
   `Mp4VideoConfig`;
-- new in this round: `VIDEO_PREVIEW` behaves like the other families (`key`, `model_for`, the
+- new in the ftool round: `VIDEO_PREVIEW` behaves like the other families (`key`, `model_for`, the
   `Le` rule on every bounded number); `IcoConfig.background_color` defaults to `None`;
-  `FaviconPackConfig.background_color` to white; `FAVICON_PNG_SIZES` and `MAX_PREVIEW_SAMPLES`;
-  animated sheets keep `"auto"` as the `cols` default.
+  `FaviconPackConfig.background_color` to white; `FAVICON_PNG_SIZES`; animated sheets keep
+  `"auto"` as the `cols` default;
+- new in the limits round (2026-10-20, last): the limits of §1 item 14 build a `Limits`, from
+  numbers or strings (`from_params`), and `Limits.unlimited()` turns every one off; `Limits`
+  follows the `Le` rule; sashimi's defaults; `.limit` on refusals; the bounds FileSushi reads
+  (`crf`, the preview's `max_height` lower bound and `fps`) and that `sample_duration` has none;
+  and that the old `MAX_*` names are gone. `tests/core/test_config_module.py` also pins that every
+  upper bound left on a config field is a format limit (`FORMAT_UPPER_BOUNDS`).
 
 The user messages FileSushi's tests assert ("Unknown option: quality.", "This file doesn't look
 like a video we can read.") were already pinned by `tests/core/test_sheet_guards.py` and
@@ -217,8 +461,10 @@ like a video we can read.") were already pinned by `tests/core/test_sheet_guards
 ## 3. Install
 
 ```dockerfile
-RUN pip install --no-cache-dir --only-binary=:all: 'sashimi-convert[heif]==0.6.0'
+RUN pip install --no-cache-dir --only-binary=:all: 'sashimi-convert==0.6.0'
 ```
+
+(Add `[heif]` for HEIC input; FileSushi installs without it.)
 
 The web app needs only `sashimi-convert==0.6.0` (no extras); it pulls in `pydantic` and
 `pillow`, but importing `sashimi.config` loads neither Pillow nor anything that runs ffmpeg.
@@ -237,8 +483,9 @@ The web app needs only `sashimi-convert==0.6.0` (no extras); it pulls in `pydant
   rendered image changes), and `model_fields[name].default` is the value used. `None` is a default
   only for `max_width`/`max_height` (keep the source's size), `sample_rate` (keep the source's),
   `duration_seconds` on WebM/MP4/audio (to the end) and `end_seconds`/`duration_seconds` on trims.
-- Limits that don't depend on the file are field bounds you can read from
-  `model_fields[name].metadata` (`annotated_types.Le(le=30)` etc.).
+- Field bounds are format and codec limits only (`annotated_types.Le(le=51)` for an H.264 `crf`),
+  readable from `model_fields[name].metadata`. The limits a caller chooses are `Limits` (below),
+  passed to the converters as `limits=`; `Limits.check(config)` applies the ones that need no file.
 - Choice fields that hold ints or bools (`rotate`, `wav_bit_depth`, the MP3, M4A and OGG
   `sample_rate`, `accurate`, `animated`) accept form strings: `"90"`, `"24"`, `"true"`, `"on"`. Ordinary `int`,
   `float` and `bool` fields already did.
@@ -272,43 +519,68 @@ Union aliases for type hints: `ImageConvertConfig`, `ImageResizeConfig`, `VideoC
 ```python
 from sashimi.config import VIDEO_CONVERT
 VIDEO_CONVERT.model_for(target="mp4").model_fields["crf"]   # default 23, metadata [Ge(0), Le(51)]
-VIDEO_CONVERT.from_params({"duration_seconds": 31}, target="gif")
-# InvalidOptionsError: user_message "GIFs can be at most 30 seconds long."
+gif = VIDEO_CONVERT.from_params({"duration_seconds": 31}, target="gif")   # valid: no length bound
+Limits(max_gif_seconds=30).check(gif)
+# InvalidOptionsError: user_message "GIFs can be at most 30 seconds long.", limit "max_gif_seconds"
 ```
 
 ### Public constants
 
 | Name | Value | Meaning |
 |---|---|---|
-| `MAX_GIF_SECONDS` | 30 | longest GIF / animated WebP from a video |
 | `DEFAULT_GIF_SECONDS` | 10 | GIF / animated WebP length when none is given |
-| `MAX_VIDEO_SECONDS` | 600 | longest re-encode (WebM/MP4, rotate, accurate trim) |
-| `MAX_AUDIO_SECONDS` | 3600 | longest audio conversion |
 | `DURATION_TOLERANCE_SECONDS` | 1 | see §6 |
-| `DEFAULT_MAX_PIXELS` | 64,000,000 | default `max_pixels` of `image.convert`/`to_ico` |
-| `MAX_SHEET_HEIGHT` / `MAX_SHEET_PIXELS` | 16,383 / 64,000,000 | contact sheet size limits |
-| `MAX_FRAME_BYTES` | 400 MiB | decoded frames an animated sheet may hold |
+| `DEFAULT_MAX_PIXELS` | 64,000,000 | the default of `Limits.max_pixels` |
+| `WEBP_MAX_SIDE` | 16,383 | WebP's widest and tallest image: WebP contact sheets and frame strips (new; replaces `MAX_SHEET_HEIGHT`) |
+| `JPEG_MAX_SIDE` / `GIF_MAX_SIDE` | 65,500 / 65,535 | the widest and tallest JPEG and GIF sheets (new) |
+| `MAX_ANIMATION_FPS` | 50 | the highest `fps` of a GIF or animated WebP made from a video (new) |
+| `FLAC_MAX_SAMPLE_RATE` | 1,048,575 | the highest FLAC `sample_rate` (new) |
 | `MIN_TILE_SIZE` | 16 | smallest sheet tile side, px |
 | `MP3_SAMPLE_RATES` | (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000) | what `Mp3AudioConfig.sample_rate` accepts (new in 0.6.0) |
 | `AAC_SAMPLE_RATES` | the MP3 rates plus 64000, 88200, 96000 | what `M4aAudioConfig.sample_rate` accepts (new in 0.6.0) |
 | `OPUS_SAMPLE_RATES` | (8000, 12000, 16000, 24000, 48000) | what `OggAudioConfig.sample_rate` accepts |
-| `MAX_PREVIEW_SAMPLES` | 10 | most clips in a preview (new in 0.6.0) |
+| `OPUS_MAX_KBPS_PER_CHANNEL` | 256 | Opus's highest bitrate per channel; higher OGG and WebM audio bitrates are lowered to it (new) |
+| `METADATA_MODES` | ("keep", "remove_location", "remove_all") | the values of every `metadata` field (new; the type is `MetadataMode`) |
 | `FAVICON_PNG_SIZES` | (16, 32, 48, 180, 192, 512) | the PNG sizes in a favicon pack (new in 0.6.0) |
-| `MAX_ANIMATION_BYTES` | 268,435,456 (256 MiB) | decoded frames (width × height × 4 × frames) an animated edit or frame selection may hold (new) |
 | `MIN_FRAME_MS` | 20 | shortest frame a speed change writes, ms (new) |
 | `EDIT_QUALITY` | 92 | the default `quality` of JPEG, WebP and JPEG-TIFF edits and WebP frame selection (new) |
 | `CROP_ASPECTS` | ("free", "1:1", "4:3", "16:9", "9:16") | the crop presets to offer (new) |
 | `KEYFRAME_NOTE` | "Trimming without re-encoding is instant and keeps the original quality, but cuts can only land on keyframes, so your clip may start a moment before the time you chose." | |
 
 Also exported: `ParamsModel`, `ConfigFamily`, `RGB`, `RGBA`, `parse_color`, `Resample`,
-`X264Preset`, `GridValue`, `PreviewCrop`, `Rotation`, `Flip`.
+`X264Preset`, `GridValue`, `PreviewCrop`, `Rotation`, `Flip`, and `Limits` (next).
+
+Gone in the limits round: `MAX_GIF_SECONDS`, `MAX_VIDEO_SECONDS`, `MAX_AUDIO_SECONDS`,
+`MAX_PREVIEW_SAMPLES`, `MAX_FRAME_BYTES`, `MAX_ANIMATION_BYTES`, `MAX_SHEET_PIXELS` and
+`MAX_SHEET_HEIGHT` (§1 item 14 says what replaces each), and `ParamsModel.bound_messages`.
+
+### `Limits`
+
+`Limits(**fields)`, `Limits.from_params(params)` (numbers, or strings such as `"600"`; `None`,
+`""` or `"none"` turns a limit off; `InvalidOptionsError` for anything else), `Limits.unlimited()`
+(every limit off) and `limits.check(config)`. Frozen; unknown fields are refused. Every converter
+and batch function takes `limits=`, and `None` means `Limits()`.
+
+#### `Limits`
+
+| Field | Type | Bounds | Default | Description |
+|---|---|---|---|---|
+| `max_pixels` | int or None | > 0 | `64000000` | Images with more pixels than this are refused before they are decoded (conversions, icons, edits, frames). |
+| `max_frame_bytes` | int or None | > 0 | `1073741824` | Video frames held in memory at once, at width x height x 3 bytes each: an animated contact sheet's clips, and every frame of a GIF made from a video or of a GIF preview (a GIF's palette is built from all of them). |
+| `max_animation_bytes` | int or None | > 0 | `1073741824` | The frames of an animated GIF or WebP being edited, at width x height x 4 bytes each (edits, frame selection, frame strips). |
+| `max_sheet_pixels` | int or None | > 0 | `64000000` | The largest contact sheet, in pixels. |
+| `max_video_seconds` | float or None | > 0 | `None` | The longest video that is re-encoded or copied into an MP4 (to WebM or MP4, rotate and flip, accurate cuts). Lossless cuts and remuxes have no limit. |
+| `max_audio_seconds` | float or None | > 0 | `None` | The longest audio that is converted or extracted. |
+| `max_gif_seconds` | float or None | > 0 | `None` | The longest GIF or animated WebP made from a video, and the longest preview (all its clips together). |
+| `max_preview_clips` | int or None | > 0 | `None` | The most clips a preview takes. |
 
 ### Every model: fields, bounds, defaults
 
 Generated from `model_fields` (the CLI prints the same, per format, with
 `sashimi config defaults <command> [format]`). `target` (and `accurate`/`animated` where shown) is fixed per
 model and defaults to the model's own value. Colours accept `"#rrggbb"`/`"#rrggbbaa"`, `"r,g,b"`
-or tuples. The limit fields' bound messages are in §7.
+or tuples.
+
 
 #### `JpegImageConfig` (`target`='jpeg')
 
@@ -321,7 +593,7 @@ A JPEG image. Transparency is always flattened onto ``background_color``.
 | `resample` | lanczos / bicubic / bilinear / hamming / box / nearest |  | `"lanczos"` | Filter used when scaling down. |
 | `background_color` | colour |  | #ffffff | What transparent areas are flattened onto. |
 | `auto_orient` | bool |  | `True` | Apply the EXIF orientation tag (phone photos), so the output looks the way the photo is shown. |
-| `keep_exif` | bool |  | `False` | Copy EXIF metadata (camera, date, GPS). Off by default for privacy. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `keep_icc` | bool |  | `True` | Keep the colour profile, so wide-gamut photos keep their colours. |
 | `quality` | int | ≥ 1, ≤ 100 | `85` | 1 (smallest) to 100 (best). |
 | `optimize` | bool |  | `True` | Extra Huffman-table pass: slightly smaller files, slightly slower. |
@@ -340,7 +612,7 @@ A PNG image (always lossless).
 | `background_color` | colour |  | #ffffff | What transparent areas are flattened onto. |
 | `auto_orient` | bool |  | `True` | Apply the EXIF orientation tag (phone photos), so the output looks the way the photo is shown. |
 | `preserve_transparency` | bool |  | `True` | Keep alpha; when False, transparent areas are flattened onto ``background_color``. |
-| `keep_exif` | bool |  | `False` | Copy EXIF metadata (camera, date, GPS). Off by default for privacy. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `keep_icc` | bool |  | `True` | Keep the colour profile, so wide-gamut photos keep their colours. |
 | `png_compress_level` | int | ≥ 0, ≤ 9 | `6` | zlib level, 0 (none) to 9 (smallest). Lossless either way. |
 | `optimize` | bool |  | `False` | Search for the smallest encoding. Can take tens of seconds on large images. |
@@ -357,16 +629,15 @@ A WebP image.
 | `background_color` | colour |  | #ffffff | What transparent areas are flattened onto. |
 | `auto_orient` | bool |  | `True` | Apply the EXIF orientation tag (phone photos), so the output looks the way the photo is shown. |
 | `preserve_transparency` | bool |  | `True` | Keep alpha; when False, transparent areas are flattened onto ``background_color``. |
-| `keep_exif` | bool |  | `False` | Copy EXIF metadata (camera, date, GPS). Off by default for privacy. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `keep_icc` | bool |  | `True` | Keep the colour profile, so wide-gamut photos keep their colours. |
 | `quality` | int | ≥ 1, ≤ 100 | `85` | Lossy quality, or compression effort when ``lossless``. |
 | `lossless` | bool |  | `False` | Lossless compression: exact pixels, usually bigger files. |
 | `webp_method` | int | ≥ 0, ≤ 6 | `4` | Encoder effort, 0 (fastest) to 6 (smallest). |
-| `optimize` | bool |  | `True` | Spend extra effort on compression. |
 
 #### `GifImageConfig` (`target`='gif')
 
-A static GIF (the first frame of an animated input). GIFs carry no photo metadata.
+A static GIF (the first frame of an animated input). Of the source's metadata, GIFs hold only comments.
 
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
@@ -376,6 +647,7 @@ A static GIF (the first frame of an animated input). GIFs carry no photo metadat
 | `background_color` | colour |  | #ffffff | What transparent areas are flattened onto. |
 | `auto_orient` | bool |  | `True` | Apply the EXIF orientation tag (phone photos), so the output looks the way the photo is shown. |
 | `preserve_transparency` | bool |  | `True` | Keep alpha; when False, transparent areas are flattened onto ``background_color``. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `optimize` | bool |  | `False` | Drop unused palette entries. |
 
 #### `BmpImageConfig` (`target`='bmp')
@@ -402,7 +674,7 @@ A TIFF image.
 | `background_color` | colour |  | #ffffff | What transparent areas are flattened onto. |
 | `auto_orient` | bool |  | `True` | Apply the EXIF orientation tag (phone photos), so the output looks the way the photo is shown. |
 | `preserve_transparency` | bool |  | `True` | Keep alpha; when False, transparent areas are flattened onto ``background_color``. |
-| `keep_exif` | bool |  | `False` | Copy EXIF metadata (camera, date, GPS). Off by default for privacy. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `keep_icc` | bool |  | `True` | Keep the colour profile, so wide-gamut photos keep their colours. |
 | `tiff_compression` | none / lzw / deflate / jpeg |  | `"lzw"` | LZW and Deflate are lossless; JPEG is lossy and much smaller. |
 | `quality` | int | ≥ 1, ≤ 100 | `85` | Used only with JPEG compression, which also flattens transparency. |
@@ -414,9 +686,9 @@ A GIF made from part of a video: no sound, a 256-colour palette.
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
 | `start_seconds` | float | ≥ 0 | `0.0` | Where to start, in seconds from the beginning. |
-| `duration_seconds` | float | > 0, ≤ 30 | `10` | Length in seconds, at most 30. |
-| `max_width` | int | ≥ 64, ≤ 3840 | `480` | Never upscales; keeps the aspect ratio. |
-| `fps` | int | ≥ 1, ≤ 30 | `12` | Frames per second. |
+| `duration_seconds` | float | > 0 | `10` | Length in seconds. |
+| `max_width` | int | ≥ 64 | `480` | Never upscales; keeps the aspect ratio. |
+| `fps` | int | ≥ 1, ≤ 50 | `12` | Frames per second. |
 | `loop` | bool |  | `True` | Loop forever, or play once. |
 | `dither` | bayer / sierra2_4a / floyd_steinberg / none |  | `"bayer"` | Bayer gives smaller files; error diffusion (sierra2_4a, floyd_steinberg) smoother gradients. |
 | `palette_mode` | diff / full / single |  | `"diff"` | Build the palette from moving parts ("diff"), all pixels ("full"), or per frame ("single"). |
@@ -428,9 +700,9 @@ An animated WebP made from part of a video: no sound.
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
 | `start_seconds` | float | ≥ 0 | `0.0` | Where to start, in seconds from the beginning. |
-| `duration_seconds` | float | > 0, ≤ 30 | `10` | Length in seconds, at most 30. |
-| `max_width` | int | ≥ 64, ≤ 3840 | `480` | Never upscales; keeps the aspect ratio. |
-| `fps` | int | ≥ 1, ≤ 30 | `12` | Frames per second. |
+| `duration_seconds` | float | > 0 | `10` | Length in seconds. |
+| `max_width` | int | ≥ 64 | `480` | Never upscales; keeps the aspect ratio. |
+| `fps` | int | ≥ 1, ≤ 50 | `12` | Frames per second. |
 | `loop` | bool |  | `True` | Loop forever, or play once. |
 | `quality` | int | ≥ 0, ≤ 100 | `75` | Lossy quality, or compression effort when ``lossless``. |
 | `lossless` | bool |  | `False` | Lossless frames (much bigger files). |
@@ -442,11 +714,12 @@ A WebM (VP9 + Opus) video.
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
 | `start_seconds` | float | ≥ 0 | `0.0` | Where to start, in seconds from the beginning. |
-| `duration_seconds` | float or None | > 0, ≤ 600 | `None` | ``None`` converts to the end of the video (which may be at most 10 minutes long). |
-| `max_width` | int or None | ≥ 64, ≤ 3840 | `None` | ``None`` keeps the source's width. Never upscales; keeps the aspect ratio. |
+| `duration_seconds` | float or None | > 0 | `None` | ``None`` converts to the end of the video. |
+| `max_width` | int or None | ≥ 64 | `None` | ``None`` keeps the source's width. Never upscales; keeps the aspect ratio. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `crf` | int | ≥ 0, ≤ 63 | `34` | Constant quality: lower is better and bigger. |
 | `speed` | int | ≥ 0, ≤ 8 | `8` | libvpx ``-cpu-used``: higher is faster and lower quality. |
-| `audio_bitrate_kbps` | int | ≥ 32, ≤ 512 | `96` | Opus audio bitrate in kb/s. |
+| `audio_bitrate_kbps` | int | ≥ 32, ≤ 512 | `96` | Opus audio bitrate in kb/s. Opus allows at most 256 per channel, so mono audio gets at most 256. |
 | `mute` | bool |  | `False` | Drop the audio track. |
 
 #### `Mp4VideoConfig` (`target`='mp4')
@@ -456,8 +729,9 @@ An MP4 (H.264 + AAC) video.
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
 | `start_seconds` | float | ≥ 0 | `0.0` | Where to start, in seconds from the beginning. |
-| `duration_seconds` | float or None | > 0, ≤ 600 | `None` | ``None`` converts to the end of the video (which may be at most 10 minutes long). |
-| `max_width` | int or None | ≥ 64, ≤ 3840 | `None` | ``None`` keeps the source's width. Never upscales; keeps the aspect ratio. |
+| `duration_seconds` | float or None | > 0 | `None` | ``None`` converts to the end of the video. |
+| `max_width` | int or None | ≥ 64 | `None` | ``None`` keeps the source's width. Never upscales; keeps the aspect ratio. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `crf` | int | ≥ 0, ≤ 51 | `23` | Constant quality: lower is better and bigger. |
 | `preset` | ultrafast / superfast / veryfast / faster / fast / medium / slow / slower / veryslow |  | `"veryfast"` | Slower presets give smaller files. |
 | `audio_bitrate_kbps` | int | ≥ 32, ≤ 512 | `128` | AAC audio bitrate in kb/s. |
@@ -469,14 +743,14 @@ A GIF preview: short clips sampled from across a video, played one after another
 
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
-| `samples` | int | ≥ 1, ≤ 10 | `5` | How many clips to take from across the video. Short videos get fewer, so clips never overlap. |
-| `sample_duration` | float | > 0, ≤ 10 | `2.0` | Length of each clip in seconds. |
+| `samples` | int | ≥ 1 | `5` | How many clips to take from across the video. Short videos get fewer, so clips never overlap. |
+| `sample_duration` | float | > 0 | `2.0` | Length of each clip in seconds. |
 | `start_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `10.0` | Skip this much of the start of the video (intros, logos). |
 | `end_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `10.0` | Skip this much of the end of the video (credits). |
-| `max_height` | int | ≥ 64, ≤ 2160 | `360` | Scale down to at most this height. Never upscales; keeps the aspect ratio. |
-| `max_width` | int or None | ≥ 64, ≤ 3840 | `None` | Also scale down to at most this width. Blank sets no width limit. |
+| `max_height` | int | ≥ 64 | `360` | Scale down to at most this height. Never upscales; keeps the aspect ratio. |
+| `max_width` | int or None | ≥ 64 | `None` | Also scale down to at most this width. Blank sets no width limit. |
 | `crop` | none / 9:16 / 1:1 |  | `"none"` | Crop the centre of the picture to this shape first, e.g. "9:16" for vertical video sites. |
-| `fps` | int | ≥ 1, ≤ 30 | `15` | Frames per second. |
+| `fps` | int | ≥ 1, ≤ 50 | `15` | Frames per second. |
 | `loop` | bool |  | `True` | Loop forever, or play once. |
 
 #### `WebpPreviewConfig` (`target`='webp')
@@ -485,14 +759,14 @@ An animated WebP preview: short clips sampled from across a video, played one af
 
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
-| `samples` | int | ≥ 1, ≤ 10 | `5` | How many clips to take from across the video. Short videos get fewer, so clips never overlap. |
-| `sample_duration` | float | > 0, ≤ 10 | `2.0` | Length of each clip in seconds. |
+| `samples` | int | ≥ 1 | `5` | How many clips to take from across the video. Short videos get fewer, so clips never overlap. |
+| `sample_duration` | float | > 0 | `2.0` | Length of each clip in seconds. |
 | `start_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `10.0` | Skip this much of the start of the video (intros, logos). |
 | `end_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `10.0` | Skip this much of the end of the video (credits). |
-| `max_height` | int | ≥ 64, ≤ 2160 | `360` | Scale down to at most this height. Never upscales; keeps the aspect ratio. |
-| `max_width` | int or None | ≥ 64, ≤ 3840 | `None` | Also scale down to at most this width. Blank sets no width limit. |
+| `max_height` | int | ≥ 64 | `360` | Scale down to at most this height. Never upscales; keeps the aspect ratio. |
+| `max_width` | int or None | ≥ 64 | `None` | Also scale down to at most this width. Blank sets no width limit. |
 | `crop` | none / 9:16 / 1:1 |  | `"none"` | Crop the centre of the picture to this shape first, e.g. "9:16" for vertical video sites. |
-| `fps` | int | ≥ 1, ≤ 30 | `15` | Frames per second. |
+| `fps` | int | ≥ 1, ≤ 50 | `15` | Frames per second. |
 | `loop` | bool |  | `True` | Loop forever, or play once. |
 | `quality` | int | ≥ 0, ≤ 100 | `75` | Lossy quality, 0 (smallest) to 100 (best). |
 
@@ -504,6 +778,7 @@ Rotate and/or flip a video, re-encoding it as MP4 (H.264 + AAC).
 |---|---|---|---|---|
 | `rotate` | 0 / 90 / 180 / 270 |  | `0` | Clockwise rotation in degrees. |
 | `flip` | none / horizontal / vertical |  | `"none"` | Mirror the picture. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `crf` | int | ≥ 0, ≤ 51 | `23` | Constant quality: lower is better and bigger. |
 | `preset` | ultrafast / superfast / veryfast / faster / fast / medium / slow / slower / veryslow |  | `"veryfast"` | Slower presets give smaller files. |
 | `audio_bitrate_kbps` | int | ≥ 32, ≤ 512 | `128` | AAC audio bitrate in kb/s. |
@@ -517,9 +792,10 @@ Rotate and/or flip a video, re-encoding it as WebM (VP9 + Opus).
 |---|---|---|---|---|
 | `rotate` | 0 / 90 / 180 / 270 |  | `0` | Clockwise rotation in degrees. |
 | `flip` | none / horizontal / vertical |  | `"none"` | Mirror the picture. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `crf` | int | ≥ 0, ≤ 63 | `34` | Constant quality: lower is better and bigger. |
 | `speed` | int | ≥ 0, ≤ 8 | `8` | libvpx ``-cpu-used``: higher is faster and lower quality. |
-| `audio_bitrate_kbps` | int | ≥ 32, ≤ 512 | `96` | Opus audio bitrate in kb/s. |
+| `audio_bitrate_kbps` | int | ≥ 32, ≤ 512 | `96` | Opus audio bitrate in kb/s. Opus allows at most 256 per channel, so mono audio gets at most 256. |
 | `mute` | bool |  | `False` | Drop the audio track. |
 
 #### `CopyTrimConfig` (`accurate`=False)
@@ -531,6 +807,7 @@ A lossless trim: streams are copied into `container`, so the cut is instant but 
 | `start_seconds` | float | ≥ 0 | `0.0` | Where the clip starts, in seconds. |
 | `end_seconds` | float or None | > 0 | `None` | ``None`` (with no ``duration_seconds``) trims to the end of the video. |
 | `duration_seconds` | float or None | > 0 | `None` | The clip's length, instead of ``end_seconds``. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `container` | mkv / mp4 / webm / mov |  | **required** | The output container; it must be able to hold the source's codecs. |
 
 #### `H264TrimConfig` (`accurate`=True)
@@ -541,7 +818,8 @@ A frame-accurate trim, re-encoded as H.264 + AAC into MP4, MOV or MKV.
 |---|---|---|---|---|
 | `start_seconds` | float | ≥ 0 | `0.0` | Where the clip starts, in seconds. |
 | `end_seconds` | float or None | > 0 | `None` | ``None`` (with no ``duration_seconds``) trims to the end of the video. |
-| `duration_seconds` | float or None | > 0, ≤ 600 | `None` | The clip's length, instead of ``end_seconds``. |
+| `duration_seconds` | float or None | > 0 | `None` | The clip's length, instead of ``end_seconds``. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `crf` | int | ≥ 0, ≤ 51 | `23` | Constant quality: lower is better and bigger. |
 | `preset` | ultrafast / superfast / veryfast / faster / fast / medium / slow / slower / veryslow |  | `"veryfast"` | Slower presets give smaller files. |
 | `audio_bitrate_kbps` | int | ≥ 32, ≤ 512 | `128` | AAC audio bitrate in kb/s. |
@@ -556,10 +834,11 @@ A frame-accurate trim, re-encoded as VP9 + Opus into WebM.
 |---|---|---|---|---|
 | `start_seconds` | float | ≥ 0 | `0.0` | Where the clip starts, in seconds. |
 | `end_seconds` | float or None | > 0 | `None` | ``None`` (with no ``duration_seconds``) trims to the end of the video. |
-| `duration_seconds` | float or None | > 0, ≤ 600 | `None` | The clip's length, instead of ``end_seconds``. |
+| `duration_seconds` | float or None | > 0 | `None` | The clip's length, instead of ``end_seconds``. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `crf` | int | ≥ 0, ≤ 63 | `34` | Constant quality: lower is better and bigger. |
 | `speed` | int | ≥ 0, ≤ 8 | `8` | libvpx ``-cpu-used``: higher is faster and lower quality. |
-| `audio_bitrate_kbps` | int | ≥ 32, ≤ 512 | `96` | Opus audio bitrate in kb/s. |
+| `audio_bitrate_kbps` | int | ≥ 32, ≤ 512 | `96` | Opus audio bitrate in kb/s. Opus allows at most 256 per channel, so mono audio gets at most 256. |
 | `mute` | bool |  | `False` | Drop the audio track. |
 | `container` | webm |  | `"webm"` | The output container. |
 
@@ -569,8 +848,9 @@ MP3 (LAME).
 
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `start_seconds` | float | ≥ 0 | `0.0` | Where to start, in seconds from the beginning. |
-| `duration_seconds` | float or None | > 0, ≤ 3600 | `None` | ``None`` converts to the end of the file (which may be at most 60 minutes long). |
+| `duration_seconds` | float or None | > 0 | `None` | ``None`` converts to the end of the file. |
 | `mono` | bool |  | `False` | Mix down to one channel. |
 | `sample_rate` | 8000 / 11025 / 12000 / 16000 / 22050 / 24000 / 32000 / 44100 / 48000 or None |  | `None` | Output sample rate in Hz. ``None`` keeps the source's if MP3 supports it, and otherwise uses the nearest rate it does. |
 | `bitrate_kbps` | int | ≥ 64, ≤ 320 | `192` | Bitrate in kb/s. |
@@ -581,11 +861,12 @@ M4A (AAC).
 
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `start_seconds` | float | ≥ 0 | `0.0` | Where to start, in seconds from the beginning. |
-| `duration_seconds` | float or None | > 0, ≤ 3600 | `None` | ``None`` converts to the end of the file (which may be at most 60 minutes long). |
+| `duration_seconds` | float or None | > 0 | `None` | ``None`` converts to the end of the file. |
 | `mono` | bool |  | `False` | Mix down to one channel. |
 | `sample_rate` | 8000 / 11025 / 12000 / 16000 / 22050 / 24000 / 32000 / 44100 / 48000 / 64000 / 88200 / 96000 or None |  | `None` | Output sample rate in Hz. ``None`` keeps the source's if AAC supports it, and otherwise uses the nearest rate it does. |
-| `bitrate_kbps` | int | ≥ 64, ≤ 320 | `160` | Bitrate in kb/s. |
+| `bitrate_kbps` | int | ≥ 64, ≤ 512 | `160` | Bitrate in kb/s. |
 
 #### `OggAudioConfig` (`target`='ogg')
 
@@ -593,11 +874,12 @@ OGG (Opus).
 
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `start_seconds` | float | ≥ 0 | `0.0` | Where to start, in seconds from the beginning. |
-| `duration_seconds` | float or None | > 0, ≤ 3600 | `None` | ``None`` converts to the end of the file (which may be at most 60 minutes long). |
+| `duration_seconds` | float or None | > 0 | `None` | ``None`` converts to the end of the file. |
 | `mono` | bool |  | `False` | Mix down to one channel. |
 | `sample_rate` | 8000 / 12000 / 16000 / 24000 / 48000 or None |  | `None` | Output sample rate in Hz. ``None`` keeps the source's if Opus supports it, and otherwise uses 48 kHz. |
-| `bitrate_kbps` | int | ≥ 64, ≤ 320 | `128` | Bitrate in kb/s. |
+| `bitrate_kbps` | int | ≥ 64, ≤ 512 | `128` | Bitrate in kb/s. Opus allows at most 256 per channel, so mono audio gets at most 256. |
 
 #### `WavAudioConfig` (`target`='wav')
 
@@ -605,10 +887,11 @@ WAV (uncompressed PCM).
 
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `start_seconds` | float | ≥ 0 | `0.0` | Where to start, in seconds from the beginning. |
-| `duration_seconds` | float or None | > 0, ≤ 3600 | `None` | ``None`` converts to the end of the file (which may be at most 60 minutes long). |
+| `duration_seconds` | float or None | > 0 | `None` | ``None`` converts to the end of the file. |
 | `mono` | bool |  | `False` | Mix down to one channel. |
-| `sample_rate` | int or None | ≥ 8000, ≤ 192000 | `None` | Output sample rate in Hz. ``None`` keeps the source's. |
+| `sample_rate` | int or None | ≥ 8000 | `None` | Output sample rate in Hz. ``None`` keeps the source's. |
 | `wav_bit_depth` | 16 / 24 / 32 |  | `16` | PCM sample size in bits. |
 
 #### `FlacAudioConfig` (`target`='flac')
@@ -617,10 +900,11 @@ FLAC (lossless).
 
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `start_seconds` | float | ≥ 0 | `0.0` | Where to start, in seconds from the beginning. |
-| `duration_seconds` | float or None | > 0, ≤ 3600 | `None` | ``None`` converts to the end of the file (which may be at most 60 minutes long). |
+| `duration_seconds` | float or None | > 0 | `None` | ``None`` converts to the end of the file. |
 | `mono` | bool |  | `False` | Mix down to one channel. |
-| `sample_rate` | int or None | ≥ 8000, ≤ 192000 | `None` | Output sample rate in Hz. ``None`` keeps the source's. |
+| `sample_rate` | int or None | ≥ 8000, ≤ 1048575 | `None` | Output sample rate in Hz. ``None`` keeps the source's. |
 | `flac_compression_level` | int | ≥ 0, ≤ 12 | `5` | 0 is fastest, 12 smallest; lossless either way. |
 
 #### `JpegSheetConfig` (`target`='jpeg', `animated`=False)
@@ -629,9 +913,9 @@ A still contact sheet saved as JPEG.
 
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
-| `cols` | int or auto | ≥ 1, ≤ 20 | `"auto"` | Columns, 1-20, or "auto" to choose from the video's aspect ratio. |
-| `rows` | int or auto | ≥ 1, ≤ 20 | `"auto"` | Rows, 1-20, or "auto". |
-| `gap` | int | ≥ 0, ≤ 100 | `5` | Pixels between tiles. |
+| `cols` | int or auto | ≥ 1 | `"auto"` | Columns, or "auto" to choose from the video's aspect ratio. |
+| `rows` | int or auto | ≥ 1 | `"auto"` | Rows, or "auto". |
+| `gap` | int | ≥ 0 | `5` | Pixels between tiles. |
 | `start_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `7.0` | Skip this much of the start of the video (credits, logos). |
 | `end_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `7.0` | Skip this much of the end of the video (credits). |
 | `grid_bg_color` | colour |  | #141414 | Background behind the tiles. |
@@ -643,7 +927,7 @@ A still contact sheet saved as JPEG.
 | `timestamp_font_size` | int | ≥ 6, ≤ 200 | `14` | Time label text size in pixels. |
 | `timestamp_bg_color` | colour |  | #000000b4 | Time label background, with alpha. |
 | `timestamp_text_color` | colour |  | #ffffff | Time label text colour. |
-| `width` | int | ≥ 320, ≤ 8000 | `2560` | Width of the sheet in pixels. |
+| `width` | int | ≥ 320 | `2560` | Width of the sheet in pixels. |
 | `quality` | int | ≥ 1, ≤ 100 | `85` | 1 (smallest) to 100 (best). |
 
 #### `PngSheetConfig` (`target`='png', `animated`=False)
@@ -652,9 +936,9 @@ A still contact sheet saved as PNG.
 
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
-| `cols` | int or auto | ≥ 1, ≤ 20 | `"auto"` | Columns, 1-20, or "auto" to choose from the video's aspect ratio. |
-| `rows` | int or auto | ≥ 1, ≤ 20 | `"auto"` | Rows, 1-20, or "auto". |
-| `gap` | int | ≥ 0, ≤ 100 | `5` | Pixels between tiles. |
+| `cols` | int or auto | ≥ 1 | `"auto"` | Columns, or "auto" to choose from the video's aspect ratio. |
+| `rows` | int or auto | ≥ 1 | `"auto"` | Rows, or "auto". |
+| `gap` | int | ≥ 0 | `5` | Pixels between tiles. |
 | `start_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `7.0` | Skip this much of the start of the video (credits, logos). |
 | `end_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `7.0` | Skip this much of the end of the video (credits). |
 | `grid_bg_color` | colour |  | #141414 | Background behind the tiles. |
@@ -666,7 +950,7 @@ A still contact sheet saved as PNG.
 | `timestamp_font_size` | int | ≥ 6, ≤ 200 | `14` | Time label text size in pixels. |
 | `timestamp_bg_color` | colour |  | #000000b4 | Time label background, with alpha. |
 | `timestamp_text_color` | colour |  | #ffffff | Time label text colour. |
-| `width` | int | ≥ 320, ≤ 8000 | `2560` | Width of the sheet in pixels. |
+| `width` | int | ≥ 320 | `2560` | Width of the sheet in pixels. |
 
 #### `WebpSheetConfig` (`target`='webp', `animated`=False)
 
@@ -674,9 +958,9 @@ A still contact sheet saved as WebP.
 
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
-| `cols` | int or auto | ≥ 1, ≤ 20 | `"auto"` | Columns, 1-20, or "auto" to choose from the video's aspect ratio. |
-| `rows` | int or auto | ≥ 1, ≤ 20 | `"auto"` | Rows, 1-20, or "auto". |
-| `gap` | int | ≥ 0, ≤ 100 | `5` | Pixels between tiles. |
+| `cols` | int or auto | ≥ 1 | `"auto"` | Columns, or "auto" to choose from the video's aspect ratio. |
+| `rows` | int or auto | ≥ 1 | `"auto"` | Rows, or "auto". |
+| `gap` | int | ≥ 0 | `5` | Pixels between tiles. |
 | `start_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `7.0` | Skip this much of the start of the video (credits, logos). |
 | `end_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `7.0` | Skip this much of the end of the video (credits). |
 | `grid_bg_color` | colour |  | #141414 | Background behind the tiles. |
@@ -688,7 +972,7 @@ A still contact sheet saved as WebP.
 | `timestamp_font_size` | int | ≥ 6, ≤ 200 | `14` | Time label text size in pixels. |
 | `timestamp_bg_color` | colour |  | #000000b4 | Time label background, with alpha. |
 | `timestamp_text_color` | colour |  | #ffffff | Time label text colour. |
-| `width` | int | ≥ 320, ≤ 8000 | `2560` | Width of the sheet in pixels. |
+| `width` | int | ≥ 320 | `2560` | Width of the sheet in pixels. |
 | `quality` | int | ≥ 1, ≤ 100 | `85` | 1 (smallest) to 100 (best). |
 
 #### `AnimatedWebpSheetConfig` (`target`='webp', `animated`=True)
@@ -697,9 +981,9 @@ An animated contact sheet saved as WebP: every tile plays a short clip.
 
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
-| `cols` | int or auto | ≥ 1, ≤ 20 | `"auto"` | Columns, 1-20, or "auto": 3, or 4 for portrait videos. |
-| `rows` | int or auto | ≥ 1, ≤ 20 | `"auto"` | Rows, 1-20, or "auto": 3, or 2 for portrait videos. |
-| `gap` | int | ≥ 0, ≤ 100 | `5` | Pixels between tiles. |
+| `cols` | int or auto | ≥ 1 | `"auto"` | Columns, or "auto": 3, or 4 for portrait videos. |
+| `rows` | int or auto | ≥ 1 | `"auto"` | Rows, or "auto": 3, or 2 for portrait videos. |
+| `gap` | int | ≥ 0 | `5` | Pixels between tiles. |
 | `start_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `7.0` | Skip this much of the start of the video (credits, logos). |
 | `end_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `7.0` | Skip this much of the end of the video (credits). |
 | `grid_bg_color` | colour |  | #141414 | Background behind the tiles. |
@@ -711,9 +995,9 @@ An animated contact sheet saved as WebP: every tile plays a short clip.
 | `timestamp_font_size` | int | ≥ 6, ≤ 200 | `14` | Time label text size in pixels. |
 | `timestamp_bg_color` | colour |  | #000000b4 | Time label background, with alpha. |
 | `timestamp_text_color` | colour |  | #ffffff | Time label text colour. |
-| `width` | int | ≥ 320, ≤ 3840 | `1280` | Approximate width of the sheet in pixels (tiles are rounded to even sizes). |
-| `sample_duration` | float | > 0.0, ≤ 10.0 | `2.0` | Length of each tile's clip in seconds. A video shorter than this gets one tile of the whole video. |
-| `fps` | int | ≥ 1, ≤ 30 | `12` | Frames per second. |
+| `width` | int | ≥ 320 | `1280` | Approximate width of the sheet in pixels (tiles are rounded to even sizes). |
+| `sample_duration` | float | > 0.0 | `2.0` | Length of each tile's clip in seconds. A video shorter than this gets one tile of the whole video. |
+| `fps` | int | ≥ 1, ≤ 50 | `12` | Frames per second. |
 | `loop` | bool |  | `True` | Loop forever, or play once. |
 | `quality` | int | ≥ 1, ≤ 100 | `75` | 1 (smallest) to 100 (best). |
 
@@ -723,9 +1007,9 @@ An animated contact sheet saved as GIF: every tile plays a short clip.
 
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
-| `cols` | int or auto | ≥ 1, ≤ 20 | `"auto"` | Columns, 1-20, or "auto": 3, or 4 for portrait videos. |
-| `rows` | int or auto | ≥ 1, ≤ 20 | `"auto"` | Rows, 1-20, or "auto": 3, or 2 for portrait videos. |
-| `gap` | int | ≥ 0, ≤ 100 | `5` | Pixels between tiles. |
+| `cols` | int or auto | ≥ 1 | `"auto"` | Columns, or "auto": 3, or 4 for portrait videos. |
+| `rows` | int or auto | ≥ 1 | `"auto"` | Rows, or "auto": 3, or 2 for portrait videos. |
+| `gap` | int | ≥ 0 | `5` | Pixels between tiles. |
 | `start_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `7.0` | Skip this much of the start of the video (credits, logos). |
 | `end_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `7.0` | Skip this much of the end of the video (credits). |
 | `grid_bg_color` | colour |  | #141414 | Background behind the tiles. |
@@ -737,9 +1021,9 @@ An animated contact sheet saved as GIF: every tile plays a short clip.
 | `timestamp_font_size` | int | ≥ 6, ≤ 200 | `14` | Time label text size in pixels. |
 | `timestamp_bg_color` | colour |  | #000000b4 | Time label background, with alpha. |
 | `timestamp_text_color` | colour |  | #ffffff | Time label text colour. |
-| `width` | int | ≥ 320, ≤ 3840 | `1280` | Approximate width of the sheet in pixels (tiles are rounded to even sizes). |
-| `sample_duration` | float | > 0.0, ≤ 10.0 | `2.0` | Length of each tile's clip in seconds. A video shorter than this gets one tile of the whole video. |
-| `fps` | int | ≥ 1, ≤ 30 | `12` | Frames per second. |
+| `width` | int | ≥ 320 | `1280` | Approximate width of the sheet in pixels (tiles are rounded to even sizes). |
+| `sample_duration` | float | > 0.0 | `2.0` | Length of each tile's clip in seconds. A video shorter than this gets one tile of the whole video. |
+| `fps` | int | ≥ 1, ≤ 50 | `12` | Frames per second. |
 | `loop` | bool |  | `True` | Loop forever, or play once. |
 
 #### `IcoConfig`
@@ -780,10 +1064,10 @@ An edited JPEG: EXIF orientation, then rotate and flip, then crop, then brightne
 | `crop_top` | int | ≥ 0 | `0` | Top edge of the crop, in pixels of the rotated and flipped picture. |
 | `crop_width` | int or None | ≥ 1 | `None` | Width of the crop in pixels. Blank keeps everything right of the left edge. |
 | `crop_height` | int or None | ≥ 1 | `None` | Height of the crop in pixels. Blank keeps everything below the top edge. |
-| `brightness` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is black, 1 unchanged, 2 twice as bright. The same as CSS ``brightness()``. |
-| `contrast` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is flat grey, 1 unchanged, 2 twice the contrast. The same as CSS ``contrast()``. |
-| `saturation` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is greyscale, 1 unchanged, 2 twice as vivid. The same as CSS ``saturate()``. |
-| `keep_exif` | bool |  | `False` | Copy EXIF metadata (camera, date, GPS). Off by default for privacy. |
+| `brightness` | float | ≥ 0.0 | `1.0` | 0 is black, 1 unchanged, 2 twice as bright. The same as CSS ``brightness()``. |
+| `contrast` | float | ≥ 0.0 | `1.0` | 0 is flat grey, 1 unchanged, 2 twice the contrast. The same as CSS ``contrast()``. |
+| `saturation` | float | ≥ 0.0 | `1.0` | 0 is greyscale, 1 unchanged, 2 twice as vivid. The same as CSS ``saturate()``. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `keep_icc` | bool |  | `True` | Keep the colour profile, so wide-gamut photos keep their colours. |
 | `quality` | int | ≥ 1, ≤ 100 | `92` | 1 (smallest) to 100 (best). Edits are re-saved at high quality by default. |
 | `optimize` | bool |  | `True` | Extra Huffman-table pass: slightly smaller files, slightly slower. |
@@ -802,10 +1086,10 @@ An edited PNG (lossless). Transparency is kept.
 | `crop_top` | int | ≥ 0 | `0` | Top edge of the crop, in pixels of the rotated and flipped picture. |
 | `crop_width` | int or None | ≥ 1 | `None` | Width of the crop in pixels. Blank keeps everything right of the left edge. |
 | `crop_height` | int or None | ≥ 1 | `None` | Height of the crop in pixels. Blank keeps everything below the top edge. |
-| `brightness` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is black, 1 unchanged, 2 twice as bright. The same as CSS ``brightness()``. |
-| `contrast` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is flat grey, 1 unchanged, 2 twice the contrast. The same as CSS ``contrast()``. |
-| `saturation` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is greyscale, 1 unchanged, 2 twice as vivid. The same as CSS ``saturate()``. |
-| `keep_exif` | bool |  | `False` | Copy EXIF metadata (camera, date, GPS). Off by default for privacy. |
+| `brightness` | float | ≥ 0.0 | `1.0` | 0 is black, 1 unchanged, 2 twice as bright. The same as CSS ``brightness()``. |
+| `contrast` | float | ≥ 0.0 | `1.0` | 0 is flat grey, 1 unchanged, 2 twice the contrast. The same as CSS ``contrast()``. |
+| `saturation` | float | ≥ 0.0 | `1.0` | 0 is greyscale, 1 unchanged, 2 twice as vivid. The same as CSS ``saturate()``. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `keep_icc` | bool |  | `True` | Keep the colour profile, so wide-gamut photos keep their colours. |
 | `png_compress_level` | int | ≥ 0, ≤ 9 | `6` | zlib level, 0 (none) to 9 (smallest). Lossless either way. |
 | `optimize` | bool |  | `False` | Search for the smallest encoding. Can take tens of seconds on large images. |
@@ -822,10 +1106,10 @@ An edited WebP. Transparency and animation are kept; every frame of an animation
 | `crop_top` | int | ≥ 0 | `0` | Top edge of the crop, in pixels of the rotated and flipped picture. |
 | `crop_width` | int or None | ≥ 1 | `None` | Width of the crop in pixels. Blank keeps everything right of the left edge. |
 | `crop_height` | int or None | ≥ 1 | `None` | Height of the crop in pixels. Blank keeps everything below the top edge. |
-| `brightness` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is black, 1 unchanged, 2 twice as bright. The same as CSS ``brightness()``. |
-| `contrast` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is flat grey, 1 unchanged, 2 twice the contrast. The same as CSS ``contrast()``. |
-| `saturation` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is greyscale, 1 unchanged, 2 twice as vivid. The same as CSS ``saturate()``. |
-| `keep_exif` | bool |  | `False` | Copy EXIF metadata (camera, date, GPS). Off by default for privacy. |
+| `brightness` | float | ≥ 0.0 | `1.0` | 0 is black, 1 unchanged, 2 twice as bright. The same as CSS ``brightness()``. |
+| `contrast` | float | ≥ 0.0 | `1.0` | 0 is flat grey, 1 unchanged, 2 twice the contrast. The same as CSS ``contrast()``. |
+| `saturation` | float | ≥ 0.0 | `1.0` | 0 is greyscale, 1 unchanged, 2 twice as vivid. The same as CSS ``saturate()``. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `keep_icc` | bool |  | `True` | Keep the colour profile, so wide-gamut photos keep their colours. |
 | `quality` | int | ≥ 1, ≤ 100 | `92` | Lossy quality, or compression effort when ``lossless``. Edits are re-saved at high quality by default. |
 | `lossless` | bool |  | `False` | Lossless compression: exact pixels, usually bigger files. |
@@ -843,9 +1127,10 @@ An edited GIF. Transparency and animation are kept; every frame of an animation 
 | `crop_top` | int | ≥ 0 | `0` | Top edge of the crop, in pixels of the rotated and flipped picture. |
 | `crop_width` | int or None | ≥ 1 | `None` | Width of the crop in pixels. Blank keeps everything right of the left edge. |
 | `crop_height` | int or None | ≥ 1 | `None` | Height of the crop in pixels. Blank keeps everything below the top edge. |
-| `brightness` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is black, 1 unchanged, 2 twice as bright. The same as CSS ``brightness()``. |
-| `contrast` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is flat grey, 1 unchanged, 2 twice the contrast. The same as CSS ``contrast()``. |
-| `saturation` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is greyscale, 1 unchanged, 2 twice as vivid. The same as CSS ``saturate()``. |
+| `brightness` | float | ≥ 0.0 | `1.0` | 0 is black, 1 unchanged, 2 twice as bright. The same as CSS ``brightness()``. |
+| `contrast` | float | ≥ 0.0 | `1.0` | 0 is flat grey, 1 unchanged, 2 twice the contrast. The same as CSS ``contrast()``. |
+| `saturation` | float | ≥ 0.0 | `1.0` | 0 is greyscale, 1 unchanged, 2 twice as vivid. The same as CSS ``saturate()``. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `optimize` | bool |  | `False` | Drop unused palette entries. |
 
 #### `BmpEditConfig` (`target`='bmp')
@@ -860,9 +1145,9 @@ An edited BMP. Transparency is flattened onto white.
 | `crop_top` | int | ≥ 0 | `0` | Top edge of the crop, in pixels of the rotated and flipped picture. |
 | `crop_width` | int or None | ≥ 1 | `None` | Width of the crop in pixels. Blank keeps everything right of the left edge. |
 | `crop_height` | int or None | ≥ 1 | `None` | Height of the crop in pixels. Blank keeps everything below the top edge. |
-| `brightness` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is black, 1 unchanged, 2 twice as bright. The same as CSS ``brightness()``. |
-| `contrast` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is flat grey, 1 unchanged, 2 twice the contrast. The same as CSS ``contrast()``. |
-| `saturation` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is greyscale, 1 unchanged, 2 twice as vivid. The same as CSS ``saturate()``. |
+| `brightness` | float | ≥ 0.0 | `1.0` | 0 is black, 1 unchanged, 2 twice as bright. The same as CSS ``brightness()``. |
+| `contrast` | float | ≥ 0.0 | `1.0` | 0 is flat grey, 1 unchanged, 2 twice the contrast. The same as CSS ``contrast()``. |
+| `saturation` | float | ≥ 0.0 | `1.0` | 0 is greyscale, 1 unchanged, 2 twice as vivid. The same as CSS ``saturate()``. |
 
 #### `TiffEditConfig` (`target`='tiff')
 
@@ -876,10 +1161,10 @@ An edited TIFF (the first page).
 | `crop_top` | int | ≥ 0 | `0` | Top edge of the crop, in pixels of the rotated and flipped picture. |
 | `crop_width` | int or None | ≥ 1 | `None` | Width of the crop in pixels. Blank keeps everything right of the left edge. |
 | `crop_height` | int or None | ≥ 1 | `None` | Height of the crop in pixels. Blank keeps everything below the top edge. |
-| `brightness` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is black, 1 unchanged, 2 twice as bright. The same as CSS ``brightness()``. |
-| `contrast` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is flat grey, 1 unchanged, 2 twice the contrast. The same as CSS ``contrast()``. |
-| `saturation` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is greyscale, 1 unchanged, 2 twice as vivid. The same as CSS ``saturate()``. |
-| `keep_exif` | bool |  | `False` | Copy EXIF metadata (camera, date, GPS). Off by default for privacy. |
+| `brightness` | float | ≥ 0.0 | `1.0` | 0 is black, 1 unchanged, 2 twice as bright. The same as CSS ``brightness()``. |
+| `contrast` | float | ≥ 0.0 | `1.0` | 0 is flat grey, 1 unchanged, 2 twice the contrast. The same as CSS ``contrast()``. |
+| `saturation` | float | ≥ 0.0 | `1.0` | 0 is greyscale, 1 unchanged, 2 twice as vivid. The same as CSS ``saturate()``. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `keep_icc` | bool |  | `True` | Keep the colour profile, so wide-gamut photos keep their colours. |
 | `tiff_compression` | none / lzw / deflate / jpeg |  | `"lzw"` | LZW and Deflate are lossless; JPEG is lossy and much smaller. |
 | `quality` | int | ≥ 1, ≤ 100 | `92` | Used only with JPEG compression, which also flattens transparency. |
@@ -891,7 +1176,8 @@ An animated GIF with some of its frames, at a new speed.
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
 | `keep` | frame numbers (from 0) or None |  | `None` | Frames to keep, numbered from 0, e.g. "0-9,12". Blank keeps every frame. Kept frames play in their original order. |
-| `speed` | float | ≥ 0.25, ≤ 4.0 | `1.0` | Playback speed: 2 plays twice as fast, 0.5 half as fast. Every frame's duration is divided by it. |
+| `speed` | float | > 0.0 | `1.0` | Playback speed: 2 plays twice as fast, 0.5 half as fast. Every frame's duration is divided by it. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `optimize` | bool |  | `False` | Drop unused palette entries. |
 
 #### `WebpFramesConfig` (`target`='webp')
@@ -901,8 +1187,8 @@ An animated WebP with some of its frames, at a new speed.
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
 | `keep` | frame numbers (from 0) or None |  | `None` | Frames to keep, numbered from 0, e.g. "0-9,12". Blank keeps every frame. Kept frames play in their original order. |
-| `speed` | float | ≥ 0.25, ≤ 4.0 | `1.0` | Playback speed: 2 plays twice as fast, 0.5 half as fast. Every frame's duration is divided by it. |
-| `keep_exif` | bool |  | `False` | Copy EXIF metadata (camera, date, GPS). Off by default for privacy. |
+| `speed` | float | > 0.0 | `1.0` | Playback speed: 2 plays twice as fast, 0.5 half as fast. Every frame's duration is divided by it. |
+| `metadata` | keep / remove_location / remove_all |  | `"keep"` | The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all". |
 | `keep_icc` | bool |  | `True` | Keep the colour profile, so wide-gamut photos keep their colours. |
 | `quality` | int | ≥ 1, ≤ 100 | `92` | Lossy quality, or compression effort when ``lossless``. Frames are re-saved at high quality by default. |
 | `lossless` | bool |  | `False` | Lossless compression: exact pixels, usually bigger files. |
@@ -914,8 +1200,8 @@ Every frame of an animated image as small tiles in one still WebP (a sprite shee
 
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
-| `tile_height` | int | ≥ 16, ≤ 256 | `96` | Height of each frame's tile in pixels; widths follow the animation's shape. |
-| `columns` | int | ≥ 1, ≤ 50 | `10` | Tiles per row. More are used if the strip would otherwise be too tall for WebP. |
+| `tile_height` | int | ≥ 16 | `96` | Height of each frame's tile in pixels; widths follow the animation's shape. |
+| `columns` | int | ≥ 1 | `10` | Tiles per row. More are used if the strip would otherwise be too tall for WebP. |
 | `quality` | int | ≥ 1, ≤ 100 | `80` | 1 (smallest) to 100 (best). |
 
 ## 5. Worker shim
@@ -924,45 +1210,53 @@ Every frame of an animated image as small tiles in one still WebP (a sprite shee
 import sashimi
 from sashimi.config import (
     AUDIO_CONVERT, CONTACT_SHEET, IMAGE_CONVERT, IMAGE_EDIT, IMAGE_FRAMES, IMAGE_RESIZE, VIDEO_CONVERT,
-    VIDEO_PREVIEW, VIDEO_TRANSFORM, VIDEO_TRIM, FaviconPackConfig, FrameStripConfig, IcoConfig,
+    VIDEO_PREVIEW, VIDEO_TRANSFORM, VIDEO_TRIM, FaviconPackConfig, FrameStripConfig, IcoConfig, Limits,
 )
 
-IMAGE_MAX_PIXELS = 24_000_000
+LIMITS = Limits(
+    max_pixels=24_000_000, max_video_seconds=600, max_audio_seconds=3600, max_gif_seconds=30,
+    max_preview_clips=10, max_frame_bytes=400 * 1024 * 1024, max_animation_bytes=256 * 1024 * 1024,
+    max_sheet_pixels=64_000_000,
+)
+GIF_LIMITS = LIMITS.model_copy(update={"max_frame_bytes": None})
 
 def run_tool(tool_id, src, dst, params, job):
     target = str(job["target_format"]).lower()
     if tool_id in IMAGE_TOOLS:
-        sashimi.image.convert(src, dst, IMAGE_CONVERT.from_params(params, target=target), max_pixels=IMAGE_MAX_PIXELS)
+        sashimi.image.convert(src, dst, IMAGE_CONVERT.from_params(params, target=target), limits=LIMITS)
     elif tool_id in RESIZE_TOOLS:
-        sashimi.image.convert(src, dst, IMAGE_RESIZE.from_params(params, target=target), max_pixels=IMAGE_MAX_PIXELS)
+        sashimi.image.convert(src, dst, IMAGE_RESIZE.from_params(params, target=target), limits=LIMITS)
     elif tool_id in ICO_TOOLS:
-        sashimi.image.to_ico(src, dst, IcoConfig.from_params(params), max_pixels=IMAGE_MAX_PIXELS)
+        sashimi.image.to_ico(src, dst, IcoConfig.from_params(params), limits=LIMITS)
     elif tool_id in FAVICON_PACK_TOOLS:
-        sashimi.image.favicon_pack(src, dst, FaviconPackConfig.from_params(params), max_pixels=IMAGE_MAX_PIXELS)
+        sashimi.image.favicon_pack(src, dst, FaviconPackConfig.from_params(params), limits=LIMITS)
     elif tool_id in EDIT_TOOLS:
-        target = sashimi.image.frames_info(src, max_pixels=IMAGE_MAX_PIXELS).edit_target
-        sashimi.image.edit(src, dst, IMAGE_EDIT.from_params(params, target=target), max_pixels=IMAGE_MAX_PIXELS)
+        target = sashimi.image.frames_info(src, limits=LIMITS).edit_target
+        sashimi.image.edit(src, dst, IMAGE_EDIT.from_params(params, target=target), limits=LIMITS)
     elif tool_id in FRAMES_TOOLS:
-        target = sashimi.image.frames_info(src, max_pixels=IMAGE_MAX_PIXELS).edit_target
-        sashimi.image.select_frames(src, dst, IMAGE_FRAMES.from_params(params, target=target),
-                                    max_pixels=IMAGE_MAX_PIXELS)
+        target = sashimi.image.frames_info(src, limits=LIMITS).edit_target
+        sashimi.image.select_frames(src, dst, IMAGE_FRAMES.from_params(params, target=target), limits=LIMITS)
     elif tool_id in FRAME_STRIP_TOOLS:
-        layout = sashimi.image.frame_strip(src, dst, FrameStripConfig.from_params(params), max_pixels=IMAGE_MAX_PIXELS)
-        job_result = {"frame_strip": layout.model_dump(), "frames": sashimi.image.frames_info(src).model_dump()}
+        layout = sashimi.image.frame_strip(src, dst, FrameStripConfig.from_params(params), limits=LIMITS)
+        job_result = {"frame_strip": layout.model_dump(), "frames": sashimi.image.frames_info(src, limits=LIMITS).model_dump()}
     elif tool_id in VIDEO_TOOLS:
-        route = sashimi.video.convert(src, dst, VIDEO_CONVERT.from_params(params, target=target))
+        limits = GIF_LIMITS if target == "gif" else LIMITS
+        route = sashimi.video.convert(src, dst, VIDEO_CONVERT.from_params(params, target=target), limits=limits)
     elif tool_id in PREVIEW_TOOLS:
-        sashimi.video.preview(src, dst, VIDEO_PREVIEW.from_params(params, target=target))
+        sashimi.video.preview(src, dst, VIDEO_PREVIEW.from_params(params, target=target), limits=LIMITS)
     elif tool_id in TRANSFORM_TOOLS:
-        sashimi.video.transform(src, dst, VIDEO_TRANSFORM.from_params(params, target=target))
+        sashimi.video.transform(src, dst, VIDEO_TRANSFORM.from_params(params, target=target), limits=LIMITS)
     elif tool_id in TRIM_TOOLS:
-        sashimi.video.trim(src, dst, VIDEO_TRIM.from_params(params, container=target))
+        sashimi.video.trim(src, dst, VIDEO_TRIM.from_params(params, container=target), limits=LIMITS)
     elif tool_id in AUDIO_TOOLS:
-        sashimi.audio.convert(src, dst, AUDIO_CONVERT.from_params(params, target=target))
+        sashimi.audio.convert(src, dst, AUDIO_CONVERT.from_params(params, target=target), limits=LIMITS)
     elif tool_id in SHEET_TOOLS:
         sashimi.sheets.render(src, dst, CONTACT_SHEET.from_params(params, target=target),
-                              display_name=job.get("filename_clean"))
+                              display_name=job.get("filename_clean"), limits=LIMITS)
 ```
+
+`LIMITS` and `GIF_LIMITS` are §1 item 14's (`GIF_LIMITS` keeps today's GIFs; use `LIMITS` for
+them too if the owner prefers a frame budget for GIFs).
 
 `FAVICON_PACK_TOOLS` and `PREVIEW_TOOLS` are the two optional new tools (§1 items 7-8), and
 `EDIT_TOOLS`, `FRAMES_TOOLS` and `FRAME_STRIP_TOOLS` the editors (§1 items 10-11); the rest is
@@ -994,10 +1288,12 @@ Notes for the web app:
 ## 6. Never encoding past the probed length
 
 Without `duration_seconds`, WebM/MP4 convert, transform, accurate trims and audio convert now pass
-`-t` = (probed duration − start + `DURATION_TOLERANCE_SECONDS`), capped at 600 / 3600 s; whole
-files longer than the limit still raise `MediaTooLongError` at run time. The parity tests pin it
-(`tests/core/test_video_commands.py`, `test_audio_commands.py`): e.g. a 103 s video gives `-t 104`,
-a 3599.5 s audio file `-t 3600`, a 900 s video from 300 s `-ss 300 -t 600`.
+`-t` = (probed duration − start + `DURATION_TOLERANCE_SECONDS`), capped at
+`limits.max_video_seconds` / `limits.max_audio_seconds` (600 / 3600 s with FileSushi's limits, no
+cap by default); whole files longer than the limit still raise `MediaTooLongError` at run time.
+The parity tests pin it (`tests/core/test_video_commands.py`, `test_audio_commands.py`), with
+FileSushi's limits: e.g. a 103 s video gives `-t 104`, a 3599.5 s audio file `-t 3600`, a 900 s
+video from 300 s `-ss 300 -t 600`; without limits the last two give `-t 3600.5` and `-t 601`.
 
 **Why a 1 s tolerance:** I measured `-t <probed>` against no `-t` on generated files. For MP4,
 MKV and WebM it lost nothing, but an MPEG-TS file probed at 10.03 s really holds 10.33 s of audio
@@ -1012,22 +1308,38 @@ GIF and animated WebP always have a length (10 s by default), so their `-t` is u
 
 Same classes, same split: show `UserInputError.user_message`, log `ProcessingError`.
 
-New in 0.6.0:
+New in the limits round (2026-10-20, last). Every refusal by a limit has `.limit`, the `Limits`
+field that refused it; the length refusals read exactly as before at FileSushi's limits.
+
+| Class | When | `user_message` |
+|---|---|---|
+| `MediaTooLargeError` | an image over `max_pixels` (was "This image is too large to process.") | This image is too large to process: it has 30 megapixels (6000x5000), and the limit is 24. |
+| `MediaTooLargeError` | an image over Pillow's own limit (about 179 MP) while `max_pixels` is lower | This image is too large to process: it has more than 179 megapixels, and the limit is 24. |
+| `MediaTooLargeError` | an animation over `max_animation_bytes` (was "This animation is too large to edit. Try …") | This animation is too large to edit: its frames would take 300 MB of memory, and the limit is 256 MB. Try one with fewer frames or smaller pictures. |
+| `InvalidOptionsError` | a GIF made from a video whose frames exceed `max_frame_bytes` (new; only when FileSushi passes a frame budget for GIFs) | These settings would make the GIF too large to render: its frames would take 593 MB of memory, and the limit is 400 MB. Use a smaller width, a lower frame rate or a shorter length. |
+| `InvalidOptionsError` | a GIF preview over `max_frame_bytes` | These settings would make the preview too large to render as a GIF: its frames would take 593 MB of memory, and the limit is 400 MB. Use a smaller size, a lower frame rate, or fewer or shorter clips. |
+| `InvalidOptionsError` | an animated sheet over `max_frame_bytes` | These settings would make the animated sheet too large to render: its frames would take 500 MB of memory, and the limit is 400 MB. Use a smaller width, a lower frame rate or shorter clips. |
+| `MediaTooLargeError` | a sheet over `max_sheet_pixels` (was "These settings would make the contact sheet too large. Use fewer rows or a smaller width.") | These settings would make the contact sheet too large: it would have 72 megapixels (8000x9000), and the limit is 64. Use fewer rows or a smaller width. (animated sheets: "… the animated sheet too large to render: it would have …") |
+| `MediaTooLargeError` | a WebP sheet wider or taller than 16,383 px, a JPEG one than 65,500 (no `.limit`: a format limit) | These settings would make the contact sheet too large for WebP, which can be at most 16383 pixels on a side (2560x20000). Use fewer rows or a smaller width. |
+| `InvalidOptionsError` | a preview with more clips than `max_preview_clips` | Previews can have at most 10 clips. |
+| `InvalidOptionsError` | any number field given infinity or NaN | Invalid value for duration_seconds: input should be a finite number. |
+| (no longer raised) | `FaviconPackConfig` `name`/`short_name` over 100 characters | the name is used |
+
+New earlier in 0.6.0:
 
 | Class | When | `user_message` |
 |---|---|---|
 | `InvalidOptionsError` | an edit's crop box outside the rotated picture | The crop area must fit inside the picture, which is 400x300 pixels. |
-| `InvalidOptionsError` | `crop_width`/`crop_height` 0, or an adjustment over 2 | Invalid value for crop_width: input should be greater than or equal to 1. / Invalid value for brightness: input should be less than or equal to 2. |
-| `MediaTooLargeError` | an animation over `MAX_ANIMATION_BYTES` (edit, frame selection, frame strip) | This animation is too large to edit. Try one with fewer frames or smaller pictures. |
+| `InvalidOptionsError` | `crop_width`/`crop_height` 0, or a negative adjustment | Invalid value for crop_width: input should be greater than or equal to 1. / Invalid value for brightness: input should be greater than or equal to 0. |
+| `MediaTooLargeError` | an animation over `max_animation_bytes` (edit, frame selection, frame strip) | (see the limits round above) |
 | `UnsupportedMediaError` | editing an animated PNG | Animated PNGs can't be edited yet. |
 | `UnsupportedMediaError` | `select_frames` on a still image | This image isn't animated. |
 | `InvalidOptionsError` | `keep` names a frame the animation doesn't have | Some of the frames to keep aren't in this animation, which has 120 frames. |
 | `InvalidOptionsError` | `keep` empty, or a range like "5-2" | Invalid value for keep: keep at least one frame. / Invalid value for keep: 5-2 counts down; write ranges low-high. |
-| `InvalidOptionsError` | preview clips totalling over 30 s (`samples` × `sample_duration`) | Previews can be at most 30 seconds long. Use fewer clips or shorter ones. |
-| `InvalidOptionsError` | a GIF preview whose frames would need more than `MAX_FRAME_BYTES` (400 MB), e.g. 10 × 3 s at 30 fps and 720 px | These settings would make the preview too large to render as a GIF. Use a smaller size, a lower frame rate, or fewer or shorter clips. |
+| `InvalidOptionsError` | preview clips totalling over `max_gif_seconds` (`samples` × `sample_duration`), from `Limits.check` and the converter | Previews can be at most 30 seconds long. Use fewer clips or shorter ones. |
 | `MediaTooShortError` | a preview of a video under 0.5 s | This video is too short for a preview. |
 | `UnsupportedMediaError` | a preview where no clip could be decoded | We couldn't read any frames from this video. The file may be damaged. |
-| `InvalidOptionsError` | `FaviconPackConfig` `name`/`short_name` with a line break or over 100 characters | Invalid value for name: must be a single line of text. / … string should have at most 100 characters. |
+| `InvalidOptionsError` | `FaviconPackConfig` `name`/`short_name` with a line break | Invalid value for name: must be a single line of text. |
 | (no longer raised) | a copy trim of a file with text subtitles the container can't hold, e.g. MP4 `mov_text` into MKV (was `InvalidOptionsError` "This video can't be trimmed to MKV without re-encoding. Try MP4 instead.") | the subtitles are converted |
 | (no longer raised) | an animated sheet of a video shorter than `sample_duration` but at least 1 s (was `MediaTooShortError`) | one tile of the whole video |
 | `InvalidOptionsError` | MP3 `sample_rate` not in `MP3_SAMPLE_RATES`, e.g. 96000 (was `ProcessingError` from ffmpeg) | Invalid value for sample_rate: input should be 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100 or 48000. |
@@ -1038,10 +1350,10 @@ New or changed in 0.5.0:
 
 | Class | When | `user_message` |
 |---|---|---|
-| `InvalidOptionsError` | GIF `duration_seconds` > 30 (now from `from_params`) | GIFs can be at most 30 seconds long. |
-| `InvalidOptionsError` | animated WebP `duration_seconds` > 30 (now from `from_params`) | Animated WebPs can be at most 30 seconds long. |
-| `InvalidOptionsError` | WebM/MP4 `duration_seconds` > 600, or an accurate trim longer than 600 s (`end − start` or `duration_seconds`) | Video clips can be at most 10 minutes long. |
-| `InvalidOptionsError` | audio `duration_seconds` > 3600 | Audio clips can be at most 60 minutes long. |
+| `InvalidOptionsError` | GIF `duration_seconds` over `max_gif_seconds` (from `Limits.check` and the converter since the limits round; `from_params` in 0.5.0) | GIFs can be at most 30 seconds long. |
+| `InvalidOptionsError` | animated WebP `duration_seconds` over `max_gif_seconds` (likewise) | Animated WebPs can be at most 30 seconds long. |
+| `InvalidOptionsError` | WebM/MP4 `duration_seconds`, or an accurate trim (`end − start` or `duration_seconds`), over `max_video_seconds` (likewise) | Video clips can be at most 10 minutes long. |
+| `InvalidOptionsError` | audio `duration_seconds` over `max_audio_seconds` (likewise) | Audio clips can be at most 60 minutes long. |
 | `InvalidOptionsError` | rotate 0 and flip none | Choose a rotation or a flip. |
 | `InvalidOptionsError` | trim with both end and length | Give an end time or a length, not both. |
 | `InvalidOptionsError` | trim end ≤ start | The end time must be after the start time. |
@@ -1055,7 +1367,8 @@ New or changed in 0.5.0:
 | `MediaTooLargeError` | a video too wide for 16 px-high tiles | This video is too tall or too wide to make a contact sheet. |
 
 Unchanged: everything else in the 0.4.0 table, including `MediaTooLongError` for whole files over
-10 / 60 minutes. Generic messages keep a leading acronym's case ("Invalid value for crf: input
+`max_video_seconds` / `max_audio_seconds` ("Videos longer than 10 minutes aren't supported yet. Set
+a shorter duration to convert part of it.", with the limit in force). Generic messages keep a leading acronym's case ("Invalid value for crf: input
 should be less than or equal to 51.").
 
 Copy-trim rules (from a stream-copy matrix run against ffmpeg 8.1.2): MKV takes any video, audio,
@@ -1127,6 +1440,25 @@ those, cap the pixels for them lower, or the timeout higher. HEIC input wasn't m
 (out of scope for the worker).
 
 ## 10. Measured results (sandbox)
+
+**Limits round (2026-10-20, last).** `sh scripts/sandbox_check.sh --skip-long` passed all 45 of
+its jobs, every one called with FileSushi's limits from §1 item 14 (`video-to-gif` with the GIF
+variant, no frame budget), as the worker will call them. Image 261 MB (Python 3.14, Pillow 13.0.0,
+ffmpeg 8.1.2). The three new jobs show a limit refusing and a raised limit passing:
+
+| Job | Time | Peak memory | Peak pids |
+|---|---|---|---|
+| A 300-frame 640x360 GIF at FileSushi's 256 MiB animation budget (`error.txt`: "…its frames would take 264 MB of memory, and the limit is 256 MB. …") | 0.05 s | 29 MB | 6 |
+| The same GIF with `max_animation_bytes` raised to 512 MiB | 13.7 s | 174 MB | 6 |
+| A 40 s GIF at FileSushi's 30 s (`error.txt`: "GIFs can be at most 30 seconds long.") | 0.0 s | 26 MB | 5 |
+| A 40 s GIF with `max_gif_seconds` raised to 60 (480 px, 12 fps) | 14.7 s | 376 MB | 12 |
+
+The other 41 jobs gave the same outputs as in the editing round, in comparable times (the host
+was busier; ±30 % as below). Outside the sandbox, 56 outputs were hashed against the editing
+round's commit (`ffdf73d`), calling the converters without limits: 52 are byte-identical, and the
+4 that this round changes on purpose differ in their colour profile only (§1 item 16; pixels
+identical): PNG and TIFF with `keep_icc=False` from a source with a profile, and a CMYK JPEG to
+PNG.
 
 **Editing round (2026-10-20, later).** `sh scripts/sandbox_check.sh --skip-long` passed all 42
 of its jobs at the final tree (the image had Python 3.14.8, Pillow 13.0.0 and ffmpeg 8.1.2;
@@ -1226,7 +1558,9 @@ These answered FileSushi's 0.5.0 release brief (2026-10-12) and still hold.
    combinations ffmpeg refused.
 8. **Encoder defaults are passed explicitly** (FLAC `-compression_level 5`, JPEG 4:2:0, WebP
    method 4) so the model defaults are the values used; outputs are byte-identical (checked).
-9. **Limits are ints** (`MAX_GIF_SECONDS = 30`, not `30.0`), so hint text can use them directly.
+9. **Limits were ints** (`MAX_GIF_SECONDS = 30`, not `30.0`), so hint text could use them directly.
+   Superseded in the limits round: the limits are `Limits` fields (seconds are floats), and the
+   `MAX_*` constants are gone.
 10. **The converters don't re-export config classes**: `sashimi.config` is the one import path.
 
 ## 12. Python API breaks
@@ -1239,12 +1573,25 @@ contact-sheet defaults and short clips (§1 items 4-5) and copy trims with subti
 change outputs or errors. Everything else that broke is in `sashimi.api` and the CLI, which
 FileSushi doesn't use. Added for FileSushi: `MP3_SAMPLE_RATES`, `AAC_SAMPLE_RATES`,
 `IcoConfig.background_color`, `VIDEO_PREVIEW` with `video.preview`, `FaviconPackConfig` with
-`image.favicon_pack`, `MAX_PREVIEW_SAMPLES` and `FAVICON_PNG_SIZES`; and in the editing round
+`image.favicon_pack`, `MAX_PREVIEW_SAMPLES` (removed again in the limits round) and
+`FAVICON_PNG_SIZES`; and in the editing round
 `IMAGE_EDIT` with `image.edit`, `IMAGE_FRAMES` with `image.select_frames`, `image.frames_info`
 (`FramesInfo`), `FrameStripConfig` with `image.frame_strip` and `plan_frame_strip`
 (`FrameStrip`), `image.adjust_colors`, `image.aspect_crop`, `image.crop_box`,
 `video.plan_mp4_route`, `video.VideoRoute`, `MediaInfo.pixel_format`, `EDIT_QUALITY`,
-`MAX_ANIMATION_BYTES`, `MIN_FRAME_MS`, `CROP_ASPECTS`, `Rotation` and `Flip`.
+`MIN_FRAME_MS`, `CROP_ASPECTS`, `Rotation` and `Flip`.
+
+The limits round (2026-10-20, last; §1 items 14-17): every converter takes `limits=` instead of
+enforcing fixed limits, and `image.convert`, `to_ico`, `favicon_pack`, `edit`, `select_frames`,
+`frame_strip` and `frames_info` take it instead of `max_pixels=`; the command builders
+(`build_convert_command`, `build_trim_command`, `build_transform_command`,
+`build_preview_commands`, the audio `build_convert_command`) take `limits=` too, and without it
+apply the defaults (no length cap). Removed: `MAX_GIF_SECONDS`, `MAX_VIDEO_SECONDS`,
+`MAX_AUDIO_SECONDS`, `MAX_PREVIEW_SAMPLES`, `MAX_FRAME_BYTES`, `MAX_ANIMATION_BYTES`,
+`MAX_SHEET_PIXELS`, `MAX_SHEET_HEIGHT`, `ParamsModel.bound_messages`, `WebpImageConfig.optimize`
+and the policy bounds of §1 item 17. Added: `Limits`, `video.gif_frame_bytes`,
+`UserInputError.limit` (and its keyword-only `limit=`), `WEBP_MAX_SIDE`, `JPEG_MAX_SIDE`,
+`GIF_MAX_SIDE`, `MAX_ANIMATION_FPS` and `FLAC_MAX_SAMPLE_RATE`.
 
 0.5.0: the 0.4 config classes are replaced by per-target models and families; fields that a
 target ignored now raise "Unknown option"; the `effective_*`/`encoder_target` properties,
@@ -1291,6 +1638,95 @@ moved to `sashimi.config`. Additions: `MediaInfo.streams` (`StreamInfo(type, cod
    quality.
 10. **The copy routes keep the re-encode's streams** (first video and audio, no subtitles), rather
     than the lossless trim's (every stream), so the output doesn't depend on the route taken;
-    `remux` keeps everything. They also keep the 10-minute limit, so which videos are refused
-    doesn't depend on the codec (owner question in the inbox).
+    `remux` keeps everything. They also keep the video length limit (`max_video_seconds`), so which videos are
+    refused doesn't depend on the codec (owner question in the inbox). Since the limits round
+    that limit is FileSushi's `max_video_seconds` (§1 item 14).
 
+## 14. Decisions from the limits round (2026-10-20)
+
+The owner, 2026-10-20: "all limits should be config driven, so there's no reason to add upper
+limits to any of sashimi's commands unless there are seriously good reasons to do so. The sashimi
+defaults don't need to be aligned with filesushi at all, sashimi just needs to be configurable."
+On memory budgets: "this is a *filesushi* concern. Sashimi should have sensible defaults but it
+should be possible to run it at higher settings."
+
+1. **One `Limits` object, passed as `limits=`**, rather than a keyword per limit like the old
+   `max_pixels`. Eight limits across thirteen functions would have meant a different set of
+   keywords on each; one object is set once (FileSushi's `LIMITS`, the desktop app's settings,
+   the CLI's flags and `[limits]`) and passed everywhere, and a new limit doesn't change any
+   signature. It lives in `sashimi.config`, so the web app can import it.
+2. **The limits are checked where the file is known**, with the config-only ones also in
+   `Limits.check(config)` for queue time. The models keep only format limits as field bounds, so a
+   model describes what sashimi *can* make, and `Limits` what the caller *allows*. The rule is
+   pinned by `tests/core/test_config_module.py::FORMAT_UPPER_BOUNDS`.
+3. **Defaults protect the machine and leave lengths alone:** 64 MP images and sheets, 1 GiB of
+   decoded frames for GIFs, previews and animated sheets, 1 GiB for animated edits, and no limit
+   on lengths or clips, because a longer video takes longer but needs no more memory (measured:
+   ffmpeg's RSS is flat with length for MP4, WebM and animated WebP). The frame budgets rose from
+   400 and 256 MiB because those were set for FileSushi's 1.5 GB workers; at 1 GiB a WebP edit
+   peaks near 1.2 GB.
+4. **GIFs made from a video got a frame budget.** The brief expected GIF length to protect
+   nothing, but ffmpeg keeps every frame of a GIF until its palette is built (§1 item 14), so with
+   no length cap a long GIF could exhaust memory. They now count against `max_frame_bytes`, like
+   GIF previews already did. This is the one place a default can refuse something the old limits
+   allowed: GIFs whose frames exceed 1 GiB (for example 30 s at 1280 px and 15 fps), which needed
+   about 1.4 GB.
+5. **The old `MAX_*` names are removed, not kept.** A constant called `MAX_VIDEO_SECONDS` that
+   sashimi no longer enforces would mislead, and removing it makes FileSushi's upgrade fail at
+   import, where the hand-back is read, instead of silently dropping its limits.
+6. **Pillow's own size limit no longer caps `max_pixels`.** Pillow refuses images over about
+   179 MP by itself; when the caller allows more (or `None`), sashimi raises Pillow's limit for
+   the duration of `Image.open`, under a lock, and restores it.
+7. **Format limits are per format.** Still sheets were limited to 16,383 px tall in every format
+   (WebP's limit); JPEG's is 65,500 and PNG has none, so only WebP keeps 16,383.
+8. **Fixed, with reasons:** `fps` ≤ 50 (`MAX_ANIMATION_FPS`: frames under 20 ms play at 100 ms in
+   browsers, the rule `MIN_FRAME_MS` already followed); header and label text ≤ 200 px (text
+   bitmaps grow with the square of the size, and a 200 px label is already wider than a default
+   tile); tiles ≥ 16 px; the codecs' and formats' ranges (§1 item 17). Very slow speeds now stop at
+   the longest frame each format stores (655.35 s for GIF), where they crashed.
+9. **`WebpImageConfig.optimize` is removed** rather than mapped onto something: libwebp has no
+   such switch, and `webp_method` (0-6) already is the effort setting.
+10. **`keep_icc=False` passes "no profile" to every writer explicitly,** since Pillow's PNG and
+    TIFF writers fall back to the source's profile when none is given. The same fallback had put a
+    CMYK profile on RGB PNGs; a CMYK profile now stays only on CMYK output (TIFF).
+
+## 15. Decisions from the metadata round (2026-10-20)
+
+The owner's design (2026-10-20): "In sashimi? keep, of course, but it must be *capable* of full and
+partial removal", "capability with permissive defaults", and all three choices ("Both. All.").
+
+1. **One field named `metadata`, values `keep`, `remove_location`, `remove_all`.** The same
+   name and values on every model, so a form, the CLI (`--metadata`) and the desktop app use one
+   control. `keep_icc` stays separate: a colour profile changes how colours display and isn't
+   personal data.
+2. **Models whose outputs can't hold source metadata get no field** (GIF and animated WebP from
+   video, previews, sheets, ICO, favicon packs, frame strips, BMP): ffmpeg's GIF and WebP muxers
+   write none, and a field that changes nothing would break the rule that every field changes the
+   output. This deviates from the brief, which listed GIF and WebP from video.
+3. **Raw carriers, not Pillow's `info`.** sashimi reads EXIF, XMP, IPTC, comments and PNG text
+   from the file's own structure and writes them explicitly; Pillow's writers otherwise copy
+   whatever the source left in `info` (a JPEG's comment into a GIF) or in a TIFF's tags. Outputs
+   are saved with only the drawing keys left in `info`, and a TIFF opened from a file is copied
+   first, so nothing reaches a writer by accident.
+4. **EXIF is edited in place** (`core/_tiffmeta.py`): the GPS directory is removed by writing a
+   new IFD0 and zeroing the old one and the GPS values, the orientation is patched, the thumbnail
+   zeroed. Every other byte keeps its offset, so maker notes survive `keep` and
+   `remove_location` in JPEG, PNG and WebP. The same code rewrites TIFF files' tags for `strip`.
+5. **Thumbnails go when the picture changes:** after any edit or frame selection, and when the
+   orientation is applied. A plain conversion or resize keeps the EXIF thumbnail, which still
+   shows the same picture.
+6. **`remove_all` keeps the orientation when sashimi doesn't apply it**, as a one-tag EXIF block:
+   without it the picture would show sideways.
+7. **Icons are converted to sRGB** rather than given the profile or stripped of it: browsers treat
+   favicons as sRGB, so a wide-gamut icon is only right if its colours are converted. No field:
+   there is nothing an icon should keep.
+8. **Opus is capped, not refused** ("one operation per thing the user wants; sashimi picks the
+   route"): the user asked for a high-quality OGG, and 256 kb/s is the best mono Opus can do, so
+   refusing would only make them pick a lower number. The cap follows the output's channels
+   (`mono` gives 1).
+9. **Timed metadata tracks are dropped by the removal modes on copies,** since they can hold GPS
+   (GoPro, Apple). QuickTime chapter tracks are never copied as streams (the muxer writes the
+   chapters from the chapter list), which fixed MOVs with chapters failing to remux.
+10. **Bit-exact outputs record no creation time**, even with `keep`: ffmpeg's `+bitexact`, which
+    makes outputs repeatable, also stops MP4, MOV and Matroska writing it. Dates in tags (e.g. MP4
+    `date`) are kept.

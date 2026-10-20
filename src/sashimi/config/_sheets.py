@@ -8,18 +8,18 @@ from pydantic import Field, field_validator, model_validator
 
 from sashimi.config._base import RGB, RGBA, ConfigFamily, FormBool, ParamsModel, TargetName, parse_flag
 from sashimi.config._base import normalize_target, sentence
-from sashimi.config._limits import MIN_TILE_SIZE, TILES_TOO_SMALL
+from sashimi.config._limits import MAX_ANIMATION_FPS, MIN_TILE_SIZE, TILES_TOO_SMALL
 from sashimi.errors import InvalidOptionsError
 
-GridValue = Annotated[int, Field(ge=1, le=20)] | Literal["auto"]
+GridValue = Annotated[int, Field(ge=1)] | Literal["auto"]
 
 
 class _SheetStyle(ParamsModel):
     cols: GridValue = "auto"
-    """Columns, 1-20, or "auto" to choose from the video's aspect ratio."""
+    """Columns, or "auto" to choose from the video's aspect ratio."""
     rows: GridValue = "auto"
-    """Rows, 1-20, or "auto"."""
-    gap: int = Field(default=5, ge=0, le=100)
+    """Rows, or "auto"."""
+    gap: int = Field(default=5, ge=0)
     """Pixels between tiles."""
     start_offset_percent: float = Field(default=7.0, ge=0.0, le=100.0)
     """Skip this much of the start of the video (credits, logos)."""
@@ -51,9 +51,9 @@ class _SheetStyle(ParamsModel):
             return "auto"
         if isinstance(v, str) and v.strip().isdigit():
             v = int(v.strip())
-        if isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 20:
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 1:
             return v
-        raise ValueError(f"must be a whole number from 1 to 20, or 'auto' (got {v!r})")
+        raise ValueError(f"must be a whole number of at least 1, or 'auto' (got {v!r})")
 
     def _tile_width(self, width: int, even: bool) -> int | None:
         if not isinstance(self.cols, int):
@@ -65,7 +65,7 @@ class _SheetStyle(ParamsModel):
 class _StillSheet(_SheetStyle):
     animated: Annotated[Literal[False], FormBool] = False
     """A still sheet of single frames."""
-    width: int = Field(default=2560, ge=320, le=8000)
+    width: int = Field(default=2560, ge=320)
     """Width of the sheet in pixels."""
 
     @model_validator(mode="after")
@@ -80,14 +80,14 @@ class _AnimatedSheet(_SheetStyle):
     animated: Annotated[Literal[True], FormBool] = True
     """An animated sheet of short clips."""
     cols: GridValue = "auto"
-    """Columns, 1-20, or "auto": 3, or 4 for portrait videos."""
+    """Columns, or "auto": 3, or 4 for portrait videos."""
     rows: GridValue = "auto"
-    """Rows, 1-20, or "auto": 3, or 2 for portrait videos."""
-    width: int = Field(default=1280, ge=320, le=3840)
+    """Rows, or "auto": 3, or 2 for portrait videos."""
+    width: int = Field(default=1280, ge=320)
     """Approximate width of the sheet in pixels (tiles are rounded to even sizes)."""
-    sample_duration: float = Field(default=2.0, gt=0.0, le=10.0)
+    sample_duration: float = Field(default=2.0, gt=0.0)
     """Length of each tile's clip in seconds. A video shorter than this gets one tile of the whole video."""
-    fps: int = Field(default=12, ge=1, le=30)
+    fps: int = Field(default=12, ge=1, le=MAX_ANIMATION_FPS)
     """Frames per second."""
     loop: bool = True
     """Loop forever, or play once."""

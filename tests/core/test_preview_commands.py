@@ -5,7 +5,7 @@
 
 import pytest
 
-from sashimi.config import VIDEO_PREVIEW, GifPreviewConfig, WebpPreviewConfig
+from sashimi.config import VIDEO_PREVIEW, GifPreviewConfig, Limits, WebpPreviewConfig
 from sashimi.core.preview import preview_size
 from sashimi.errors import InvalidOptionsError, MediaTooShortError
 from sashimi.video import build_preview_commands, plan_preview
@@ -15,12 +15,13 @@ FORMATS = "3g2,3gp,aac,asf,avi,flac,flv,gif,m4a,matroska,mj2,mov,mp3,mp4,mpeg,mp
 INPUT = ["-protocol_whitelist", "file", "-format_whitelist", FORMATS, "-threads", "1"]
 RAW = ["-f", "rawvideo", "-pix_fmt", "rgb24"]
 VF = "fps=15,scale=640:360:flags=lanczos,setsar=1"
+FILESUSHI = Limits(max_gif_seconds=30, max_preview_clips=10, max_frame_bytes=400 * 1024 * 1024)
 
 
-def build(target, duration=103.0, width=1280, height=720, **params):
+def build(target, duration=103.0, width=1280, height=720, limits=None, **params):
     config = VIDEO_PREVIEW.from_params(params, target=target)
     return build_preview_commands(
-        "in.blob", "out.tmp", config, duration=duration, width=width, height=height, threads=2
+        "in.blob", "out.tmp", config, duration=duration, width=width, height=height, threads=2, limits=limits
     )
 
 
@@ -68,11 +69,20 @@ def test_options():
 
 
 def test_gifs_that_would_not_fit_in_memory_are_refused():
-    assert len(build("gif", samples=10, sample_duration=3, fps=15)[0]) == 10
+    assert len(build("gif", samples=10, sample_duration=3, fps=15, limits=FILESUSHI)[0]) == 10
     with pytest.raises(InvalidOptionsError) as e:
+        build("gif", samples=10, sample_duration=3, fps=30, limits=FILESUSHI)
+    assert e.value.user_message == (
+        "These settings would make the preview too large to render as a GIF: its frames would take 593 MB of "
+        "memory, and the limit is 400 MB. Use a smaller size, a lower frame rate, or fewer or shorter clips."
+    )
+    assert e.value.limit == "max_frame_bytes"
+    assert len(build("webp", samples=10, sample_duration=3, fps=30, max_height=720, limits=FILESUSHI)[0]) == 10
+    assert len(build("gif", samples=10, sample_duration=3, fps=30)[0]) == 10
+    with pytest.raises(InvalidOptionsError):
         build("gif", samples=10, sample_duration=3, fps=30, max_height=720)
-    assert e.value.user_message.startswith("These settings would make the preview too large to render as a GIF.")
-    assert len(build("webp", samples=10, sample_duration=3, fps=30, max_height=720)[0]) == 10
+    unlimited = Limits(max_frame_bytes=None)
+    assert len(build("gif", samples=10, sample_duration=3, fps=30, max_height=720, limits=unlimited)[0]) == 10
 
 
 @pytest.mark.parametrize(
@@ -128,11 +138,20 @@ def test_one_clip_needs_no_seek():
     assert clips == [clip(None, "1.5", "22")]
 
 
-def test_total_length_is_limited_like_gifs():
-    assert VIDEO_PREVIEW.from_params({"samples": 10, "sample_duration": 3}, target="gif").samples == 10
+def test_total_length_and_clips_are_limited_like_gifs():
+    FILESUSHI.check(VIDEO_PREVIEW.from_params({"samples": 10, "sample_duration": 3}, target="gif"))
+    long = VIDEO_PREVIEW.from_params({"samples": 10, "sample_duration": 3.5}, target="webp")
     with pytest.raises(InvalidOptionsError) as e:
-        VIDEO_PREVIEW.from_params({"samples": 10, "sample_duration": 3.5}, target="webp")
+        FILESUSHI.check(long)
     assert e.value.user_message == "Previews can be at most 30 seconds long. Use fewer clips or shorter ones."
+    assert e.value.limit == "max_gif_seconds"
+    many = VIDEO_PREVIEW.from_params({"samples": 11, "sample_duration": 1}, target="gif")
+    with pytest.raises(InvalidOptionsError) as e:
+        build("gif", samples=11, sample_duration=1, limits=FILESUSHI)
+    assert (e.value.user_message, e.value.limit) == ("Previews can have at most 10 clips.", "max_preview_clips")
+    Limits().check(long)
+    Limits().check(many)
+    assert len(build("webp", duration=3600.0, samples=40, sample_duration=10)[0]) == 40
 
 
 def test_family():

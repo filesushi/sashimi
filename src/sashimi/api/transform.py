@@ -6,7 +6,7 @@ from typing import Any
 
 from sashimi.api._batch import VIDEO_EXTENSIONS, FileProgress, PathInput, YieldType, output_name, run_batch
 from sashimi.api._consume import consume_generator
-from sashimi.config import TransformConfig
+from sashimi.config import Limits, TransformConfig
 from sashimi.core.video import transform
 
 __all__ = ["transform_videos", "transform_videos_generator"]
@@ -24,6 +24,7 @@ def transform_videos_generator(
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
     dry_run: bool = False,
+    limits: Limits | None = None,
 ) -> Iterator[YieldType]:
     """
     Rotates/flips every video found, writing ``<stem>.rotated.<target>`` next to it, under
@@ -35,7 +36,9 @@ def transform_videos_generator(
         recursive=recursive,
         force=force,
         name_for=lambda _, stem: output_name(stem, config.target, "rotated"),
-        process=lambda src, dst, progress: transform(src, dst, config, max_workers=max_workers, on_progress=progress),
+        process=lambda src, dst, progress: transform(
+            src, dst, config, max_workers=max_workers, limits=limits, on_progress=progress
+        ),
         success_message="Saved {name}",
         on_file_progress=on_file_progress,
         output=output,

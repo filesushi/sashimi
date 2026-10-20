@@ -17,24 +17,25 @@ sheet headers from a local image folder (pilmoji; never downloads anything).
 
 | Module | Contents |
 |---|---|
-| `sashimi.config` | every config model, limit and user-facing constant; needs only pydantic |
+| `sashimi.config` | every config model, the `Limits`, and every user-facing constant; needs only pydantic |
 | `sashimi.video` | `convert` (to GIF, animated WebP, WebM, MP4; MP4 copies H.264 and AAC instead of re-encoding when that gives the same result), `preview` (short clips from across a video, as GIF or animated WebP), `trim` (lossless or frame-accurate cut; with no end, a lossless remux), `transform` (rotate/flip) |
 | `sashimi.audio` | `convert` (extract from video, or convert audio, to MP3, M4A, WAV, OGG/Opus, FLAC) |
 | `sashimi.image` | `convert` (to JPEG, PNG, WebP, GIF, BMP, TIFF; also resizes), `to_ico`, `favicon_pack` (a .zip of ICO, PNG icons, web manifest and HTML tags), `edit` (rotate, flip, crop, brightness, contrast, saturation; every frame of animated GIF and WebP), `select_frames` (keep frames, change speed), `frames_info`, `frame_strip` |
 | `sashimi.sheets` | `render` (still JPEG/PNG/WebP or animated WebP/GIF contact sheets) |
+| `sashimi.metadata` | `read` (what metadata a file holds, for showing it), `strip` (remove it, or just location data, without re-encoding) |
 | `sashimi` | `probe(path) -> MediaInfo` |
 | `sashimi.api` | batch helpers: discover files, name outputs, progress, reports |
 
 ```python
 import sashimi
-from sashimi.config import VIDEO_CONVERT
+from sashimi.config import VIDEO_CONVERT, Limits
 from sashimi.errors import UserInputError
 
 try:
-    config = VIDEO_CONVERT.from_params({"start_seconds": 12, "duration_seconds": 5}, target="gif")
-    sashimi.video.convert("upload.blob", "out/clip.gif", config, max_workers=2)
+    config = VIDEO_CONVERT.from_params({"start_seconds": 12, "duration_seconds": 45}, target="gif")
+    sashimi.video.convert("upload.blob", "out/clip.gif", config, max_workers=2, limits=Limits(max_gif_seconds=30))
 except UserInputError as e:
-    print(e.user_message)  # e.g. "GIFs can be at most 30 seconds long."
+    print(e.user_message)  # "GIFs can be at most 30 seconds long."
 ```
 
 ## Designed to be embedded
@@ -53,6 +54,10 @@ inside locked-down workers (read-only filesystems, no network, small process lim
 - **Bounded resources.** Parallel work is limited by `max_workers` (default `min(4, CPUs)`, where
   CPUs respects affinity and cgroup quotas). Every ffmpeg call gets explicit `-threads`, so a
   conversion at `max_workers=2` peaks at roughly 20 processes + threads (41 for an animated sheet).
+- **Limits you choose.** Every function that can meet a limit takes `limits=`, a
+  `sashimi.config.Limits` (see "Limits" below). The defaults protect the machine (64 MP images and
+  sheets, 1 GiB of decoded frames) and leave lengths unlimited; a web app passes tighter ones, a
+  desktop app looser ones or `Limits.unlimited()`.
 - **Typed errors.** `UserInputError` (and subclasses such as `UnsupportedMediaError`,
   `NoAudioTrackError`, `MediaTooLongError`) carries a `.user_message`: one plain sentence, safe to
   show to end users. Internal failures raise `ProcessingError`, whose message is for logs.
@@ -75,8 +80,79 @@ Each operation has a family that picks the model: `IMAGE_CONVERT`, `IMAGE_RESIZE
 (by `container` and `accurate`), `AUDIO_CONVERT` and `CONTACT_SHEET` (by `animated` and
 `target`); `IcoConfig`, `FaviconPackConfig` and `FrameStripConfig` stand alone. `FAMILY.from_params(params, target=...)` rejects
 unknown keys, treats `None` or a missing key as "use the default", and raises
-`InvalidOptionsError` with a readable `user_message` for anything invalid, including limits that
-don't depend on the file (a GIF over 30 seconds, an MP4 `crf` over 51).
+`InvalidOptionsError` with a readable `user_message` for anything invalid, such as an MP4 `crf`
+over 51. Field bounds are only ever format and codec limits like that one; the limits you choose
+are `Limits`.
+
+## Limits
+
+sashimi enforces only the limits you pass, as one `sashimi.config.Limits`:
+
+| Field | Default | What it limits |
+|---|---|---|
+| `max_pixels` | 64,000,000 | images, by decoded pixels (conversions, icons, favicon packs, edits, frames) |
+| `max_frame_bytes` | 1 GiB | video frames held in memory at once (width × height × 3 each): animated sheets, GIF previews, GIFs made from a video |
+| `max_animation_bytes` | 1 GiB | frames of an animated GIF or WebP being edited (width × height × 4 each) |
+| `max_sheet_pixels` | 64,000,000 | contact sheets |
+| `max_video_seconds` | none | WebM/MP4 conversions (MP4 copies included), rotate and flip, accurate cuts |
+| `max_audio_seconds` | none | audio conversions |
+| `max_gif_seconds` | none | GIFs and animated WebPs made from a video, and a preview's clips together |
+| `max_preview_clips` | none | a preview's clips |
+
+Every limit can be raised, and `None` turns it off; `Limits.unlimited()` turns them all off. A
+refusal is a `UserInputError` whose `user_message` states the limit in force and whose `limit` is
+the field's name. `limits.check(config)` raises for the limits a config breaks by itself (a GIF
+longer than allowed), so a web app can refuse a job before it has the file. What stays fixed are
+format limits and correctness rules: WebP's 16,383 px, the codecs' quality and bitrate ranges and
+sample rates, a frame rate of at most 50 for GIF and animated WebP (browsers slow faster frames
+down), and tiles of at least 16 px.
+
+## Metadata
+
+Every output that can carry the source's metadata has one `metadata` field, with the same values
+everywhere:
+
+| Value | What the output keeps |
+|---|---|
+| `keep` (the default) | everything its format can hold (below) |
+| `remove_location` | everything but location data: EXIF's GPS directory; XMP properties named GPS…, …Latitude, …Longitude, …Altitude, City, State, Country, CountryCode, ProvinceState, Sublocation, Location…, WorldRegion or …geo… in any namespace; IPTC's location code and name, city, sublocation, province or state, country code and name; PNG text whose keyword names a place, and ImageMagick's raw EXIF, XMP and IPTC profiles in PNG text; JPEG extended XMP; QuickTime, MP4, Matroska, ID3 and Vorbis tags named location, `com.apple.quicktime.location.*`, `com.android.location`, or containing gps, geo, latitude, longitude, coordinates or iso6709; and timed metadata tracks (GPS tracks) when streams are copied |
+| `remove_all` | only what showing or playing it needs: the pixels and streams, the colour profile (as `keep_icc` says), the orientation if sashimi didn't apply it, PNG and WebP display and animation chunks, stream languages, dispositions and attachments' file names, and the display rotation when the video is copied |
+
+Removal is best effort: it covers the carriers above, which are the ones sashimi knows of; a
+device may store data where no tool looks. When sashimi applies the EXIF orientation it resets the
+orientation to 1, so viewers don't turn the picture twice, and drops the EXIF thumbnail, which shows
+the picture before the change; edits always do both. `keep_icc` decides the colour profile alone.
+ICO files and favicon packs carry no metadata or profile: their colours are converted to sRGB.
+
+What `keep` can carry into each output format:
+
+| Output | EXIF | XMP | IPTC, Photoshop | Comments | PNG text |
+|---|---|---|---|---|---|
+| JPEG | yes (up to 64 KB) | yes (up to 64 KB; not extended XMP) | yes | yes | – |
+| PNG | yes | yes | – | yes (`Comment`) | from a PNG |
+| WebP | yes | yes | – | – | – |
+| TIFF | yes (rewritten; maker notes may not survive) | yes | yes | – | – |
+| GIF | – | – | – | yes | – |
+| BMP | – | – | – | – | – |
+
+Video and audio keep the global and stream tags and the chapters the container can hold: Matroska
+and WebM all of them; MP4, MOV and M4A the standard ones (title, artist, album, comment, date, …)
+and the location, but not QuickTime's `com.apple.quicktime.*` keys; MP3 ID3; OGG and FLAC Vorbis
+comments; WAV its INFO list (no location). No output records a creation time (outputs are
+bit-exact, so the same input gives the same bytes). GIFs and animated WebPs made from a video,
+previews and contact sheets hold none.
+
+```python
+from sashimi import metadata
+
+info = metadata.read("upload.blob")          # decodes nothing; works on outputs too
+if info.has_location:
+    print(info.latitude, info.longitude, info.carriers)   # 48.8584 2.2945 ['EXIF', 'GPS', 'XMP']
+metadata.strip("upload.blob", "clean.bin", "remove_all")  # same format, nothing re-encoded
+```
+
+`strip` copies the compressed pixels byte for byte (JPEG, PNG, WebP, GIF, TIFF) and stream-copies
+video and audio (MKV, WebM, MP4, MOV, M4A, MP3, FLAC, OGG, WAV); an MPO keeps only its main picture.
 
 ## Editing images
 
@@ -127,9 +203,14 @@ sashimi preview clip.mp4                             # 5 x 2 s clips from across
 sashimi preview clip.mp4 --format gif --crop 9:16    # vertical GIF preview
 sashimi info clip.mkv                                # container, duration, codecs
 sashimi info clip.gif                                # an image's size, frames and their durations
+sashimi metadata photo.jpg                           # camera, dates, location: what the file holds
+sashimi strip photos/ -r                             # remove metadata without re-encoding
+sashimi strip clip.mov --remove remove_location      # remove only GPS and place names
+sashimi convert photo.heic jpeg --metadata remove_all  # convert without the photo's metadata
 sashimi convert photos/ webp -n                      # --dry-run: what would be written, change nothing
 sashimi flatten downloads/ --dry-run                 # see what flatten would move
 sashimi config set thumbs.cols 4                     # change CLI defaults
+sashimi convert scan.tif jpeg --max-pixels none      # no pixel limit for this run
 sashimi config defaults convert webp                 # every option's default for WebP output
 sashimi --install-completion                         # tab completion (bash, zsh, fish, PowerShell)
 ```
@@ -142,6 +223,31 @@ folder for the outputs, `-f/--force` replaces existing outputs, `--duration` is 
 output is, and `--clip-length` how long each sampled clip is. The CLI reads defaults from
 `~/.sashimi/sashimi.toml` and a project `sashimi.toml`, which only `sashimi config set` creates
 (`-g` for the global one); the library never reads either.
+
+### Limits on the command line
+
+The CLI runs with the library's default limits. The ones you can meet with them have flags, each
+taking a number with a unit, or `none` for no limit:
+
+| Flag | Commands | Default | Example |
+|---|---|---|---|
+| `--max-pixels` | `convert`, `resize`, `favicon`, `edit`, `frames` | 64M | `sashimi convert scan.tif jpeg --max-pixels 300M` |
+| `--max-frame-bytes` | `convert` (GIFs), `thumbs` (animated), `preview` (GIF) | 1G | `sashimi convert talk.mp4 gif -d 60 --max-frame-bytes 4G` |
+| `--max-animation-bytes` | `edit`, `frames` | 1G | `sashimi edit big.gif --rotate 90 --max-animation-bytes none` |
+| `--max-sheet-pixels` | `thumbs` | 64M | `sashimi thumbs film.mkv --cols 10 --rows 20 --max-sheet-pixels 200M` |
+
+Every limit, the length limits included (off by default), can be set in the `[limits]` section of
+`sashimi.toml`, with the same values; flags win over the files:
+
+```sh
+sashimi config set limits.max_pixels 300M -g          # in ~/.sashimi/sashimi.toml
+sashimi config set limits.max_video_seconds 10m       # refuse videos over 10 minutes, here
+sashimi config set limits.max_frame_bytes none        # no frame memory limit
+sashimi config defaults limits                        # every limit, its flag, default and setting
+```
+
+Sizes take `K`, `M` and `G` (`512M`, `4G`, `4GiB`; a bare number is bytes), pixel counts `K`,
+`M` and `G` (`200M` is 200 million), and lengths seconds or units (`600`, `10m`, `1h30m`).
 
 ### Where outputs go
 
@@ -156,6 +262,7 @@ Every command, and every `sashimi.api` batch function, names its outputs the sam
 | A resized image, rotated video, cut | `<stem>.resized.<ext>`, `<stem>.rotated.<ext>`, `<stem>.extracted.<ext>` | `photo.jpg` → `photo.resized.jpg` |
 | A favicon pack | `<stem>.favicons.zip` | `logo.png` → `logo.favicons.zip` |
 | An edited image or animation (`edit`, `frames`) | `<stem>.edited.<ext>`, in the image's own format | `photo.jpg` → `photo.edited.jpg` |
+| A copy without metadata (`strip`) | `<stem>.stripped.<ext>`, in the file's own format | `clip.mov` → `clip.stripped.mov` |
 
 - Outputs go next to their inputs. `--output-dir DIR` puts them in `DIR` instead, keeping the
   subfolders of a directory you passed, and `-o FILE` names the output of a single input file.
@@ -183,7 +290,7 @@ Exit codes:
 
 With `--json`, a command prints one report on stdout; logging and warnings go to stderr. Every
 command that processes files (`convert`, `resize`, `rotate`, `edit`, `frames`, `favicon`,
-`extract`, `remux`, `thumbs`, `preview`, `flatten`) prints the same shape, which the batch
+`extract`, `remux`, `strip`, `thumbs`, `preview`, `flatten`) prints the same shape, which the batch
 functions in `sashimi.api` also return:
 
 ```json
@@ -195,7 +302,7 @@ functions in `sashimi.api` also return:
 
 `status` is `success`, `exists`, `skipped` or `error`. Every report also has `"dry_run": false`
 (true with `--dry-run`, when the results are the plan), and `flatten` adds `renamed` and
-`removed_dirs`. MP4 conversions say in the message when the streams were copied. `info --json` prints the probe result, and `config ... --json` its own data.
+`removed_dirs`. MP4 conversions say in the message when the streams were copied. `info --json` prints the probe result, `metadata --json` the metadata summary, and `config ... --json` its own data.
 
 ## Development
 

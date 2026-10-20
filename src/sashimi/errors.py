@@ -32,12 +32,19 @@ class SashimiError(Exception):
 
 
 class UserInputError(SashimiError):
-    """The input file or the requested options can't be processed; the user can fix this."""
+    """
+    The input file or the requested options can't be processed; the user can fix this.
 
-    def __init__(self, user_message: str, detail: str | None = None):
+    ``limit`` names the :class:`~sashimi.config.Limits` field that refused the file or the options
+    (``"max_pixels"``, ``"max_video_seconds"``, …), so an app can offer to raise it; it is ``None``
+    for every other refusal.
+    """
+
+    def __init__(self, user_message: str, detail: str | None = None, *, limit: str | None = None):
         super().__init__(detail or user_message)
         self.user_message = user_message
         self.detail = detail
+        self.limit = limit
 
 
 class UnsupportedMediaError(UserInputError):

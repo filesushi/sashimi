@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import AfterValidator, BeforeValidator, Field, StringConstraints, field_validator, model_validator
 
-from sashimi.config._base import RGB, ConfigFamily, Flip, ParamsModel, Rotation, TargetName, sentence
+from sashimi.config._base import RGB, ConfigFamily, Flip, ParamsModel, Rotation, SourceMetadata, TargetName, sentence
 
 Resample = Literal["lanczos", "bicubic", "bilinear", "hamming", "box", "nearest"]
 WHITE = (255, 255, 255)
@@ -29,9 +29,7 @@ class _Transparency(ParamsModel):
     """Keep alpha; when False, transparent areas are flattened onto ``background_color``."""
 
 
-class _Metadata(ParamsModel):
-    keep_exif: bool = False
-    """Copy EXIF metadata (camera, date, GPS). Off by default for privacy."""
+class _Metadata(SourceMetadata):
     keep_icc: bool = True
     """Keep the colour profile, so wide-gamut photos keep their colours."""
 
@@ -104,12 +102,9 @@ class PngImageConfig(_PngSave, _Metadata, _Transparency, _ImageBase):
 class WebpImageConfig(_WebpSave, _Metadata, _Transparency, _ImageBase):
     """A WebP image."""
 
-    optimize: bool = True
-    """Spend extra effort on compression."""
 
-
-class GifImageConfig(_GifSave, _Transparency, _ImageBase):
-    """A static GIF (the first frame of an animated input). GIFs carry no photo metadata."""
+class GifImageConfig(_GifSave, SourceMetadata, _Transparency, _ImageBase):
+    """A static GIF (the first frame of an animated input). Of the source's metadata, GIFs hold only comments."""
 
 
 class BmpImageConfig(_BmpSave, _ImageBase):
@@ -190,7 +185,7 @@ def _single_line(value: str) -> str:
     return value
 
 
-_ManifestText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=100), AfterValidator(_single_line)]
+_ManifestText = Annotated[str, StringConstraints(strip_whitespace=True), AfterValidator(_single_line)]
 
 
 class FaviconPackConfig(ParamsModel):
@@ -256,7 +251,7 @@ IMAGE_RESIZE: ConfigFamily[ImageResizeConfig] = ConfigFamily(
 """Image resizing, by ``target``: the image configs with `max_width` or `max_height` required."""
 
 
-_Adjustment = Annotated[float, Field(ge=0.0, le=2.0)]
+_Adjustment = Annotated[float, Field(ge=0.0)]
 EDIT_QUALITY = 92
 """The quality edits are re-saved at by default (JPEG, WebP, and TIFF with JPEG compression)."""
 
@@ -313,7 +308,7 @@ class WebpEditConfig(_WebpSave, _Metadata, _Edit):
     """Lossy quality, or compression effort when ``lossless``. Edits are re-saved at high quality by default."""
 
 
-class GifEditConfig(_GifSave, _Edit):
+class GifEditConfig(_GifSave, SourceMetadata, _Edit):
     """An edited GIF. Transparency and animation are kept; every frame of an animation is edited."""
 
 
@@ -383,11 +378,11 @@ class _Frames(ParamsModel):
         | None
     ) = None
     """Frames to keep, numbered from 0, e.g. "0-9,12". Blank keeps every frame. Kept frames play in their original order."""
-    speed: float = Field(default=1.0, ge=0.25, le=4.0)
+    speed: float = Field(default=1.0, gt=0.0)
     """Playback speed: 2 plays twice as fast, 0.5 half as fast. Every frame's duration is divided by it."""
 
 
-class GifFramesConfig(_GifSave, _Frames):
+class GifFramesConfig(_GifSave, SourceMetadata, _Frames):
     """An animated GIF with some of its frames, at a new speed."""
 
 
@@ -413,9 +408,9 @@ class FrameStripConfig(ParamsModel):
     right and top to bottom, for UIs that let people pick frames.
     """
 
-    tile_height: int = Field(default=96, ge=16, le=256)
+    tile_height: int = Field(default=96, ge=16)
     """Height of each frame's tile in pixels; widths follow the animation's shape."""
-    columns: int = Field(default=10, ge=1, le=50)
+    columns: int = Field(default=10, ge=1)
     """Tiles per row. More are used if the strip would otherwise be too tall for WebP."""
     quality: _Quality = 80
     """1 (smallest) to 100 (best)."""

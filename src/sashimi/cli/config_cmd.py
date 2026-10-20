@@ -33,6 +33,7 @@ class Operation(str, Enum):
     extract = "extract"
     thumbs = "thumbs"
     preview = "preview"
+    limits = "limits"
 
 
 GlobalScope = Annotated[
@@ -52,8 +53,8 @@ def _parse_value(text: str) -> Any:
 
 def _split_key(key: str) -> tuple[str, str]:
     section, _, option = key.partition(".")
-    if not option or section not in ("thumbs", "animated_thumbs"):
-        fail(f"{key!r}: use section.option, where section is thumbs or animated_thumbs.")
+    if not option or section not in ("thumbs", "animated_thumbs", "limits"):
+        fail(f"{key!r}: use section.option, where section is thumbs, animated_thumbs or limits.")
     return section, option
 
 
@@ -67,6 +68,14 @@ def _check(section: str, option: str, value: Any) -> None:
 
     if option not in settings.known_keys(section):
         fail(f"Unknown option {section}.{option}.")
+    if section == "limits":
+        from sashimi.cli._limits import parse
+
+        try:
+            parse(option, value)
+        except ValueError as e:
+            fail(f"limits.{option}: {e}.")
+        return
     if section == "thumbs" and option == "video_extensions":
         if not (isinstance(value, list) and all(isinstance(v, str) for v in value)):
             fail('video_extensions must be a list, e.g. [".mp4", ".mkv"].')
@@ -130,7 +139,10 @@ def set_(
     value: Annotated[str, typer.Argument(help="Value, e.g. 4, true, auto, '[\".mp4\"]'", show_default=False)],
     global_: GlobalScope = False,
 ):
-    """Set a default, e.g. [cyan]sashimi config set thumbs.width 1920[/cyan] or [cyan]sashimi config set animated_thumbs.cols 4[/cyan]."""
+    """
+    Set a default, e.g. [cyan]sashimi config set thumbs.width 1920[/cyan], [cyan]sashimi config set
+    animated_thumbs.cols 4[/cyan] or [cyan]sashimi config set limits.max_pixels 200M[/cyan].
+    """
     from sashimi.cli import settings
 
     section, option = _split_key(key)
@@ -166,7 +178,8 @@ def defaults(
 ):
     """
     Show each option's default, accepted values and meaning, per output format, e.g.
-    [cyan]sashimi config defaults convert webp[/cyan]. For thumbs, values from sashimi.toml are shown too.
+    [cyan]sashimi config defaults convert webp[/cyan]; [cyan]sashimi config defaults limits[/cyan]
+    shows the limits. For thumbs and limits, values from sashimi.toml are shown too.
     """
     from sashimi.cli import _defaults, settings
 
@@ -174,11 +187,13 @@ def defaults(
     if not models:
         choices = sorted({title.rpartition(" → ")[2].lower() for title, _ in _defaults.models_for(operation.value)})
         fail(f"{operation.value} has no {fmt!r} output; choose from {', '.join(choices)}.")
-    raw = settings.load_raw_config()[0] if operation is Operation.thumbs else None
+    raw = settings.load_raw_config()[0] if operation in (Operation.thumbs, Operation.limits) else None
     sections = []
     for title, model in models:
         overrides = None
-        if raw is not None:
+        if raw is not None and operation is Operation.limits:
+            overrides = _defaults.limit_overrides(raw)
+        elif raw is not None:
             overrides = _defaults.toml_overrides(model.model_fields["animated"].default, raw)
         doc = " ".join((model.__doc__ or "").strip().split("\n\n")[0].split())
         sections.append((title, model, doc, _defaults.rows(operation.value, model, overrides)))
@@ -208,16 +223,15 @@ def defaults(
         table.add_column("Description")
         for row in fields:
             name = row["field"]
-            option = row["option"] or name
+            option = row["option"] or (f"limits.{name}" if operation is Operation.limits else name)
             if row["option"] and row["option"].split("/")[0] != "--" + name.replace("_", "-"):
                 option += f" [dim]{name}[/dim]"
             default = escape(_defaults.format_value(row["default"], name, operation.value))
             if "model_default" in row:
                 default += f" [dim](Python: {escape(_defaults.format_value(row['model_default'], name))})[/dim]"
             if "sashimi_toml" in row:
-                default += (
-                    f"\n[yellow]sashimi.toml: {escape(_defaults.format_value(row['sashimi_toml'], name))}[/yellow]"
-                )
+                toml_value = _defaults.format_value(row["sashimi_toml"], name, operation.value)
+                default += f"\n[yellow]sashimi.toml: {escape(toml_value)}[/yellow]"
             table.add_row(option, default, escape(row["accepted"]), escape(row["description"]))
         console.print(table)
         console.print()

@@ -35,7 +35,7 @@ def options(command):
     return {name: param for param in COMMANDS[command].params for name in param.opts}
 
 
-@pytest.mark.parametrize("command", sorted(set(COMMANDS) - {"config", "info", "flatten", "trim"}))
+@pytest.mark.parametrize("command", sorted(set(COMMANDS) - {"config", "info", "metadata", "flatten", "trim"}))
 def test_o_is_the_output_path_and_format_has_no_short_flag(command):
     found = options(command)
     assert found["-o"].name == "output" and found["--output"] is found["-o"]
@@ -181,8 +181,13 @@ def test_preview_command(video_blob, tmp_path):
     assert Image.open(tmp_path / "p.webp").size == (160, 90)
     warned = runner.invoke(app, ["preview", "clip.mkv", "--format", "gif", "-q", "50", "-f", "--samples", "1"])
     assert "--quality doesn't apply to GIF previews" in " ".join(warned.stderr.split())
-    too_long = runner.invoke(app, ["preview", "clip.mkv", "--samples", "10", "--clip-length", "4"])
-    assert too_long.exit_code == 2 and "at most 30 seconds" in too_long.stderr
+    (tmp_path / "sashimi.toml").write_text("[limits]\nmax_gif_seconds = 30\n")
+    settings.load_raw_config.cache_clear()
+    too_long = runner.invoke(app, ["preview", "clip.mkv", "--samples", "10", "--clip-length", "4", "-f", "--json"])
+    assert too_long.exit_code == 1
+    assert json.loads(too_long.stdout)["results"][0]["message"] == (
+        "Previews can be at most 30 seconds long. Use fewer clips or shorter ones."
+    )
 
 
 @needs_ffmpeg

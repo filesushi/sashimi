@@ -29,7 +29,7 @@ FLAGS = {
     "tiff_compression": "--tiff-compression",
     "resample": "--resample",
     "auto_orient": "--no-orient",
-    "keep_exif": "--keep-exif",
+    "metadata": "--metadata",
     "keep_icc": "--strip-icc",
     "max_width": "--width",
     "max_height": "--height",
@@ -114,7 +114,7 @@ def _validate(model: Any, data: dict[str, Any]) -> Any:
     try:
         return model.model_validate(data)
     except ValidationError as e:
-        exit_on_invalid_options(e, FLAGS, model)
+        exit_on_invalid_options(e, FLAGS)
 
 
 def _flags(fields: list[str]) -> list[str]:
@@ -123,7 +123,7 @@ def _flags(fields: list[str]) -> list[str]:
 
 def _image_options(
     quality, lossless, flatten, background, optimize, progressive, subsampling, webp_method, compress_level,
-    tiff_compression, resample, no_orient, keep_exif, strip_icc, width, height,
+    tiff_compression, resample, no_orient, metadata, strip_icc, width, height,
 ) -> dict[str, Any]:  # fmt: skip
     """Image fields from their flags; unset flags are None."""
     return {
@@ -139,7 +139,7 @@ def _image_options(
         "tiff_compression": opt.enum_value(tiff_compression),
         "resample": opt.enum_value(resample),
         "auto_orient": False if no_orient else None,
-        "keep_exif": keep_exif or None,
+        "metadata": opt.enum_value(metadata),
         "keep_icc": False if strip_icc else None,
         "max_width": width,
         "max_height": height,
@@ -173,7 +173,7 @@ def convert_cmd(
     tiff_compression: opt.TiffCompressionOpt = None,
     resample: opt.ResampleOpt = None,
     no_orient: opt.NoOrient = False,
-    keep_exif: opt.KeepExif = False,
+    metadata: opt.MetadataOpt = None,
     strip_icc: opt.StripIcc = False,
     ico_sizes: opt.IcoSizes = None,
     ico_fit: opt.IcoFitOpt = None,
@@ -191,12 +191,14 @@ def convert_cmd(
     sample_rate: opt.SampleRate = None,
     bit_depth: opt.BitDepth = None,
     flac_level: opt.FlacLevel = None,
+    max_pixels: opt.MaxPixels = None,
+    max_frame_bytes: opt.MaxFrameBytes = None,
 ):
     """
     Convert images, videos and audio. Each file is handled by its type:
 
     [bold]Images[/bold] → jpeg, png, webp, gif, bmp, tiff, ico
-    [bold]Videos[/bold] → gif, webp (animated, up to 30 s), webm, mp4; [bold]animated GIFs[/bold] → webm, mp4
+    [bold]Videos[/bold] → gif, webp (animated), webm, mp4; [bold]animated GIFs[/bold] → webm, mp4
     [bold]Videos and audio[/bold] → mp3, m4a, wav, ogg, flac
 
     Writes [cyan]<name>.<format>[/cyan] next to each input (.jpg for JPEG, .tif for TIFF), under
@@ -204,6 +206,9 @@ def convert_cmd(
     """
     t = "jpeg" if target is Target.jpg else target.value
     opt.single_file_or_fail([path], output)
+    from sashimi.cli import _limits
+
+    limits = _limits.resolve(max_pixels=max_pixels, max_frame_bytes=max_frame_bytes)
 
     from sashimi.api._batch import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
     from sashimi.api.convert import TARGET_SUFFIX, convert_files_generator
@@ -213,7 +218,7 @@ def convert_cmd(
     options = {
         **_image_options(
             quality, lossless, flatten, background, optimize, progressive, subsampling, webp_method,
-            compress_level, tiff_compression, resample, no_orient, keep_exif, strip_icc, width, height,
+            compress_level, tiff_compression, resample, no_orient, metadata, strip_icc, width, height,
         ),
         "sizes": opt.parse_sizes(ico_sizes), "fit": opt.enum_value(ico_fit),
         "start_seconds": start_s, "duration_seconds": duration_s, "fps": fps, "crf": crf,
@@ -271,6 +276,7 @@ def convert_cmd(
         output=output,
         output_dir=output_dir,
         dry_run=dry_run,
+        limits=limits,
     )
     runner.run(gen, [path])
 
@@ -301,8 +307,9 @@ def resize_cmd(
     tiff_compression: opt.TiffCompressionOpt = None,
     resample: opt.ResampleOpt = None,
     no_orient: opt.NoOrient = False,
-    keep_exif: opt.KeepExif = False,
+    metadata: opt.MetadataOpt = None,
     strip_icc: opt.StripIcc = False,
+    max_pixels: opt.MaxPixels = None,
 ):
     """
     Shrink images to fit --width and/or --height (never upscaling), keeping their format unless
@@ -310,17 +317,19 @@ def resize_cmd(
     --output-dir, or to -o for a single image (whose extension sets the format if --format doesn't).
     """
     from sashimi.api.resize import resize_images_generator
+    from sashimi.cli import _limits
     from sashimi.config import IMAGE_RESIZE
     from sashimi.config._base import normalize_target
 
     if width is None and height is None:
         fail("Give --width and/or --height to resize to.")
     opt.single_file_or_fail([path], output)
+    limits = _limits.resolve(max_pixels=max_pixels)
     image_suffixes = {f".{name}": normalize_target(name) for name in ImageFormat.__members__} | {".tif": "tiff"}
     fmt = normalize_target(opt.format_from_output(opt.enum_value(output_format), output, image_suffixes))
     options = _image_options(
         quality, lossless, flatten, background, optimize, progressive, subsampling, webp_method,
-        compress_level, tiff_compression, resample, no_orient, keep_exif, strip_icc, width, height,
+        compress_level, tiff_compression, resample, no_orient, metadata, strip_icc, width, height,
     )  # fmt: skip
     targets = [fmt] if fmt else list(IMAGE_RESIZE.targets)
     configs = {}
@@ -352,6 +361,7 @@ def resize_cmd(
         output=output,
         output_dir=output_dir,
         dry_run=dry_run,
+        limits=limits,
     )
     runner.run(gen, [path])
 
@@ -374,21 +384,25 @@ def rotate_cmd(
     speed: opt.Speed = None,
     audio_bitrate: opt.AudioBitrate = None,
     mute: opt.Mute = False,
+    metadata: opt.MetadataOpt = None,
 ):
     """
     Rotate (clockwise) and/or flip videos, re-encoding them. Writes
     [cyan]<name>.rotated.mp4[/cyan] next to each video, under --output-dir, or to -o for a single
-    video. Videos are limited to 10 minutes.
+    video.
     """
     from sashimi.api.transform import transform_videos_generator
+    from sashimi.cli import _limits
     from sashimi.config import VIDEO_TRANSFORM
 
     opt.single_file_or_fail([path], output)
+    limits = _limits.resolve()
     fmt = opt.format_from_output(opt.enum_value(output_format), output, {".mp4": "mp4", ".webm": "webm"}) or "mp4"
     model = VIDEO_TRANSFORM.model_for(target=fmt)
     options = {
         "target": fmt, "rotate": int(angle.value), "flip": flip.value, "crf": crf,
         "preset": opt.enum_value(preset), "speed": speed, "audio_bitrate_kbps": audio_bitrate, "mute": mute or None,
+        "metadata": opt.enum_value(metadata),
     }  # fmt: skip
     data, unused = opt.split_options(model, options)
     warn_unused(_flags(unused), f"{fmt.upper()} output")
@@ -404,6 +418,7 @@ def rotate_cmd(
         output=output,
         output_dir=output_dir,
         dry_run=dry_run,
+        limits=limits,
     )
     runner.run(gen, [path])
 
@@ -455,6 +470,7 @@ def favicon_cmd(
             "--manifest-background", help="Splash screen colour in the manifest [default: none].", panel=MANIFEST
         ),
     ] = None,
+    max_pixels: opt.MaxPixels = None,
 ):
     """
     Make a favicon pack for each image: a .zip with [cyan]favicon.ico[/cyan], PNG icons (16, 32, 48,
@@ -463,9 +479,11 @@ def favicon_cmd(
     under --output-dir, or to -o for a single image.
     """
     from sashimi.api.favicon import make_favicon_packs_generator
+    from sashimi.cli import _limits
     from sashimi.config import FaviconPackConfig
 
     opt.single_file_or_fail(paths, output)
+    limits = _limits.resolve(max_pixels=max_pixels)
     options = {
         "ico_sizes": opt.parse_sizes(ico_sizes, "--ico-sizes"),
         "fit": opt.enum_value(fit),
@@ -487,5 +505,6 @@ def favicon_cmd(
         output=output,
         output_dir=output_dir,
         dry_run=dry_run,
+        limits=limits,
     )
     runner.run(gen, paths)

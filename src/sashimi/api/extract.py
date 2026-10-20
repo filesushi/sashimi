@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from sashimi.api._batch import VIDEO_EXTENSIONS, FileProgress, PathInput, YieldType, output_name, run_batch
 from sashimi.api._consume import consume_generator
-from sashimi.config import KEYFRAME_NOTE, VIDEO_TRIM, CopyTrimConfig, TrimConfig
+from sashimi.config import KEYFRAME_NOTE, VIDEO_TRIM, CopyTrimConfig, Limits, MetadataMode, TrimConfig
 from sashimi.core.probe import probe
 from sashimi.core.video import trim
 from sashimi.errors import InvalidOptionsError, SashimiError
@@ -111,6 +111,7 @@ def extract_generator(
     speed: int | None = None,
     audio_bitrate_kbps: int | None = None,
     mute: bool = False,
+    metadata: MetadataMode = "keep",
     recursive: bool = False,
     force: bool = False,
     max_workers: int | None = None,
@@ -119,6 +120,7 @@ def extract_generator(
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
     dry_run: bool = False,
+    limits: Limits | None = None,
 ) -> Iterator[YieldType]:
     """
     Cuts a section out of every video found (see :func:`sashimi.video.trim`), from `start`
@@ -130,13 +132,18 @@ def extract_generator(
     `accurate` the clip is re-encoded and starts exactly on time; the encoder options apply only
     then (``preset`` is for H.264 and ``speed`` for WebM; see :data:`~sashimi.config.VIDEO_TRIM`).
 
+    `metadata` is the clip's ``metadata`` field: keep the source's tags (the default), or remove
+    location tags or all of them (see :data:`~sashimi.config.VIDEO_TRIM`).
+
     The container is `container`, or else `output`'s extension if it names one, or else the
     input's (MKV for anything else). Each clip is written as ``<stem>.extracted.<ext>`` next to
     its video, under `output_dir`, or to `output` for a single video. Invalid times raise
     :class:`~sashimi.errors.InvalidOptionsError` before anything runs.
     """
     start_s, end_s, duration_s = _seconds(start), _seconds(end), _seconds(duration)
-    CopyTrimConfig.from_params(container="mkv", start_seconds=start_s, end_seconds=end_s, duration_seconds=duration_s)
+    CopyTrimConfig.from_params(
+        container="mkv", start_seconds=start_s, end_seconds=end_s, duration_seconds=duration_s, metadata=metadata
+    )
     encoding = {"crf": crf, "preset": preset, "speed": speed, "audio_bitrate_kbps": audio_bitrate_kbps}
     if not accurate and (
         used := [key for key, value in {**encoding, "mute": mute or None}.items() if value is not None]
@@ -158,6 +165,7 @@ def extract_generator(
             duration_seconds=duration_s,
             accurate=accurate,
             mute=(mute or None) if accurate else None,
+            metadata=metadata,
         )
 
     def name_for(source: pathlib.Path, stem: str) -> str:
@@ -167,7 +175,7 @@ def extract_generator(
 
     def process(source: pathlib.Path, target: pathlib.Path, progress: Callable[[float, str], None] | None) -> str:
         config = config_for(source)
-        trim(source, target, config, max_workers=max_workers, on_progress=progress)
+        trim(source, target, config, max_workers=max_workers, limits=limits, on_progress=progress)
         return _clip_message(config, source, target)
 
     return run_batch(

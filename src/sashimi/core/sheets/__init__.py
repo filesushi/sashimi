@@ -3,7 +3,7 @@
 
 """Static and animated contact sheets."""
 
-from sashimi.config import AnimatedGifSheetConfig, AnimatedWebpSheetConfig, SheetConfig
+from sashimi.config import AnimatedGifSheetConfig, AnimatedWebpSheetConfig, Limits, SheetConfig
 from sashimi.core._atomic import PathLike
 from sashimi.core._ffmpeg import ProgressCallback
 from sashimi.core.sheets.animated import render_animated
@@ -23,6 +23,7 @@ def render(
     emoji_dir: PathLike | None = None,
     max_workers: int | None = None,
     scratch_dir: PathLike | None = None,
+    limits: Limits | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> None:
     """
@@ -38,8 +39,10 @@ def render(
 
     Runs up to `max_workers` single-threaded ffmpeg processes at once (default min(4, CPUs)), plus
     one encoder for animated sheets. Raises MediaTooShortError for videos shorter than a second (or
-    than one clip), and MediaTooLargeError for sheets over the size limits or videos too wide for
-    tiles of :data:`~sashimi.config.MIN_TILE_SIZE` pixels.
+    than one clip); MediaTooLargeError for sheets over ``limits.max_sheet_pixels`` or wider or
+    taller than their format allows, and for videos too wide for tiles of
+    :data:`~sashimi.config.MIN_TILE_SIZE` pixels; and InvalidOptionsError for an animated sheet
+    whose clips need more than ``limits.max_frame_bytes`` of memory.
     """
     if isinstance(config, (AnimatedWebpSheetConfig, AnimatedGifSheetConfig)):
         render_animated(
@@ -52,6 +55,7 @@ def render(
             emoji_dir=emoji_dir,
             max_workers=max_workers,
             scratch_dir=scratch_dir,
+            limits=limits,
             on_progress=on_progress,
         )
     else:
@@ -65,5 +69,6 @@ def render(
             emoji_dir=emoji_dir,
             max_workers=max_workers,
             scratch_dir=scratch_dir,
+            limits=limits,
             on_progress=on_progress,
         )

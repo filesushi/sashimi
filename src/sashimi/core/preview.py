@@ -6,7 +6,8 @@
 import logging
 from collections.abc import Iterator
 
-from sashimi.config import MAX_FRAME_BYTES, GifPreviewConfig, PreviewConfig
+from sashimi.config import GifPreviewConfig, Limits, PreviewConfig
+from sashimi.config._limits import megabytes, resolve_limits
 from sashimi.core._atomic import PathLike, atomic_output
 from sashimi.core._ffmpeg import (
     INPUT_PROTOCOLS,
@@ -36,10 +37,6 @@ logger = logging.getLogger("sashimi")
 
 MIN_PREVIEW_SECONDS = 0.5
 TOO_SHORT_FOR_PREVIEW = "This video is too short for a preview."
-TOO_BIG_PREVIEW = (
-    "These settings would make the preview too large to render as a GIF. Use a smaller size, a "
-    "lower frame rate, or fewer or shorter clips."
-)
 NO_PREVIEW_FRAMES = "We couldn't read any frames from this video. The file may be damaged."
 _CROP = {"9:16": 9 / 16, "1:1": 1.0}
 _EPSILON = 1e-9
@@ -108,6 +105,7 @@ def build_preview_commands(
     height: int,
     threads: int,
     ffmpeg: str = "ffmpeg",
+    limits: Limits | None = None,
 ) -> tuple[list[list[str]], list[str]]:
     """
     Builds the ffmpeg commands for :func:`preview`: one per clip, then the encoder. Pure.
@@ -116,16 +114,26 @@ def build_preview_commands(
     aspect applied). Each clip command decodes with one thread (``-ss``/``-t`` before ``-i``) and
     writes exactly its frames, scaled and cropped, as raw RGB on stdout. The encoder reads them all,
     one clip after another, on stdin and writes the GIF or WebP with up to `threads` threads.
-    Raises InvalidOptionsError when a GIF would need more than
-    :data:`~sashimi.config.MAX_FRAME_BYTES` of frames in memory (its palette is built from every frame).
+    Raises InvalidOptionsError for a config over `limits`, and when a GIF would need more than
+    ``limits.max_frame_bytes`` of frames in memory (its palette is built from every frame).
     """
+    limits = resolve_limits(limits)
+    limits.check(config)
     clips = plan_preview(
         duration, config.samples, config.sample_duration, config.start_offset_percent, config.end_offset_percent
     )
     (scale_w, scale_h), (out_w, out_h) = preview_size(width, height, config)
     total_frames = sum(_frames(length, config.fps) for _, length in clips)
-    if isinstance(config, GifPreviewConfig) and total_frames * out_w * out_h * 3 > MAX_FRAME_BYTES:
-        raise InvalidOptionsError(TOO_BIG_PREVIEW, detail=f"{total_frames} frames of {out_w}x{out_h}")
+    needed = total_frames * out_w * out_h * 3
+    budget = limits.max_frame_bytes
+    if isinstance(config, GifPreviewConfig) and budget is not None and needed > budget:
+        raise InvalidOptionsError(
+            f"These settings would make the preview too large to render as a GIF: its frames would take "
+            f"{megabytes(needed)} of memory, and the limit is {megabytes(budget)}. Use a smaller size, a lower "
+            "frame rate, or fewer or shorter clips.",
+            detail=f"{total_frames} frames of {out_w}x{out_h}",
+            limit="max_frame_bytes",
+        )
 
     vf = f"fps={config.fps},scale={scale_w}:{scale_h}:flags=lanczos,setsar=1"
     if (scale_w, scale_h) != (out_w, out_h):
@@ -157,6 +165,7 @@ def preview(
     *,
     max_workers: int | None = None,
     scratch_dir: PathLike | None = None,
+    limits: Limits | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> None:
     """
@@ -170,9 +179,12 @@ def preview(
     that uses up to `max_workers` threads (default min(4, CPUs)), so at most two ffmpeg processes
     run, whatever the number of clips, and only one frame at a time is held in Python. A clip that
     can't be read is left out; if none can, UnsupportedMediaError is raised. A GIF's encoder keeps
-    every frame until the palette is built, so GIFs over :data:`~sashimi.config.MAX_FRAME_BYTES`
-    of frames are refused. Written atomically.
+    every frame until the palette is built, so GIFs over ``limits.max_frame_bytes`` of frames are
+    refused; so are previews over ``limits.max_gif_seconds`` in all or ``limits.max_preview_clips``
+    clips, before the file is read. Written atomically.
     """
+    limits = resolve_limits(limits)
+    limits.check(config)
     threads = resolve_max_workers(max_workers)
     info = _probe_video(input_path)
     assert info.duration is not None
@@ -198,7 +210,15 @@ def preview(
 
     with atomic_output(output_path, scratch_dir) as temp:
         clip_commands, encode = build_preview_commands(
-            input_path, temp, config, duration=info.duration, width=width, height=height, threads=threads, ffmpeg=ffmpeg
+            input_path,
+            temp,
+            config,
+            duration=info.duration,
+            width=width,
+            height=height,
+            threads=threads,
+            ffmpeg=ffmpeg,
+            limits=limits,
         )
         total = sum(int(cmd[cmd.index("-frames:v") + 1]) for cmd in clip_commands) / config.fps
         try:

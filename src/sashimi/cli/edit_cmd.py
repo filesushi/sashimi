@@ -37,7 +37,7 @@ FLAGS = {
     "progressive": "--progressive",
     "jpeg_subsampling": "--subsampling",
     "tiff_compression": "--tiff-compression",
-    "keep_exif": "--keep-exif",
+    "metadata": "--metadata",
     "keep_icc": "--strip-icc",
     "keep": "--keep",
     "speed": "--speed",
@@ -97,7 +97,7 @@ def parse_frames(value: str | None, flag: str) -> list[int] | None:
 
 
 def _save_options(
-    quality, lossless, webp_method, compress_level, optimize, progressive, subsampling, tiff_compression, keep_exif,
+    quality, lossless, webp_method, compress_level, optimize, progressive, subsampling, tiff_compression, metadata,
     strip_icc,
 ) -> dict[str, Any]:  # fmt: skip
     return {
@@ -109,7 +109,7 @@ def _save_options(
         "progressive": progressive or None,
         "jpeg_subsampling": opt.enum_value(subsampling),
         "tiff_compression": opt.enum_value(tiff_compression),
-        "keep_exif": keep_exif or None,
+        "metadata": opt.enum_value(metadata),
         "keep_icc": False if strip_icc else None,
     }
 
@@ -126,7 +126,7 @@ def _configs(family: Any, options: dict[str, Any], fmt: str | None, kind: str) -
         try:
             configs[name] = model.model_validate(data)
         except ValidationError as e:
-            exit_on_invalid_options(e, FLAGS, model)
+            exit_on_invalid_options(e, FLAGS)
     used = {field for name in targets for field in family.model_for(target=name).model_fields}
     unused = [field for field in opt.given(options) if field not in used]
     warn_unused([FLAGS.get(field, field) for field in unused], f"{targets[0].upper()} {kind}" if fmt else kind)
@@ -172,7 +172,6 @@ WebpMethod = Annotated[
     Optional[int],
     _option("--webp-method", min=0, max=6, help="WebP effort, 0 (fast) to 6 (small) [default: 4].", panel=SAVE),
 ]
-KeepExif = Annotated[bool, _option("--keep-exif", help="Keep EXIF metadata (camera, date, GPS).", panel=SAVE)]
 StripIcc = Annotated[bool, _option("--strip-icc", help="Drop the colour profile.", panel=SAVE)]
 Optimize = Annotated[
     Optional[bool],
@@ -240,8 +239,10 @@ def edit_cmd(
         Optional[opt.TiffCompression],
         _option("--tiff-compression", help="TIFF compression [default: lzw].", panel=SAVE),
     ] = None,
-    keep_exif: KeepExif = False,
+    metadata: opt.MetadataOpt = None,
     strip_icc: StripIcc = False,
+    max_pixels: opt.MaxPixels = None,
+    max_animation_bytes: opt.MaxAnimationBytes = None,
 ):
     """
     Edit images: the photo's own orientation first, then [bold]--rotate[/bold] and
@@ -254,10 +255,12 @@ def edit_cmd(
     [dim]Examples:  sashimi edit photo.jpg --rotate 90 --crop 1200x800+0+100   ·   sashimi edit photos/ --aspect 1:1 --saturation 1.2[/dim]
     """
     from sashimi.api.edit import edit_images_generator
+    from sashimi.cli import _limits
     from sashimi.config import IMAGE_EDIT
     from sashimi.config._base import normalize_target
 
     opt.single_file_or_fail(paths, output)
+    limits = _limits.resolve(max_pixels=max_pixels, max_animation_bytes=max_animation_bytes)
     if crop is not None and aspect is not None:
         fail("Give --crop or --aspect, not both.")
     if aspect is not None:
@@ -279,7 +282,7 @@ def edit_cmd(
         "saturation": saturation,
         **_save_options(
             quality, lossless, webp_method, compress_level, optimize, progressive, subsampling, tiff_compression,
-            keep_exif, strip_icc,
+            metadata, strip_icc,
         ),
     }  # fmt: skip
     configs, config_for = _configs(IMAGE_EDIT, options, fmt, "images")
@@ -294,6 +297,7 @@ def edit_cmd(
         output=output,
         output_dir=output_dir,
         dry_run=dry_run,
+        limits=limits,
     )
     runner.run(gen, paths)
 
@@ -316,7 +320,7 @@ def frames_cmd(
     ] = None,
     speed: Annotated[
         Optional[float],
-        _option("--speed", help="Playback speed, 0.25-4: 2 is twice as fast [default: 1].", panel=FRAMES),
+        _option("--speed", help="Playback speed: 2 is twice as fast, 0.5 half as fast [default: 1].", panel=FRAMES),
     ] = None,
     output_format: Annotated[
         Optional[FramesFormat], opt.format_option("Output format [default: same as input].")
@@ -348,8 +352,10 @@ def frames_cmd(
             panel=SAVE,
         ),
     ] = None,
-    keep_exif: KeepExif = False,
+    metadata: opt.MetadataOpt = None,
     strip_icc: StripIcc = False,
+    max_pixels: opt.MaxPixels = None,
+    max_animation_bytes: opt.MaxAnimationBytes = None,
 ):
     """
     Keep or drop frames of animated GIFs and WebPs, and change their speed. Kept frames play in
@@ -360,14 +366,16 @@ def frames_cmd(
     [dim]Examples:  sashimi frames clip.gif --drop 1-5   ·   sashimi frames clip.webp --keep 10-40 --speed 1.5[/dim]
     """
     from sashimi.api.edit import edit_frames_generator
+    from sashimi.cli import _limits
     from sashimi.config import IMAGE_FRAMES
 
     opt.single_file_or_fail(paths, output)
+    limits = _limits.resolve(max_pixels=max_pixels, max_animation_bytes=max_animation_bytes)
     fmt = opt.format_from_output(opt.enum_value(output_format), output, {".gif": "gif", ".webp": "webp"})
     options = {
         "keep": parse_frames(keep, "--keep"),
         "speed": speed,
-        **_save_options(quality, lossless, webp_method, None, optimize, False, None, None, keep_exif, strip_icc),
+        **_save_options(quality, lossless, webp_method, None, optimize, False, None, None, metadata, strip_icc),
     }
     dropped = parse_frames(drop, "--drop") or []
     configs, config_for = _configs(IMAGE_FRAMES, options, fmt, "animations")
@@ -382,5 +390,6 @@ def frames_cmd(
         output=output,
         output_dir=output_dir,
         dry_run=dry_run,
+        limits=limits,
     )
     runner.run(gen, paths)
