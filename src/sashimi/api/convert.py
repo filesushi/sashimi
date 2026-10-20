@@ -14,6 +14,7 @@ from sashimi.api._batch import (
     FileProgress,
     PathInput,
     YieldType,
+    output_name,
     run_batch,
 )
 from sashimi.api._consume import consume_generator
@@ -29,7 +30,8 @@ from sashimi.config import (
     VideoConvertConfig,
 )
 from sashimi.core import audio, image, video
-from sashimi.errors import UnsupportedMediaError
+from sashimi.config._base import normalize_target
+from sashimi.errors import InvalidOptionsError, UnsupportedMediaError
 
 __all__ = [
     "Target",
@@ -91,9 +93,13 @@ def convert_files_generator(
     max_workers: int | None = None,
     extensions: Iterable[str] | None = None,
     on_file_progress: FileProgress | None = None,
+    output: PathInput | None = None,
+    output_dir: PathInput | None = None,
 ) -> Iterator[YieldType]:
     """
-    Converts every file found to `target`, writing ``<stem><suffix>`` next to each input.
+    Converts every file found to `target`, writing ``<stem>.<ext>`` next to each input (``.jpg``
+    for JPEG and ``.tif`` for TIFF), or under `output_dir`, or to `output` for a single file.
+    See :mod:`sashimi.api` for the naming and collision rules.
 
     Each file is handled by its kind (from its extension): images go through
     :func:`sashimi.image.convert` (or :func:`~sashimi.image.to_ico`), videos (to GIF, WebP, WebM
@@ -102,12 +108,12 @@ def convert_files_generator(
     Kinds without a config use that target's defaults. Files already in the target format aren't
     picked up unless `extensions` says so.
     """
-    target = {"jpg": "jpeg", "tif": "tiff"}.get(str(target).lower(), str(target).lower())  # type: ignore[assignment]
+    target = normalize_target(str(target))
     if target not in TARGET_SUFFIX:
-        raise ValueError(f"Unsupported target format: {target!r}")
+        raise InvalidOptionsError(f"Can't convert to {str(target).upper()}.")
     for config in (image_config, video_config, audio_config):
         if config is not None and config.target != target:
-            raise ValueError(f"{type(config).__name__} makes {config.target}, not {target}")
+            raise InvalidOptionsError(f"These options make {config.target.upper()}, not {target.upper()}.")
     image_cfg = image_config or (IMAGE_CONVERT.from_params(target=target) if target in IMAGE_CONVERT.targets else None)
     video_cfg = video_config or (VIDEO_CONVERT.from_params(target=target) if target in VIDEO_TARGETS else None)
     audio_cfg = audio_config or (AUDIO_CONVERT.from_params(target=target) if target in AUDIO_TARGETS else None)
@@ -142,11 +148,13 @@ def convert_files_generator(
         extensions=extensions if extensions is not None else _source_extensions(target),
         recursive=recursive,
         force=force,
-        output_for=lambda p: p.with_suffix(suffix),
+        name_for=lambda _, stem: output_name(stem, suffix),
         process=process,
         success_message="Converted to {name}",
         on_file_progress=on_file_progress,
         reject_reason=reject_reason,
+        output=output,
+        output_dir=output_dir,
     )
 
 
@@ -159,7 +167,7 @@ def convert_files(
 ) -> dict[str, Any]:
     """Like :func:`convert_files_generator`, but runs to completion and returns a summary."""
     return consume_generator(
-        convert_files_generator(paths, target, **kwargs), show_progress, f"Converting to {target.upper()}"
+        convert_files_generator(paths, target, **kwargs), show_progress, f"Converting to {target.upper()}", "convert"
     )
 
 
@@ -170,13 +178,20 @@ def convert_images_generator(
     recursive: bool = False,
     force: bool = False,
     extensions: Iterable[str] | None = None,
+    output_dir: PathInput | None = None,
 ) -> Iterator[YieldType]:
     """Image-only conversion: every image found is converted to `config.target`."""
     if extensions is None:
         own = _SAME_FORMAT.get(config.target, {TARGET_SUFFIX[config.target]})
         extensions = [ext for ext in IMAGE_EXTENSIONS if ext not in own]
     return convert_files_generator(
-        paths, config.target, image_config=config, recursive=recursive, force=force, extensions=extensions
+        paths,
+        config.target,
+        image_config=config,
+        recursive=recursive,
+        force=force,
+        extensions=extensions,
+        output_dir=output_dir,
     )
 
 
@@ -188,10 +203,13 @@ def convert_images(
     force: bool = False,
     show_progress: bool = True,
     extensions: Iterable[str] | None = None,
+    output_dir: PathInput | None = None,
 ) -> dict[str, Any]:
     """Like :func:`convert_images_generator`, but runs to completion and returns a summary."""
-    gen = convert_images_generator(paths, config, recursive=recursive, force=force, extensions=extensions)
-    return consume_generator(gen, show_progress, f"Converting to {config.target.upper()}")
+    gen = convert_images_generator(
+        paths, config, recursive=recursive, force=force, extensions=extensions, output_dir=output_dir
+    )
+    return consume_generator(gen, show_progress, f"Converting to {config.target.upper()}", "convert")
 
 
 def to_jpeg(

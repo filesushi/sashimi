@@ -40,7 +40,10 @@ def test_version():
         ["resize"],
         ["rotate"],
         ["extract"],
+        ["remux"],
+        ["favicon"],
         ["thumbs"],
+        ["preview"],
         ["info"],
         ["flatten"],
         ["config"],
@@ -54,7 +57,7 @@ def test_bare_commands_show_help(command):
 
 def test_help_lists_command_groups():
     output = runner.invoke(app, ["--help"]).output
-    for panel in ("Convert", "Contact sheets", "Inspect", "Files", "Configuration"):
+    for panel in ("Convert", "Sheets & previews", "Inspect", "Files", "Configuration"):
         assert panel in output
     assert f"Powered by sashimi v{__version__}" in output
 
@@ -88,7 +91,7 @@ def test_resize_command(tmp_path):
     Image.new("RGB", (400, 200), "red").save(tmp_path / "a.jpg")
     result = runner.invoke(app, ["resize", "a.jpg", "--width", "100", "--json"])
     assert result.exit_code == 0, result.output
-    with Image.open(tmp_path / "a_resized.jpg") as img:
+    with Image.open(tmp_path / "a.resized.jpg") as img:
         assert img.size == (100, 50)
 
 
@@ -114,7 +117,7 @@ def test_resize_needs_a_size_and_keeps_each_format(tmp_path):
     result = runner.invoke(app, ["resize", ".", "--width", "100", "-q", "50", "--json"])
     assert result.exit_code == 0, result.output
     assert "--quality doesn't apply to PNG images" in " ".join(result.stderr.split())
-    with Image.open(tmp_path / "a_resized.png") as png, Image.open(tmp_path / "b_resized.jpeg") as jpeg:
+    with Image.open(tmp_path / "a.resized.png") as png, Image.open(tmp_path / "b.resized.jpeg") as jpeg:
         assert (png.format, png.size, jpeg.format) == ("PNG", (100, 50), "JPEG")
 
 
@@ -145,7 +148,7 @@ def test_info_and_rotate(video_blob, tmp_path):
     assert (info["width"], info["height"]) == (320, 180)
     rotated = runner.invoke(app, ["rotate", "clip.mkv", "90", "--format", "webm", "--crf", "45", "--json"])
     assert rotated.exit_code == 0, rotated.output
-    info = json.loads(runner.invoke(app, ["info", "clip_rotated.webm", "--json"]).stdout)
+    info = json.loads(runner.invoke(app, ["info", "clip.rotated.webm", "--json"]).stdout)
     assert (info["width"], info["height"], info["video_codec"]) == (180, 320, "vp9")
 
 

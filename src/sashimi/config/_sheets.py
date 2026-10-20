@@ -79,10 +79,14 @@ class _StillSheet(_SheetStyle):
 class _AnimatedSheet(_SheetStyle):
     animated: Annotated[Literal[True], FormBool] = True
     """An animated sheet of short clips."""
+    cols: GridValue = "auto"
+    """Columns, 1-20, or "auto": 3, or 4 for portrait videos."""
+    rows: GridValue = "auto"
+    """Rows, 1-20, or "auto": 3, or 2 for portrait videos."""
     width: int = Field(default=1280, ge=320, le=3840)
     """Approximate width of the sheet in pixels (tiles are rounded to even sizes)."""
     sample_duration: float = Field(default=2.0, gt=0.0, le=10.0)
-    """Length of each tile's clip in seconds."""
+    """Length of each tile's clip in seconds. A video shorter than this gets one tile of the whole video."""
     fps: int = Field(default=12, ge=1, le=30)
     """Frames per second."""
     loop: bool = True

@@ -3,25 +3,67 @@
 
 import pathlib
 import time
-from typing import Any, Dict, Iterator, Set
+from collections.abc import Iterable, Iterator
+from typing import Any
 
-from sashimi.api._batch import YieldType
+from sashimi.api._batch import ResultTuple, YieldType
+
+REPORT_SCHEMA = 1
+"""Version of the report layout below; it changes only when a key is renamed or removed."""
+STATUSES = ("success", "error", "exists", "skipped")
 
 
-def consume_generator(gen: Iterator[YieldType], show_progress: bool, desc: str) -> Dict[str, Any]:
-    """Consumes a batch-operation generator, showing an optional tqdm bar, and returns a summary payload."""
+def build_report(
+    command: str, total_found: int, results: Iterable[ResultTuple], seconds: float, **extra: Any
+) -> dict[str, Any]:
+    """
+    The report every batch operation returns, and the CLI prints with ``--json``::
+
+        {"schema": 1, "command": "convert",
+         "summary": {"total_found", "success", "exists", "skipped", "errors", "time_taken_seconds", "avg_time_seconds"},
+         "results": [{"file", "status", "message", "output"}, ...]}
+
+    `extra` keys are added at the top level (``flatten`` adds ``dry_run``).
+    """
+    rows = list(results)
+    counts = {status: 0 for status in STATUSES}
+    for _, status, _, _ in rows:
+        counts[status] = counts.get(status, 0) + 1
+    success = counts["success"]
+    return {
+        "schema": REPORT_SCHEMA,
+        "command": command,
+        **extra,
+        "summary": {
+            "total_found": total_found,
+            "success": success,
+            "exists": counts["exists"],
+            "skipped": counts["skipped"],
+            "errors": counts["error"],
+            "time_taken_seconds": round(seconds, 2),
+            "avg_time_seconds": round(seconds / success, 2) if success else 0.0,
+        },
+        "results": [
+            {"file": str(path), "status": status, "message": message, "output": str(out) if out else None}
+            for path, status, message, out in rows
+        ],
+    }
+
+
+def consume_generator(gen: Iterator[YieldType], show_progress: bool, desc: str, command: str = "") -> dict[str, Any]:
+    """Consumes a batch-operation generator, showing an optional tqdm bar, and returns :func:`build_report`'s payload."""
     start_time = time.perf_counter()
     try:
-        total_files = next(gen)
+        first = next(gen)
     except StopIteration:
-        total_files = 0
+        first = 0
+    total_files = first if isinstance(first, int) else 0
 
-    results = []
-    counts = {"success": 0, "error": 0, "exists": 0, "skipped": 0}
-    started: Set[pathlib.Path] = set()
+    results: list[ResultTuple] = []
+    started: set[pathlib.Path] = set()
 
     pbar = None
-    if show_progress and isinstance(total_files, int) and total_files > 0:
+    if show_progress and total_files > 0:
         try:
             from tqdm.auto import tqdm  # type: ignore[import-untyped]
 
@@ -31,35 +73,19 @@ def consume_generator(gen: Iterator[YieldType], show_progress: bool, desc: str) 
 
     try:
         for item in gen:
-            if not (isinstance(item, tuple) and len(item) == 3):
+            if not (isinstance(item, tuple) and len(item) == 4):
                 continue
-            file_path, status, message = item
-
+            file_path, status, _, _ = item
             if status == "starting":
                 started.add(file_path)
                 if pbar:
                     pbar.set_postfix_str(f"Processing: {file_path.name[:25]}")
                 continue
-
-            counts[status] = counts.get(status, 0) + 1
-            results.append({"file": str(file_path), "status": status, "message": message})
-
+            results.append(item)
             if pbar and file_path in started:
                 pbar.update(1)
     finally:
         if pbar:
             pbar.close()
 
-    time_taken = time.perf_counter() - start_time
-    return {
-        "summary": {
-            "total_found": total_files,
-            "success": counts["success"],
-            "exists": counts["exists"],
-            "skipped": counts["skipped"],
-            "errors": counts["error"],
-            "time_taken_seconds": round(time_taken, 2),
-            "avg_time_seconds": round(time_taken / counts["success"], 2) if counts["success"] > 0 else 0.0,
-        },
-        "results": results,
-    }
+    return build_report(command or desc, total_files, results, time.perf_counter() - start_time)

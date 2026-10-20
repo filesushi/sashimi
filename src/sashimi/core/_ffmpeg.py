@@ -9,7 +9,7 @@ import shlex
 import shutil
 import subprocess
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from typing import IO
 
 from sashimi.errors import BinaryNotFoundError, ProcessingError
@@ -108,6 +108,40 @@ def _feed(stream: IO[bytes], chunks: Iterable[bytes], errors: list[BaseException
             stream.close()
         except BrokenPipeError:
             pass
+
+
+def stream_ffmpeg(cmd: list[str], chunk_size: int) -> Iterator[bytes]:
+    """
+    Runs an ffmpeg command and yields its stdout in chunks of `chunk_size` bytes (the last may be
+    shorter), so a large output never sits in memory. Raises ProcessingError after the last chunk
+    if ffmpeg failed, and BinaryNotFoundError if it can't be started. Closing the generator early
+    kills the process.
+    """
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as e:
+        raise BinaryNotFoundError(f"Cannot run {cmd[0]!r}: {e}") from e
+    assert proc.stdout is not None and proc.stderr is not None
+    stderr_tail: collections.deque = collections.deque(maxlen=40)
+    drain = threading.Thread(target=_drain, args=(proc.stderr, stderr_tail), daemon=True)
+    drain.start()
+    try:
+        while chunk := proc.stdout.read(chunk_size):
+            yield chunk
+        proc.wait()
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        drain.join(timeout=5)
+        proc.stdout.close()
+        proc.stderr.close()
+    if proc.returncode != 0:
+        tail = b"".join(stderr_tail).decode("utf-8", "replace").strip()
+        raise ProcessingError(
+            f"{os.path.basename(cmd[0])} exited with code {proc.returncode}: {tail}\ncommand: {shlex.join(cmd)}"
+        )
 
 
 def run_ffmpeg(

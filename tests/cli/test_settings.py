@@ -183,7 +183,7 @@ def test_unknown_keys():
         "extras": {"x": 1},
     }
     assert manager.unknown_keys(data) == [
-        "global.colour",
+        "global",
         "thumbs.output_width",
         "thumbs.start_offset",
         "animated_thumbs.static_width",

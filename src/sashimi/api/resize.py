@@ -5,7 +5,7 @@ import pathlib
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import Any
 
-from sashimi.api._batch import IMAGE_EXTENSIONS, FileProgress, PathInput, YieldType, run_batch
+from sashimi.api._batch import IMAGE_EXTENSIONS, FileProgress, PathInput, YieldType, output_name, run_batch
 from sashimi.api._consume import consume_generator
 from sashimi.api.convert import _SAME_FORMAT, TARGET_SUFFIX
 from sashimi.config import ImageResizeConfig
@@ -38,12 +38,14 @@ def resize_images_generator(
     *,
     recursive: bool = False,
     force: bool = False,
-    suffix: str = "_resized",
     extensions: Iterable[str] = IMAGE_EXTENSIONS,
     on_file_progress: FileProgress | None = None,
+    output: PathInput | None = None,
+    output_dir: PathInput | None = None,
 ) -> Iterator[YieldType]:
     """
-    Shrinks every image found, writing ``<stem><suffix><ext>`` next to it.
+    Shrinks every image found, writing ``<stem>.resized.<ext>`` next to it, under `output_dir`, or
+    to `output` for a single image.
 
     `config` is either one resize config for every image, or a function that returns the config
     for a format name. The function is called with each image's own format (see
@@ -53,22 +55,24 @@ def resize_images_generator(
     def config_for(path: pathlib.Path) -> ImageResizeConfig:
         return config(source_target(path)) if callable(config) else config
 
-    def output_for(p: pathlib.Path) -> pathlib.Path:
+    def name_for(p: pathlib.Path, stem: str) -> str:
         target = config_for(p).target
         ext = (
             p.suffix if p.suffix.lower() in _SAME_FORMAT.get(target, {TARGET_SUFFIX[target]}) else TARGET_SUFFIX[target]
         )
-        return p.with_name(f"{p.stem}{suffix}{ext}")
+        return output_name(stem, ext, "resized")
 
     return run_batch(
         paths,
         extensions=extensions,
         recursive=recursive,
         force=force,
-        output_for=output_for,
+        name_for=name_for,
         process=lambda src, dst, progress: convert(src, dst, config_for(src), on_progress=progress),
         success_message="Resized to {name}",
         on_file_progress=on_file_progress,
+        output=output,
+        output_dir=output_dir,
     )
 
 
@@ -80,4 +84,4 @@ def resize_images(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Like :func:`resize_images_generator`, but runs to completion and returns a summary."""
-    return consume_generator(resize_images_generator(paths, config, **kwargs), show_progress, "Resizing")
+    return consume_generator(resize_images_generator(paths, config, **kwargs), show_progress, "Resizing", "resize")

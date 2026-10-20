@@ -4,12 +4,14 @@
 """Image conversion (P0-a), resize (P1-d), ICO and HEIC. Pillow only; no ffmpeg needed."""
 
 import io
+import json
+import zipfile
 
 import pytest
 from PIL import Image
 
 from sashimi import image
-from sashimi.config import IMAGE_CONVERT, IMAGE_RESIZE, JpegImageConfig, PngImageConfig
+from sashimi.config import IMAGE_CONVERT, IMAGE_RESIZE, FaviconPackConfig, IcoConfig, JpegImageConfig, PngImageConfig
 from sashimi.errors import InvalidOptionsError, MediaTooLargeError, UnsupportedMediaError
 
 from tests.conftest import leftovers
@@ -153,3 +155,104 @@ def test_heic_to_jpeg(tmp_path):
     heif.save(src, quality=90)
     out = convert(src, tmp_path / "r", "jpeg")
     assert out.size == (64, 48) and out.getpixel((10, 10))[0] > 200
+
+
+def test_ico_stays_transparent_unless_given_a_background(half_transparent, tmp_path):
+    image.to_ico(half_transparent, tmp_path / "plain", IcoConfig(sizes=(32,)))
+    image.to_ico(half_transparent, tmp_path / "filled", IcoConfig(sizes=(32,), background_color="#ffff00"))
+    with Image.open(tmp_path / "plain") as plain, Image.open(tmp_path / "filled") as filled:
+        assert plain.convert("RGBA").getpixel((30, 16))[3] == 0
+        assert filled.convert("RGBA").getpixel((30, 16)) == (255, 255, 0, 255)
+        assert filled.convert("RGBA").getpixel((2, 16)) == (0, 0, 255, 255)
+
+
+def test_ico_background_is_a_form_field():
+    assert IcoConfig.from_params({"background_color": "#000"}).background_color == (0, 0, 0)
+    assert IcoConfig.from_params({"background_color": None}).background_color is None
+    assert IcoConfig.model_fields["background_color"].default is None
+
+
+PACK = [
+    "favicon.ico",
+    "favicon-16x16.png",
+    "favicon-32x32.png",
+    "favicon-48x48.png",
+    "apple-touch-icon.png",
+    "icon-192x192.png",
+    "icon-512x512.png",
+    "site.webmanifest",
+    "favicon.html",
+]
+
+
+def test_favicon_pack_contents(half_transparent, tmp_path):
+    progress = []
+    image.favicon_pack(half_transparent, tmp_path / "pack", on_progress=lambda f, s: progress.append(f))
+    assert progress == [1.0] and leftovers(tmp_path) == []
+    with zipfile.ZipFile(tmp_path / "pack") as archive:
+        assert archive.namelist() == PACK
+        assert {info.date_time for info in archive.infolist()} == {(1980, 1, 1, 0, 0, 0)}
+        with Image.open(io.BytesIO(archive.read("favicon.ico"))) as ico:
+            assert ico.info["sizes"] == {(16, 16), (32, 32), (48, 48)}
+        for name, size in [("favicon-16x16.png", 16), ("icon-512x512.png", 512), ("apple-touch-icon.png", 180)]:
+            with Image.open(io.BytesIO(archive.read(name))) as png:
+                assert png.format == "PNG" and png.size == (size, size)
+        with Image.open(io.BytesIO(archive.read("apple-touch-icon.png"))) as touch:
+            assert touch.mode == "RGB" and touch.getpixel((170, 90)) == WHITE
+        with Image.open(io.BytesIO(archive.read("icon-192x192.png"))) as icon:
+            assert icon.getpixel((180, 96))[3] == 0
+        manifest = json.loads(archive.read("site.webmanifest"))
+        assert manifest == {
+            "icons": [
+                {"src": "icon-192x192.png", "sizes": "192x192", "type": "image/png"},
+                {"src": "icon-512x512.png", "sizes": "512x512", "type": "image/png"},
+            ]
+        }
+        html = archive.read("favicon.html").decode()
+        assert '<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">' in html
+        assert '<link rel="manifest" href="site.webmanifest">' in html
+        assert "theme-color" not in html and 'href="/' not in html and "http" not in html
+
+
+def test_favicon_pack_is_byte_identical_across_runs(half_transparent, tmp_path):
+    config = FaviconPackConfig(name="Site", theme_color=(1, 2, 3), fit="crop")
+    image.favicon_pack(half_transparent, tmp_path / "a", config)
+    image.favicon_pack(half_transparent, tmp_path / "b", config)
+    assert (tmp_path / "a").read_bytes() == (tmp_path / "b").read_bytes()
+
+
+def test_favicon_manifest_and_html_escape_user_text():
+    config = FaviconPackConfig(
+        name='Tom & "Jerry" </script><b>',
+        short_name="T&J",
+        theme_color="#336699",
+        manifest_background_color="#ffffff",
+    )
+    manifest = json.loads(image.favicon_manifest(config))
+    assert manifest["name"] == 'Tom & "Jerry" </script><b>' and manifest["short_name"] == "T&J"
+    assert (manifest["theme_color"], manifest["background_color"]) == ("#336699", "#ffffff")
+    html = image.favicon_html(config)
+    assert "Tom" not in html and '<meta name="theme-color" content="#336699">' in html
+
+
+@pytest.mark.parametrize(
+    "params, message",
+    [
+        ({"name": "a\nb"}, "Invalid value for name: must be a single line of text."),
+        ({"name": "x" * 101}, "Invalid value for name: string should have at most 100 characters."),
+        ({"ico_sizes": "8,16"}, "Invalid value for ico_sizes: icon sizes must be between 16 and 256 pixels."),
+        ({"background_color": "teal"}, "Invalid value for background_color: not a colour: 'teal'."),
+    ],
+)
+def test_favicon_pack_options_are_validated(params, message):
+    with pytest.raises(InvalidOptionsError) as e:
+        FaviconPackConfig.from_params(params)
+    assert e.value.user_message == message
+
+
+def test_favicon_pack_refuses_non_images(tmp_path):
+    src = tmp_path / "original.blob"
+    src.write_bytes(b"not an image")
+    with pytest.raises(UnsupportedMediaError):
+        image.favicon_pack(src, tmp_path / "pack")
+    assert not (tmp_path / "pack").exists() and leftovers(tmp_path) == []

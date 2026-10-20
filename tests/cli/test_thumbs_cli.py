@@ -32,12 +32,11 @@ def test_missing_path_is_reported_in_json(tmp_path):
     assert payload["results"][0]["message"] == "Path does not exist"
 
 
-def test_missing_path_is_reported_in_table(tmp_path):
+def test_missing_path_is_reported_in_one_line(tmp_path):
     result = runner.invoke(app, ["thumbs", "typo.mp4"])
 
     assert result.exit_code == 1
-    assert "No matching files found" in result.stdout
-    assert "Path does not exist" in result.stdout
+    assert result.stdout.strip() == "Error: typo.mp4: Path does not exist (0.0s)"
 
 
 def test_non_video_file_is_reported(tmp_path):
@@ -47,7 +46,9 @@ def test_non_video_file_is_reported(tmp_path):
 
     payload = json.loads(result.stdout)
     assert result.exit_code == 0
-    assert payload["results"] == [{"file": "notes.txt", "status": "skipped", "message": "Unsupported file type"}]
+    assert payload["results"] == [
+        {"file": "notes.txt", "status": "skipped", "message": "Unsupported file type", "output": None}
+    ]
 
 
 @pytest.mark.parametrize(
@@ -77,8 +78,8 @@ def test_static_only_warns_about_animated_options(tmp_path):
 @pytest.mark.parametrize(
     "args, message",
     [
-        (["-a", "-o", "jpeg"], "Animated contact sheets can be WebP or GIF."),
-        (["-o", "gif"], "GIF sheets must be animated."),
+        (["-a", "--format", "jpeg"], "Animated contact sheets can be WebP or GIF."),
+        (["--format", "gif"], "GIF sheets must be animated."),
     ],
 )
 def test_format_must_suit_the_mode(tmp_path, args, message):

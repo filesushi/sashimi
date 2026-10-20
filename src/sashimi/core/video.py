@@ -3,6 +3,8 @@
 
 """Video conversion (GIF/animated WebP/WebM/MP4), lossless or frame-accurate trimming, and rotate/flip."""
 
+from collections.abc import Sequence
+
 from sashimi.config import (
     DURATION_TOLERANCE_SECONDS,
     MAX_VIDEO_SECONDS,
@@ -32,6 +34,7 @@ from sashimi.errors import InvalidOptionsError, MediaTooLongError, UnsupportedMe
 __all__ = [
     "build_convert_command",
     "convert",
+    "subtitle_conversions",
     "build_trim_command",
     "check_copy_compatible",
     "trim",
@@ -64,6 +67,27 @@ _COPY_REFUSED: dict[str, frozenset[str]] = {
     "mov": frozenset({"vp8", "vp9", "av1", "opus", "flac"}),
     "webm": frozenset(),
 }
+TEXT_SUBTITLES = frozenset({"mov_text", "subrip", "srt", "ass", "ssa", "webvtt", "text"})
+"""Subtitle codecs (as ffprobe names them) that a lossless trim converts when the container can't hold them."""
+SUBTITLE_ENCODERS = {"mkv": "srt", "mp4": "mov_text", "mov": "mov_text", "webm": "webvtt"}
+"""The subtitle format each container gets when a text subtitle has to be converted."""
+
+
+def _subtitle_fits(codec: str, container: str) -> bool:
+    allowed = _COPY_ALLOWED[container].get("subtitle", frozenset())
+    return codec not in _COPY_REFUSED[container] and (allowed is None or codec in allowed)
+
+
+def subtitle_conversions(subtitles: Sequence[str], container: str) -> list[str]:
+    """
+    ``-c:s:<n> <encoder>`` arguments for the subtitle streams (codecs in stream order) that
+    `container` can't hold as they are but that are text, so can be converted. Pure.
+    """
+    args: list[str] = []
+    for index, codec in enumerate(subtitles):
+        if not _subtitle_fits(codec, container) and codec in TEXT_SUBTITLES:
+            args += [f"-c:s:{index}", SUBTITLE_ENCODERS[container]]
+    return args
 
 
 def _encoder_args(config: _H264Options | _Vp9Options, *, faststart: bool = True) -> list[str]:
@@ -230,6 +254,8 @@ def convert(
 def _can_copy(info: MediaInfo, container: str) -> bool:
     allowed, refused = _COPY_ALLOWED[container], _COPY_REFUSED[container]
     for stream in info.streams:
+        if stream.type == "subtitle" and stream.codec in TEXT_SUBTITLES:
+            continue
         if stream.type not in allowed or stream.codec in refused:
             return False
         codecs = allowed[stream.type]
@@ -242,6 +268,8 @@ def check_copy_compatible(info: MediaInfo, container: str) -> None:
     """
     Raises InvalidOptionsError if the streams of `info` can't be copied into `container` (mkv,
     mp4, webm or mov) without re-encoding, e.g. H.264 into WebM, or a timecode track into MKV.
+    Text subtitles always pass: the copy converts any the container can't hold (see
+    :func:`subtitle_conversions`).
     """
     if _can_copy(info, container):
         return
@@ -261,12 +289,16 @@ def build_trim_command(
     duration: float,
     threads: int = 1,
     ffmpeg: str = "ffmpeg",
+    subtitles: Sequence[str] = (),
 ) -> list[str]:
     """
     Builds the ffmpeg command for :func:`trim`. Pure.
 
     A stream copy uses ``-avoid_negative_ts make_zero``, so the frames from the previous keyframe
     are really in the clip rather than hidden behind an MP4 edit list that some players ignore.
+    `subtitles` are the source's subtitle codecs in stream order: text subtitles the container
+    can't hold are converted (MP4 ``mov_text`` to SRT for MKV, SRT or ASS to ``mov_text`` for
+    MP4/MOV, to WebVTT for WebM) while everything else is copied.
     An accurate cut re-encodes with `threads` threads and, like :func:`convert`, is limited to
     :data:`~sashimi.config.MAX_VIDEO_SECONDS`.
     """
@@ -279,7 +311,8 @@ def build_trim_command(
             cmd += ["-ss", fmt_seconds(config.start_seconds)]
         if length is not None:
             cmd += ["-t", fmt_seconds(length)]
-        cmd += ["-i", file_arg(input_path), "-map", "0", "-c", "copy", "-avoid_negative_ts", "make_zero"]
+        cmd += ["-i", file_arg(input_path), "-map", "0", "-c", "copy"]
+        cmd += [*subtitle_conversions(subtitles, config.container), "-avoid_negative_ts", "make_zero"]
         if config.container in ("mp4", "mov"):
             cmd += ["-movflags", "+faststart"]
         cmd += [*OUTPUT_FLAGS, "-f", _MUXERS[config.container], file_arg(output_path)]
@@ -313,6 +346,10 @@ def trim(
     (:data:`~sashimi.config.KEYFRAME_NOTE` explains this for end users). The source's streams must
     fit the container, or InvalidOptionsError is raised before ffmpeg runs. An accurate config
     re-encodes (with up to `max_workers` threads) and starts exactly at `start_seconds`.
+
+    With no end and no length, a copy takes the whole file: a lossless remux into another
+    container. Copies convert text subtitles the container can't hold (for example MP4
+    ``mov_text`` into MKV becomes SRT); an accurate cut drops subtitles.
     """
     info = _probe_video(input_path)
     assert info.duration is not None
@@ -320,9 +357,16 @@ def trim(
     if copy:
         check_copy_compatible(info, config.container)
     threads = 1 if copy else resolve_max_workers(max_workers)
+    subtitles = [stream.codec for stream in info.streams if stream.type == "subtitle"]
     with atomic_output(output_path, scratch_dir) as temp:
         cmd = build_trim_command(
-            input_path, temp, config, duration=info.duration, threads=threads, ffmpeg=ffmpeg_binary()
+            input_path,
+            temp,
+            config,
+            duration=info.duration,
+            threads=threads,
+            ffmpeg=ffmpeg_binary(),
+            subtitles=subtitles,
         )
         if copy:
             run_ffmpeg(cmd)

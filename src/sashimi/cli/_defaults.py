@@ -17,7 +17,7 @@ from sashimi.cli import convert_cmd, thumbs_cmd
 if TYPE_CHECKING:
     from sashimi.config import ParamsModel
 
-OPERATIONS = ("convert", "resize", "rotate", "extract", "thumbs")
+OPERATIONS = ("convert", "resize", "rotate", "favicon", "extract", "thumbs", "preview")
 DISCRIMINATORS = frozenset({"target", "container", "accurate", "animated"})
 NONE_MEANS = {
     "max_width": "source width",
@@ -25,6 +25,10 @@ NONE_MEANS = {
     "duration_seconds": "to the end",
     "end_seconds": "to the end",
     "sample_rate": "source",
+    "background_color": "transparent",
+    "theme_color": "none",
+    "manifest_background_color": "none",
+    "preview.max_width": "no limit",
 }
 EXTRACT_FLAGS = {
     "start_seconds": "--start",
@@ -36,19 +40,30 @@ CLI_DEFAULTS = {"rotate": {"rotate": 90}}
 _ROLE = re.compile(r":\w+:`~?([^`]+)`")
 
 
+FAVICON_FLAGS = {
+    **{field: convert_cmd.FLAGS[field] for field in ("ico_sizes", "resample", "background_color", "name")},
+    **{field: convert_cmd.FLAGS[field] for field in ("short_name", "theme_color", "manifest_background_color")},
+    "fit": "--fit",
+}
+
+
 def flags_for(operation: str) -> dict[str, str]:
     """Field name to CLI flag for one command."""
     if operation == "thumbs":
         return thumbs_cmd.FLAGS
+    if operation == "preview":
+        return thumbs_cmd.PREVIEW_FLAGS
     if operation == "extract":
         return EXTRACT_FLAGS
+    if operation == "favicon":
+        return FAVICON_FLAGS
     return convert_cmd.FLAGS
 
 
-def format_value(value: Any, field: str = "") -> str:
+def format_value(value: Any, field: str = "", operation: str = "") -> str:
     """A value as the CLI writes it: colours as hex, whole floats without '.0', booleans as true/false."""
     if value is None:
-        return NONE_MEANS.get(field, "none")
+        return NONE_MEANS.get(f"{operation}.{field}") or NONE_MEANS.get(field, "none")
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, float) and value.is_integer():
@@ -102,7 +117,7 @@ def _bounds(metadata: list[Any]) -> str:
 def allowed(name: str, field: Any) -> str:
     """The values a field accepts, e.g. '1-100', 'bayer, none', '> 0, at most 30'."""
     if name.endswith("_color"):
-        return "#rrggbbaa" if len(field.default) == 4 else "#rrggbb"
+        return "#rrggbbaa" if isinstance(field.default, tuple) and len(field.default) == 4 else "#rrggbb"
     kinds, metadata = _parts(field.annotation, list(field.metadata))
     choices = [
         str(choice) for kind in kinds if typing.get_origin(kind) is typing.Literal for choice in typing.get_args(kind)
@@ -141,6 +156,11 @@ def models_for(operation: str, fmt: str | None = None) -> list[tuple[str, type[P
         add(config.IMAGE_RESIZE, "Resized images")
     elif operation == "rotate":
         add(config.VIDEO_TRANSFORM, "Rotated videos")
+    elif operation == "favicon":
+        if fmt in (None, "zip"):
+            found.append(("Images → favicon pack (ZIP)", config.FaviconPackConfig))
+    elif operation == "preview":
+        add(config.VIDEO_PREVIEW, "Video previews")
     elif operation == "extract":
         for container in config.VIDEO_TRIM.targets:
             if fmt in (None, container):

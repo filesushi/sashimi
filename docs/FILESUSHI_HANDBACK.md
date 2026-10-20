@@ -1,13 +1,16 @@
 # Hand-back: sashimi 0.6.0 for FileSushi
 
-From the sashimi agent to FileSushi, written 2026-10-19 for sashimi 0.6.0, its first PyPI
-release (distribution `sashimi-convert`). The release isn't published yet: the owner builds and
-uploads it by hand. Until then, a wheel built from sashimi's tree at 0.6.0 is the same code.
+From the sashimi agent to FileSushi, written 2026-10-19 and updated 2026-10-20 for sashimi 0.6.0,
+its first PyPI release (distribution `sashimi-convert`). The release isn't published yet: the
+owner builds and uploads it by hand. Until then, a wheel built from sashimi's tree at 0.6.0 is the
+same code.
 
 FileSushi vendors an early build of 0.5.1 (`docker/workers/wheels/sashimi_convert-0.5.1-py3-none-any.whl`,
 sha256 `b9bd0581…`). Its `config/`, `core/` and `api/` match the later 0.5.1 build; the
-differences were in the CLI only. 0.6.0 is that code plus the changes below, with the same
-command lines and byte-identical outputs.
+differences were in the CLI only. 0.6.0 is that code plus the changes below. Every output
+FileSushi makes today is byte-identical, except contact sheets (§1 item 4 and §8): animated sheets
+get a new default grid and new time labels, still sheets of 9:16 videos get 8x2, and an animated
+sheet of a clip shorter than its clip length now succeeds with one tile.
 
 ## 1. What FileSushi must change
 
@@ -19,7 +22,14 @@ command lines and byte-identical outputs.
      example `pip install --no-cache-dir --only-binary=:all: --require-hashes -r requirements.txt`
      with `sashimi-convert[heif]==0.6.0` and its dependencies pinned, instead of copying the wheel;
    - delete `docker/workers/wheels/sashimi_convert-0.5.1-py3-none-any.whl`.
-2. **Don't offer 96 kHz for MP3.** `Mp3AudioConfig.sample_rate` now takes only LAME's rates
+   Before the upload, a wheel built from the sashimi tree is the same code, if you want to start early.
+2. **Add the ICO background to `IcoParams` (required: a FileSushi test fails without it).**
+   `IcoConfig` has a new field, `background_color` (`RGB | None`, default `None` = transparent,
+   accepts `"#rrggbb"`). `tests/test_tool_params.py::test_every_sashimi_option_is_offered_or_deliberately_left_out`
+   fails for `image-to-ico` until `IcoParams` offers it (an optional colour, blank meaning
+   transparent; "Background" with help such as "Fills transparent areas; leave blank to keep
+   them") or lists it in `not_offered`. With it unset, `.ico` output is byte-identical to 0.5.1.
+3. **Don't offer 96 kHz for MP3.** `Mp3AudioConfig.sample_rate` now takes only LAME's rates
    (`sashimi.config.MP3_SAMPLE_RATES`: 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100,
    48000). `tool_params.py` gave every audio tool except OGG the same choices, including "96 kHz";
    with 0.6.0, MP3 at 96000 is refused by `from_params` with `InvalidOptionsError` ("Invalid value
@@ -28,18 +38,61 @@ command lines and byte-identical outputs.
    and FLAC still take 96000. FileSushi's working tree (checked 2026-10-19) already gives
    `Mp3Params` its own choices without 96 kHz (`tool_params.py:1042-1047,1099`); keep that. If you
    build the choices from sashimi's constants instead, note that `MP3_SAMPLE_RATES` is also the
-   name of the local `Choices` tuple there.
-3. **M4A takes AAC's rates only:** `AAC_SAMPLE_RATES` (the MP3 rates plus 64000, 88200, 96000).
-   FileSushi offers 22050, 44100, 48000 and 96000, all of which are accepted; nothing to change
-   unless you add more.
-4. **Nothing else.** The rest is behaviour FileSushi gets for free:
-   - a missing or broken ffprobe or ffmpeg in the worker image now raises `BinaryNotFoundError`
+   name of the local `Choices` tuple there. M4A takes AAC's rates only (`AAC_SAMPLE_RATES`, the
+   MP3 rates plus 64000, 88200, 96000); FileSushi's 22050, 44100, 48000 and 96000 are all accepted.
+4. **Animated contact sheets look different (accepted by the owner, 2026-10-19).** With
+   `cols`/`rows` unset or `"auto"`, which is what `SheetParams` sends when the user leaves
+   "Columns"/"Rows" on "Auto", an animated sheet is now 3x3 (4x2 for portrait videos, aspect
+   ratio under 0.95) instead of the still sheets' table (6x5 for 16:9). It renders about 2.4
+   times faster with 426 px tiles at the default 1280 px. Time labels on animated sheets have
+   4 px of padding and centred text. Still sheets of 9:16 videos are 8x2 instead of 7x2. Nothing
+   to change in code; the "Auto" placeholder is still right. If the form explains the automatic
+   grid, say "3x3 for animated sheets". FileSushi's tests use explicit grids (`TINY_ANIMATED`) and
+   pin no hashes, so they're unaffected.
+5. **Short clips:** an animated sheet of a video shorter than its clip length (2 s by default)
+   but at least 1 s long now succeeds with one tile of the whole video, where it raised
+   `MediaTooShortError` ("This video is too short for an animated contact sheet."). Under 1 s
+   still raises it.
+6. **Lossless trims with subtitles now succeed.** `video.trim` with a `CopyTrimConfig` converts
+   text subtitles the container can't hold (MP4 `mov_text` to SRT for MKV; SRT, ASS or WebVTT to
+   `mov_text` for MP4 and MOV; to WebVTT for WebM) instead of raising `InvalidOptionsError` ("This
+   video can't be trimmed to MKV without re-encoding. Try MP4 instead."). No FileSushi code or test
+   depends on the old error (checked 2026-10-20). `TrimParams` needs nothing new; "MP4 → MKV" with
+   no end is now a lossless remux that keeps every stream, if you want to offer one.
+7. **New tool: preview GIF / WebP (optional, when you want it).** `sashimi.video.preview(src, dst,
+   VIDEO_PREVIEW.from_params(params, target=target))`, `target` `gif` or `webp`. It joins
+   `samples` clips (default 5, at most 10) of `sample_duration` seconds (default 2) from across the
+   video, skipping `start_offset_percent`/`end_offset_percent` (10/10), scaled to `max_height` (360)
+   and optionally `max_width`, at `fps` (15), optionally centre-cropped with `crop` `"9:16"` or
+   `"1:1"`; WebP adds `quality` (75). The clips' total is at most 30 s (`InvalidOptionsError`
+   "Previews can be at most 30 seconds long. Use fewer clips or shorter ones."). A params class
+   with `upstream = VIDEO_PREVIEW` covers it; models in §4. Sandbox numbers are in §10; at most two
+   ffmpeg processes run, whatever the clip count.
+8. **New tool: favicon pack (optional; the owner's "Full favicon pack (.zip)" next to "ICO
+   file").** `sashimi.image.favicon_pack(src, dst, FaviconPackConfig.from_params(params),
+   max_pixels=IMAGE_MAX_PIXELS)` writes a .zip (`application/zip`; FileSushi's output name would be
+   `…favicons.zip` or similar) with `favicon.ico` (16, 32, 48 by default, `ico_sizes`), PNGs at 16,
+   32, 48, 180, 192 and 512 px, `site.webmanifest` and `favicon.html`. The 180 px Apple touch icon
+   is filled with `background_color` (default white). Optional `name`, `short_name` (single line,
+   at most 100 characters), `theme_color` and `manifest_background_color` go into the manifest
+   (and `theme_color` into the HTML); they're written with `json` and escaped HTML, so user text
+   can't break either file. Same input and config, same bytes. Paths inside are relative. A params
+   class with `upstream = FaviconPackConfig` covers it; model in §4.
+9. **Renamed fields: none.** `sashimi.config` renamed nothing. The CLI renamed flags (`thumbs
+   --duration` is `--clip-length`, `-o` is the output path), which FileSushi doesn't use. The
+   `IcoConfig.fit` description now says "a square" rather than "a transparent square", and the
+   animated sheets' `cols`, `rows` and `sample_duration` descriptions mention the new defaults; if
+   your forms show model descriptions, they change with them.
+10. **Nothing else.** Behaviour FileSushi gets for free:
+   - a missing or broken ffprobe or ffmpeg in the worker image raises `BinaryNotFoundError`
      (a `ProcessingError`), so the worker logs "Conversion failed" and writes no `error.txt`.
      0.5.1 raised `UnsupportedMediaError`, telling the user "This file doesn't look like … we can
      read." about a deployment fault;
    - `sashimi.__version__`, which the worker logs, is `0.6.0`;
    - the package metadata names "The FileSushi Authors <admin@filesushi.com>", licence
-     `Apache-2.0` (PEP 639), and `github.com/filesushi/sashimi`.
+     `Apache-2.0` (PEP 639), and `github.com/filesushi/sashimi`;
+   - the batch API (`sashimi.api`) and the CLI changed a lot (one naming policy, 4-tuple results,
+     one JSON report), but FileSushi uses neither.
 
 ## 2. What sashimi now pins for FileSushi
 
@@ -58,6 +111,10 @@ beyond field names, defaults and bounds:
 - the exact `KEYFRAME_NOTE` text;
 - `MediaTooLargeError(user_message, detail=…)`, and the same constructor and `.detail` on every
   `UserInputError` subclass (worker `:104,185`).
+- new in this round: `VIDEO_PREVIEW` behaves like the other families (`key`, `model_for`, the
+  `Le` rule on every bounded number); `IcoConfig.background_color` defaults to `None`;
+  `FaviconPackConfig.background_color` to white; `FAVICON_PNG_SIZES` and `MAX_PREVIEW_SAMPLES`;
+  animated sheets keep `"auto"` as the `cols` default.
 
 The user messages FileSushi's tests assert ("Unknown option: quality.", "This file doesn't look
 like a video we can read.") were already pinned by `tests/core/test_sheet_guards.py` and
@@ -108,11 +165,12 @@ name), `models` and `targets`. Everything invalid raises `InvalidOptionsError`.
 | `VIDEO_TRANSFORM` | `target`: mp4 (default), webm | `Mp4TransformConfig`, `WebmTransformConfig` |
 | `VIDEO_TRIM` | `container` (mkv, mp4, webm, mov; required) and `accurate` (default false) | `CopyTrimConfig` unless accurate; then `Vp9TrimConfig` for webm, `H264TrimConfig` otherwise |
 | `AUDIO_CONVERT` | `target`: mp3, m4a, ogg, wav, flac | `Mp3AudioConfig`, `M4aAudioConfig`, `OggAudioConfig`, `WavAudioConfig`, `FlacAudioConfig` |
+| `VIDEO_PREVIEW` | `target`: gif, webp (new in 0.6.0) | `GifPreviewConfig`, `WebpPreviewConfig` |
 | `CONTACT_SHEET` | `animated` (default false), then `target` (still: jpeg default, png, webp; animated: webp default, gif) | `JpegSheetConfig`, `PngSheetConfig`, `WebpSheetConfig`, `AnimatedWebpSheetConfig`, `AnimatedGifSheetConfig` |
-| — | — | `IcoConfig.from_params(params)` |
+| — | — | `IcoConfig.from_params(params)`, `FaviconPackConfig.from_params(params)` (new in 0.6.0) |
 
 Union aliases for type hints: `ImageConvertConfig`, `ImageResizeConfig`, `VideoConvertConfig`,
-`TransformConfig`, `TrimConfig`, `AudioConvertConfig`, `StillSheetConfig`,
+`TransformConfig`, `TrimConfig`, `PreviewConfig`, `AudioConvertConfig`, `StillSheetConfig`,
 `AnimatedSheetConfig`, `SheetConfig`. Every model also keeps `Model.from_params(params)`.
 
 ```python
@@ -138,10 +196,12 @@ VIDEO_CONVERT.from_params({"duration_seconds": 31}, target="gif")
 | `MP3_SAMPLE_RATES` | (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000) | what `Mp3AudioConfig.sample_rate` accepts (new in 0.6.0) |
 | `AAC_SAMPLE_RATES` | the MP3 rates plus 64000, 88200, 96000 | what `M4aAudioConfig.sample_rate` accepts (new in 0.6.0) |
 | `OPUS_SAMPLE_RATES` | (8000, 12000, 16000, 24000, 48000) | what `OggAudioConfig.sample_rate` accepts |
+| `MAX_PREVIEW_SAMPLES` | 10 | most clips in a preview (new in 0.6.0) |
+| `FAVICON_PNG_SIZES` | (16, 32, 48, 180, 192, 512) | the PNG sizes in a favicon pack (new in 0.6.0) |
 | `KEYFRAME_NOTE` | "Trimming without re-encoding is instant and keeps the original quality, but cuts can only land on keyframes, so your clip may start a moment before the time you chose." | |
 
 Also exported: `ParamsModel`, `ConfigFamily`, `RGB`, `RGBA`, `parse_color`, `Resample`,
-`X264Preset`, `GridValue`.
+`X264Preset`, `GridValue`, `PreviewCrop`.
 
 ### Every model: fields, bounds, defaults
 
@@ -302,6 +362,39 @@ An MP4 (H.264 + AAC) video.
 | `preset` | ultrafast / superfast / veryfast / faster / fast / medium / slow / slower / veryslow |  | `"veryfast"` | Slower presets give smaller files. |
 | `audio_bitrate_kbps` | int | ≥ 32, ≤ 512 | `128` | AAC audio bitrate in kb/s. |
 | `mute` | bool |  | `False` | Drop the audio track. |
+
+#### `GifPreviewConfig` (`target`='gif')
+
+A GIF preview: short clips sampled from across a video, played one after another. No sound.
+
+| Field | Type | Bounds | Default | Description |
+|---|---|---|---|---|
+| `samples` | int | ≥ 1, ≤ 10 | `5` | How many clips to take from across the video. Short videos get fewer, so clips never overlap. |
+| `sample_duration` | float | > 0, ≤ 10 | `2.0` | Length of each clip in seconds. |
+| `start_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `10.0` | Skip this much of the start of the video (intros, logos). |
+| `end_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `10.0` | Skip this much of the end of the video (credits). |
+| `max_height` | int | ≥ 64, ≤ 2160 | `360` | Scale down to at most this height. Never upscales; keeps the aspect ratio. |
+| `max_width` | int or None | ≥ 64, ≤ 3840 | `None` | Also scale down to at most this width. Blank sets no width limit. |
+| `crop` | none / 9:16 / 1:1 |  | `"none"` | Crop the centre of the picture to this shape first, e.g. "9:16" for vertical video sites. |
+| `fps` | int | ≥ 1, ≤ 30 | `15` | Frames per second. |
+| `loop` | bool |  | `True` | Loop forever, or play once. |
+
+#### `WebpPreviewConfig` (`target`='webp')
+
+An animated WebP preview: short clips sampled from across a video, played one after another. No sound.
+
+| Field | Type | Bounds | Default | Description |
+|---|---|---|---|---|
+| `samples` | int | ≥ 1, ≤ 10 | `5` | How many clips to take from across the video. Short videos get fewer, so clips never overlap. |
+| `sample_duration` | float | > 0, ≤ 10 | `2.0` | Length of each clip in seconds. |
+| `start_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `10.0` | Skip this much of the start of the video (intros, logos). |
+| `end_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `10.0` | Skip this much of the end of the video (credits). |
+| `max_height` | int | ≥ 64, ≤ 2160 | `360` | Scale down to at most this height. Never upscales; keeps the aspect ratio. |
+| `max_width` | int or None | ≥ 64, ≤ 3840 | `None` | Also scale down to at most this width. Blank sets no width limit. |
+| `crop` | none / 9:16 / 1:1 |  | `"none"` | Crop the centre of the picture to this shape first, e.g. "9:16" for vertical video sites. |
+| `fps` | int | ≥ 1, ≤ 30 | `15` | Frames per second. |
+| `loop` | bool |  | `True` | Loop forever, or play once. |
+| `quality` | int | ≥ 0, ≤ 100 | `75` | Lossy quality, 0 (smallest) to 100 (best). |
 
 #### `Mp4TransformConfig` (`target`='mp4')
 
@@ -504,8 +597,8 @@ An animated contact sheet saved as WebP: every tile plays a short clip.
 
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
-| `cols` | int or auto | ≥ 1, ≤ 20 | `"auto"` | Columns, 1-20, or "auto" to choose from the video's aspect ratio. |
-| `rows` | int or auto | ≥ 1, ≤ 20 | `"auto"` | Rows, 1-20, or "auto". |
+| `cols` | int or auto | ≥ 1, ≤ 20 | `"auto"` | Columns, 1-20, or "auto": 3, or 4 for portrait videos. |
+| `rows` | int or auto | ≥ 1, ≤ 20 | `"auto"` | Rows, 1-20, or "auto": 3, or 2 for portrait videos. |
 | `gap` | int | ≥ 0, ≤ 100 | `5` | Pixels between tiles. |
 | `start_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `7.0` | Skip this much of the start of the video (credits, logos). |
 | `end_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `7.0` | Skip this much of the end of the video (credits). |
@@ -519,7 +612,7 @@ An animated contact sheet saved as WebP: every tile plays a short clip.
 | `timestamp_bg_color` | colour |  | #000000b4 | Time label background, with alpha. |
 | `timestamp_text_color` | colour |  | #ffffff | Time label text colour. |
 | `width` | int | ≥ 320, ≤ 3840 | `1280` | Approximate width of the sheet in pixels (tiles are rounded to even sizes). |
-| `sample_duration` | float | > 0.0, ≤ 10.0 | `2.0` | Length of each tile's clip in seconds. |
+| `sample_duration` | float | > 0.0, ≤ 10.0 | `2.0` | Length of each tile's clip in seconds. A video shorter than this gets one tile of the whole video. |
 | `fps` | int | ≥ 1, ≤ 30 | `12` | Frames per second. |
 | `loop` | bool |  | `True` | Loop forever, or play once. |
 | `quality` | int | ≥ 1, ≤ 100 | `75` | 1 (smallest) to 100 (best). |
@@ -530,8 +623,8 @@ An animated contact sheet saved as GIF: every tile plays a short clip.
 
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
-| `cols` | int or auto | ≥ 1, ≤ 20 | `"auto"` | Columns, 1-20, or "auto" to choose from the video's aspect ratio. |
-| `rows` | int or auto | ≥ 1, ≤ 20 | `"auto"` | Rows, 1-20, or "auto". |
+| `cols` | int or auto | ≥ 1, ≤ 20 | `"auto"` | Columns, 1-20, or "auto": 3, or 4 for portrait videos. |
+| `rows` | int or auto | ≥ 1, ≤ 20 | `"auto"` | Rows, 1-20, or "auto": 3, or 2 for portrait videos. |
 | `gap` | int | ≥ 0, ≤ 100 | `5` | Pixels between tiles. |
 | `start_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `7.0` | Skip this much of the start of the video (credits, logos). |
 | `end_offset_percent` | float | ≥ 0.0, ≤ 100.0 | `7.0` | Skip this much of the end of the video (credits). |
@@ -545,24 +638,43 @@ An animated contact sheet saved as GIF: every tile plays a short clip.
 | `timestamp_bg_color` | colour |  | #000000b4 | Time label background, with alpha. |
 | `timestamp_text_color` | colour |  | #ffffff | Time label text colour. |
 | `width` | int | ≥ 320, ≤ 3840 | `1280` | Approximate width of the sheet in pixels (tiles are rounded to even sizes). |
-| `sample_duration` | float | > 0.0, ≤ 10.0 | `2.0` | Length of each tile's clip in seconds. |
+| `sample_duration` | float | > 0.0, ≤ 10.0 | `2.0` | Length of each tile's clip in seconds. A video shorter than this gets one tile of the whole video. |
 | `fps` | int | ≥ 1, ≤ 30 | `12` | Frames per second. |
 | `loop` | bool |  | `True` | Loop forever, or play once. |
 
 #### `IcoConfig`
 
+A multi-size .ico (favicon). Sizes are square icon edges in pixels.
+
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
 | `sizes` | tuple of int |  | `(16, 32, 48, 64, 128, 256)` | Icon sizes to include, 16 to 256 pixels. |
-| `fit` | pad / crop |  | `"pad"` | Non-square images: centre them on a transparent square ("pad") or crop the centre ("crop"). |
+| `fit` | pad / crop |  | `"pad"` | Non-square images: centre them on a square ("pad") or crop the centre ("crop"). |
 | `resample` | lanczos / bicubic / bilinear / hamming / box / nearest |  | `"lanczos"` | Filter used when scaling. |
+| `background_color` | colour or None |  | `None` | Fill transparent areas (and the padding) with this colour. Blank keeps them transparent. |
+
+#### `FaviconPackConfig`
+
+A favicon pack (.zip): ``favicon.ico``, PNG icons at 16, 32, 48, 180, 192 and 512 pixels, a ``site.webmanifest`` and ``favicon.html``, the ``<head>`` tags that use them.
+
+| Field | Type | Bounds | Default | Description |
+|---|---|---|---|---|
+| `ico_sizes` | tuple of int |  | `(16, 32, 48)` | Sizes inside favicon.ico, 16 to 256 pixels. |
+| `fit` | pad / crop |  | `"pad"` | Non-square images: centre them on a square ("pad") or crop the centre ("crop"). |
+| `resample` | lanczos / bicubic / bilinear / hamming / box / nearest |  | `"lanczos"` | Filter used when scaling. |
+| `background_color` | colour |  | #ffffff | Fills the Apple touch icon (180 px), which must be opaque because iOS shows transparency as black. |
+| `name` | text |  | `""` | The web app's name in site.webmanifest. Blank leaves it out. |
+| `short_name` | text |  | `""` | A short name for home screens (about 12 characters). Blank leaves it out. |
+| `theme_color` | colour or None |  | `None` | Browser UI colour, in the manifest and a theme-color tag. Blank leaves it out. |
+| `manifest_background_color` | colour or None |  | `None` | Splash screen colour in the manifest. Blank leaves it out. |
 
 ## 5. Worker shim
 
 ```python
 import sashimi
 from sashimi.config import (
-    AUDIO_CONVERT, CONTACT_SHEET, IMAGE_CONVERT, IMAGE_RESIZE, VIDEO_CONVERT, VIDEO_TRANSFORM, VIDEO_TRIM, IcoConfig,
+    AUDIO_CONVERT, CONTACT_SHEET, IMAGE_CONVERT, IMAGE_RESIZE, VIDEO_CONVERT, VIDEO_PREVIEW, VIDEO_TRANSFORM,
+    VIDEO_TRIM, FaviconPackConfig, IcoConfig,
 )
 
 IMAGE_MAX_PIXELS = 24_000_000
@@ -575,8 +687,12 @@ def run_tool(tool_id, src, dst, params, job):
         sashimi.image.convert(src, dst, IMAGE_RESIZE.from_params(params, target=target), max_pixels=IMAGE_MAX_PIXELS)
     elif tool_id in ICO_TOOLS:
         sashimi.image.to_ico(src, dst, IcoConfig.from_params(params), max_pixels=IMAGE_MAX_PIXELS)
+    elif tool_id in FAVICON_PACK_TOOLS:
+        sashimi.image.favicon_pack(src, dst, FaviconPackConfig.from_params(params), max_pixels=IMAGE_MAX_PIXELS)
     elif tool_id in VIDEO_TOOLS:
         sashimi.video.convert(src, dst, VIDEO_CONVERT.from_params(params, target=target))
+    elif tool_id in PREVIEW_TOOLS:
+        sashimi.video.preview(src, dst, VIDEO_PREVIEW.from_params(params, target=target))
     elif tool_id in TRANSFORM_TOOLS:
         sashimi.video.transform(src, dst, VIDEO_TRANSFORM.from_params(params, target=target))
     elif tool_id in TRIM_TOOLS:
@@ -587,6 +703,9 @@ def run_tool(tool_id, src, dst, params, job):
         sashimi.sheets.render(src, dst, CONTACT_SHEET.from_params(params, target=target),
                               display_name=job.get("filename_clean"))
 ```
+
+`FAVICON_PACK_TOOLS` and `PREVIEW_TOOLS` are the two optional new tools (§1 items 7-8); the
+rest is what the worker does today.
 
 What this lets you delete: `video_config`, `audio_config` (§6), `make_sheet` (the sheet family
 takes `animated` itself; `sheets.render` takes either config), `check_sheet_shape` (§8) and
@@ -631,6 +750,13 @@ New in 0.6.0:
 
 | Class | When | `user_message` |
 |---|---|---|
+| `InvalidOptionsError` | preview clips totalling over 30 s (`samples` × `sample_duration`) | Previews can be at most 30 seconds long. Use fewer clips or shorter ones. |
+| `InvalidOptionsError` | a GIF preview whose frames would need more than `MAX_FRAME_BYTES` (400 MB), e.g. 10 × 3 s at 30 fps and 720 px | These settings would make the preview too large to render as a GIF. Use a smaller size, a lower frame rate, or fewer or shorter clips. |
+| `MediaTooShortError` | a preview of a video under 0.5 s | This video is too short for a preview. |
+| `UnsupportedMediaError` | a preview where no clip could be decoded | We couldn't read any frames from this video. The file may be damaged. |
+| `InvalidOptionsError` | `FaviconPackConfig` `name`/`short_name` with a line break or over 100 characters | Invalid value for name: must be a single line of text. / … string should have at most 100 characters. |
+| (no longer raised) | a copy trim of a file with text subtitles the container can't hold, e.g. MP4 `mov_text` into MKV (was `InvalidOptionsError` "This video can't be trimmed to MKV without re-encoding. Try MP4 instead.") | the subtitles are converted |
+| (no longer raised) | an animated sheet of a video shorter than `sample_duration` but at least 1 s (was `MediaTooShortError`) | one tile of the whole video |
 | `InvalidOptionsError` | MP3 `sample_rate` not in `MP3_SAMPLE_RATES`, e.g. 96000 (was `ProcessingError` from ffmpeg) | Invalid value for sample_rate: input should be 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100 or 48000. |
 | `InvalidOptionsError` | M4A `sample_rate` not in `AAC_SAMPLE_RATES`, e.g. 192000 (was `ProcessingError`) | Invalid value for sample_rate: input should be 8000, 11025, …, 88200 or 96000. |
 | `BinaryNotFoundError` (a `ProcessingError`) | ffprobe or ffmpeg missing, or can't be started (was `UnsupportedMediaError` "This file doesn't look like … we can read." for a configured path that didn't work, and a bare `OSError` for one that wasn't executable) | none: log it |
@@ -667,6 +793,14 @@ VP8/VP9/AV1, Opus/Vorbis, WebVTT and attachments. Unknown codecs pass for MKV/MP
 decides), so the check never refuses a file that would have worked.
 
 ## 8. Contact sheets
+
+- **New in 0.6.0:** with `cols`/`rows` `"auto"`, animated sheets use their own grid, 3x3, or 4x2
+  for portrait videos (display aspect ratio under 0.95); explicit numbers win per dimension as
+  before. Still sheets keep their table, except that its first step moved from 0.55 to 0.6, so
+  9:16 (0.5625) is 8x2 instead of 7x2. Animated time labels are padded by 4 px with the text
+  centred on a fixed height, 4 px in from the tile's corner. A video shorter than
+  `sample_duration` (and at least 1 s) gets a single tile. Measured on 2026-10-19 for the brief:
+  3x3 took 10.4 s against 25.1 s for the old 6x5, with 426 px tiles against about 205 px.
 
 - `sheets.render(src, dst, config, *, display_name=None, header_font=None, timestamp_font=None,
   emoji_dir=None, max_workers=None, scratch_dir=None, on_progress=None)` renders either kind.
@@ -721,31 +855,44 @@ those, cap the pixels for them lower, or the timeout higher. HEIC input wasn't m
 
 ## 10. Measured results (sandbox)
 
-`sh scripts/sandbox_check.sh --skip-long` passed all 25 of its jobs on 2026-10-19 at 0.6.0 (and
-on the 0.5.1 tree just before the 0.6.0 changes), under `--network none --read-only --pids-limit
-128 --cpus 2 --memory 1g`: outputs valid, nothing written outside `/vault/output`, `/tmp` empty, no
-network attempts. Image size 260 MB. Output sizes matched the 0.5.1 run job for job. The full
-script has a 26th job, the 10-minute animated-sheet budget case (`sheet-animated-long`), which
-`--skip-long` leaves out; it last passed at 0.5.1 (18.5 s, 184 MB, 41 pids) and its code path is
-unchanged. Outside the sandbox, 29 conversions covering every target were hashed before and after
-the 0.6.0 changes and were byte-identical.
+`sh scripts/sandbox_check.sh --skip-long` passed all 30 of its jobs on 2026-10-20 at the final
+0.6.0 tree, under `--network none --read-only --pids-limit 128 --cpus 2 --memory 1g`: outputs
+valid, nothing written outside `/vault/output`, `/tmp` empty, no network attempts. Image size
+260 MB. The script gained five jobs this round: two previews, the favicon pack, ICO with a
+background and a whole-file remux. The full script's 31st job, the 10-minute animated-sheet
+budget case (`sheet-animated-long`), which `--skip-long` leaves out, last passed at 0.5.1; with
+the 3x3 default it now decodes 9 clips instead of 30. Outside the sandbox, 34 conversions were
+hashed before and after this round's changes: the 28 that the brief doesn't change were
+byte-identical, and the 6 contact sheets it does change differ as expected (§1 items 4-5).
 
-| Job (0.6.0, 2026-10-19) | Time | Peak memory | Peak pids |
+| Job (0.6.0, 2026-10-20) | Time | Peak memory | Peak pids |
 |---|---|---|---|
-| Video → GIF (defaults) | 5.0 s | 151 MB | 12 |
-| GIF → WebM | 0.9 s | 89 MB | 11 |
-| WebM, whole 103 s video | 25.1 s | 250 MB | 16 |
-| MP4 at 640 px, whole | 16.1 s | 94 MB | 19 |
-| Video → animated WebP | 2.1 s | 63 MB | 12 |
-| Trim 10 s, copy / accurate | 0.3 / 2.9 s | 46 / 156 MB | 6 / 18 |
-| Trim into the wrong container (`error.txt`) | 0.1 s | 41 MB | 7 |
-| Rotate 90° (103 s) | 34.4 s | 189 MB | 18 |
-| Still sheet / animated sheet (ref clip) | 11.8 / 16.8 s | 101 / 169 MB | 28 / 41 |
-| Video → MP3; audio → M4A / WAV / OGG / FLAC | 1.5; 4.0 / 1.2 / 3.7 / 0.5 s | ≤ 72 MB | 9 |
-| Images (12 MP JPEG → PNG, HEIC → JPEG, …) | ≤ 0.6 s | ≤ 155 MB | ≤ 7 |
+| Video → GIF (defaults) | 4.4 s | 151 MB | 12 |
+| GIF → WebM | 0.7 s | 90 MB | 11 |
+| WebM, whole 103 s video | 27.8 s | 251 MB | 16 |
+| MP4 at 640 px, whole | 17.0 s | 95 MB | 19 |
+| Video → animated WebP | 2.0 s | 63 MB | 12 |
+| **Preview GIF (defaults: 5 × 2 s, 360 px, 15 fps)** | 4.6 s | 225 MB | 30 |
+| **Preview WebP, 10 clips, 9:16 crop** | 8.5 s | 74 MB | 30 |
+| **Remux 103 s MKV → MOV** | 0.5 s | 73 MB | 6 |
+| Trim 10 s, copy / accurate | 0.3 / 2.7 s | 46 / 157 MB | 6 / 18 |
+| Trim into the wrong container (`error.txt`) | 0.1 s | 41 MB | 6 |
+| Rotate 90° (103 s) | 30.1 s | 189 MB | 18 |
+| Still sheet / animated sheet (ref clip; animated is now 3x3) | 8.1 / 7.5 s | 101 / 189 MB | 28 / 41 |
+| Video → MP3; audio → M4A / WAV / OGG / FLAC | 1.4; 2.9 / 1.1 / 3.6 / 0.5 s | ≤ 72 MB | 9 |
+| Images (12 MP JPEG → PNG, HEIC → JPEG, …) | ≤ 0.6 s | ≤ 156 MB | ≤ 7 |
+| **ICO with background / favicon pack (12 MP photo)** | 0.1 / 3.4 s | 30 / 206 MB | 7 / 6 |
+
+A first version of the preview opened the video once per clip in a single ffmpeg run; the
+sandbox measured 80 pids for 5 clips and hit the 128 limit at 10. The shipped version decodes
+one clip at a time in a single-threaded ffmpeg and streams the frames into one encoder, so it
+peaks at 30 pids whatever the clip count. Outside the sandbox (python3.15, `max_workers=2`, a
+20 s 720p clip) the default animated sheet took 4.7-5.4 s against 8.7-9.1 s for the old 6x5,
+with half the ffmpeg CPU.
 
 Timings vary by about ±30% between runs on this host; compare jobs with each other rather than
-with earlier hand-backs.
+with earlier hand-backs. The audio fixtures are unseeded noise, so their output sizes differ by
+a few KB between sandbox runs.
 
 ## 11. Design decisions from 0.5.0
 
@@ -778,8 +925,12 @@ These answered FileSushi's 0.5.0 release brief (2026-10-12) and still hold.
 
 0.6.0 (listed in `CHANGELOG.md`, with upgrade steps in `MIGRATION.md`): the MP3 and M4A
 `sample_rate` fields are `Literal` choices instead of 8000-192000 ranges (§1), and a missing or
-broken ffprobe/ffmpeg raises `BinaryNotFoundError` instead of `UnsupportedMediaError` (§1).
-Added: `MP3_SAMPLE_RATES` and `AAC_SAMPLE_RATES`.
+broken ffprobe/ffmpeg raises `BinaryNotFoundError` instead of `UnsupportedMediaError` (§1). The
+contact-sheet defaults and short clips (§1 items 4-5) and copy trims with subtitles (§1 item 6)
+change outputs or errors. Everything else that broke is in `sashimi.api` and the CLI, which
+FileSushi doesn't use. Added for FileSushi: `MP3_SAMPLE_RATES`, `AAC_SAMPLE_RATES`,
+`IcoConfig.background_color`, `VIDEO_PREVIEW` with `video.preview`, `FaviconPackConfig` with
+`image.favicon_pack`, `MAX_PREVIEW_SAMPLES` and `FAVICON_PNG_SIZES`.
 
 0.5.0: the 0.4 config classes are replaced by per-target models and families; fields that a
 target ignored now raise "Unknown option"; the `effective_*`/`encoder_target` properties,

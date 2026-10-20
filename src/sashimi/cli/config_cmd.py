@@ -27,8 +27,10 @@ class Operation(str, Enum):
     convert = "convert"
     resize = "resize"
     rotate = "rotate"
+    favicon = "favicon"
     extract = "extract"
     thumbs = "thumbs"
+    preview = "preview"
 
 
 GlobalScope = Annotated[
@@ -48,8 +50,8 @@ def _parse_value(text: str) -> Any:
 
 def _split_key(key: str) -> tuple[str, str]:
     section, _, option = key.partition(".")
-    if not option or section not in ("global", "thumbs", "animated_thumbs"):
-        fail(f"{key!r}: use section.option, where section is thumbs, animated_thumbs or global.")
+    if not option or section not in ("thumbs", "animated_thumbs"):
+        fail(f"{key!r}: use section.option, where section is thumbs or animated_thumbs.")
     return section, option
 
 
@@ -63,8 +65,6 @@ def _check(section: str, option: str, value: Any) -> None:
 
     if option not in settings.known_keys(section):
         fail(f"Unknown option {section}.{option}.")
-    if section == "global":
-        return
     if section == "thumbs" and option == "video_extensions":
         if not (isinstance(value, list) and all(isinstance(v, str) for v in value)):
             fail('video_extensions must be a list, e.g. [".mp4", ".mkv"].')
@@ -128,7 +128,7 @@ def set_(
     value: Annotated[str, typer.Argument(help="Value, e.g. 4, true, auto, '[\".mp4\"]'", show_default=False)],
     global_: GlobalScope = False,
 ):
-    """Set a default, e.g. [cyan]sashimi config set thumbs.static_width 1920[/cyan]."""
+    """Set a default, e.g. [cyan]sashimi config set thumbs.width 1920[/cyan] or [cyan]sashimi config set animated_thumbs.cols 4[/cyan]."""
     from sashimi.cli import settings
 
     section, option = _split_key(key)
@@ -209,7 +209,7 @@ def defaults(
             option = row["option"] or name
             if row["option"] and row["option"].split("/")[0] != "--" + name.replace("_", "-"):
                 option += f" [dim]{name}[/dim]"
-            default = escape(_defaults.format_value(row["default"], name))
+            default = escape(_defaults.format_value(row["default"], name, operation.value))
             if "model_default" in row:
                 default += f" [dim](Python: {escape(_defaults.format_value(row['model_default'], name))})[/dim]"
             if "sashimi_toml" in row:

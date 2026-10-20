@@ -28,6 +28,9 @@ MAX_FRAME_BYTES = 400 * 1024 * 1024
 MIN_TILE_SIZE = 16
 """Smallest contact sheet tile, in pixels on either side; layouts that need smaller tiles are refused."""
 
+MAX_PREVIEW_SAMPLES = 10
+"""Most clips a preview stitches together."""
+
 MP3_SAMPLE_RATES = (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000)
 """The sample rates the MP3 encoder (LAME) accepts, in Hz."""
 AAC_SAMPLE_RATES = (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200, 96000)
@@ -45,4 +48,5 @@ GIF_TOO_LONG = f"GIFs can be at most {MAX_GIF_SECONDS} seconds long."
 WEBP_TOO_LONG = f"Animated WebPs can be at most {MAX_GIF_SECONDS} seconds long."
 VIDEO_CLIP_TOO_LONG = f"Video clips can be at most {MAX_VIDEO_SECONDS // 60} minutes long."
 AUDIO_CLIP_TOO_LONG = f"Audio clips can be at most {MAX_AUDIO_SECONDS // 60} minutes long."
+PREVIEW_TOO_LONG = f"Previews can be at most {MAX_GIF_SECONDS} seconds long. Use fewer clips or shorter ones."
 TILES_TOO_SMALL = "These settings would make the contact sheet's tiles too small. Use fewer columns or a wider sheet."

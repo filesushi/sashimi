@@ -3,19 +3,22 @@
 
 import pathlib
 import re
-from typing import Literal
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from typing import Any, Literal
 
-from sashimi.config import KEYFRAME_NOTE, VIDEO_TRIM
+from sashimi.api._batch import VIDEO_EXTENSIONS, FileProgress, PathInput, YieldType, output_name, run_batch
+from sashimi.api._consume import consume_generator
+from sashimi.config import KEYFRAME_NOTE, VIDEO_TRIM, CopyTrimConfig, TrimConfig
 from sashimi.core.probe import probe
 from sashimi.core.video import trim
-from sashimi.errors import SashimiError, UserInputError
+from sashimi.errors import InvalidOptionsError, SashimiError
 
-__all__ = ["extract", "parse_time_to_seconds"]
+__all__ = ["extract", "extract_generator", "parse_time_to_seconds"]
 
 Container = Literal["mkv", "mp4", "webm", "mov"]
 
 _LONGER_THAN_ASKED = 0.5
-_ACCURATE_HINT = "Pass --accurate to re-encode for an exact cut."
+_ACCURATE_HINT = "Use an accurate cut to start exactly on time."
 
 _CONTAINER_FOR_SUFFIX: dict[str, Container] = {
     ".mkv": "mkv",
@@ -24,7 +27,7 @@ _CONTAINER_FOR_SUFFIX: dict[str, Container] = {
     ".webm": "webm",
     ".mov": "mov",
 }
-_CONTAINER_FOR_DEMUXER: dict[str, Container] = {"matroska": "mkv", "webm": "webm", "mov": "mov", "mp4": "mp4"}
+_TIME_HELP = "Use seconds (90), units (1m30s, 1h22m) or a clock time (00:01:30)."
 
 
 def parse_time_to_seconds(time_str: str) -> float:
@@ -34,113 +37,159 @@ def parse_time_to_seconds(time_str: str) -> float:
     - Colon notation: '00:24:09', '24:09', '1:22:45.50'
     - Unit suffixes: '42s', '1h22m', '24 min 09 s', '1.5h'
     - Plain numbers: '1250' (seconds)
+
+    Raises :class:`~sashimi.errors.InvalidOptionsError` for anything else.
     """
     clean_str = time_str.strip().lower()
     if not clean_str:
-        raise ValueError("Time offset string cannot be empty.")
+        raise InvalidOptionsError(f"A time is missing. {_TIME_HELP}")
+    invalid = InvalidOptionsError(f"{time_str.strip()!r} isn't a time. {_TIME_HELP}")
 
     if ":" in clean_str:
         parts = clean_str.split(":")
-        if len(parts) == 3:
-            h, m, s = parts
-            return int(h) * 3600 + int(m) * 60 + float(s)
-        if len(parts) == 2:
-            m, s = parts
-            return int(m) * 60 + float(s)
-        raise ValueError(f"Unrecognized colon time scheme: '{time_str}'")
+        try:
+            if len(parts) == 3:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+            if len(parts) == 2:
+                return int(parts[0]) * 60 + float(parts[1])
+        except ValueError:
+            raise invalid from None
+        raise invalid
 
-    matches = re.findall(r"(\d+(?:\.\d+)?)\s*(hours|hour|h|minutes|minute|min|m|seconds|second|s)", clean_str)
-    if matches:
+    unit = r"(\d+(?:\.\d+)?)\s*(hours|hour|h|minutes|minute|min|m|seconds|second|s)"
+    if re.fullmatch(rf"(?:{unit}\s*)+", clean_str):
         total_seconds = 0.0
-        for value, unit in matches:
-            val = float(value)
-            if unit in ("h", "hour", "hours"):
-                total_seconds += val * 3600
-            elif unit in ("m", "min", "minute", "minutes"):
-                total_seconds += val * 60
-            else:
-                total_seconds += val
+        for value, name in re.findall(unit, clean_str):
+            scale = 3600 if name.startswith("h") else 60 if name.startswith("m") else 1
+            total_seconds += float(value) * scale
         return total_seconds
 
     try:
         return float(clean_str)
-    except ValueError as e:
-        raise ValueError(f"Could not interpret format of time string: '{time_str}'") from e
+    except ValueError:
+        raise invalid from None
 
 
-def _container_for(input_path: pathlib.Path) -> Container:
-    if container := _CONTAINER_FOR_SUFFIX.get(input_path.suffix.lower()):
-        return container
-    names = probe(input_path).container_names
-    for demuxer, container in _CONTAINER_FOR_DEMUXER.items():
-        if demuxer in names:
-            return container
-    return "mkv"
+def _seconds(value: str | float | None) -> float | None:
+    if value is None or isinstance(value, (int, float)):
+        return value
+    return parse_time_to_seconds(value)
 
 
-def extract(
-    input_path: str | pathlib.Path,
-    start: str | float,
-    end: str | float,
-    output_path: str | pathlib.Path | None = None,
-    force: bool = False,
+def _clip_message(config: TrimConfig, source: pathlib.Path, output: pathlib.Path) -> str:
+    """The success message: the clip's real length, with the keyframe note when a copy came out long."""
+    requested = config.length
+    if not isinstance(config, CopyTrimConfig):
+        if requested is None:
+            return f"Extracted from {config.start_seconds:g}s to the end: {{name}}"
+        return f"Extracted {requested:.1f}s to {{name}}"
+    try:
+        actual = probe(output).duration
+        if requested is None and config.start_seconds > 0:
+            source_length = probe(source).duration
+            requested = source_length - config.start_seconds if source_length else None
+    except SashimiError:
+        actual = None
+    if actual is None:
+        return "Extracted to {name}"
+    message = f"Extracted {actual:.1f}s to {{name}}"
+    if requested is not None and actual > requested + _LONGER_THAN_ASKED:
+        message += f" ({requested:.1f}s requested). {KEYFRAME_NOTE} {_ACCURATE_HINT}"
+    return message
+
+
+def extract_generator(
+    paths: PathInput | Sequence[PathInput],
+    start: str | float | None = None,
+    end: str | float | None = None,
     *,
+    duration: str | float | None = None,
+    container: Container | None = None,
     accurate: bool = False,
     crf: int | None = None,
     preset: str | None = None,
     speed: int | None = None,
     audio_bitrate_kbps: int | None = None,
     mute: bool = False,
+    recursive: bool = False,
+    force: bool = False,
     max_workers: int | None = None,
-) -> tuple[str, str, pathlib.Path]:
+    extensions: Iterable[str] = VIDEO_EXTENSIONS,
+    on_file_progress: FileProgress | None = None,
+    output: PathInput | None = None,
+    output_dir: PathInput | None = None,
+) -> Iterator[YieldType]:
     """
-    Cuts ``start``..``end`` out of a video. By default streams are copied: instant and lossless,
-    but the clip starts at the keyframe before ``start``. With ``accurate`` the clip is
-    re-encoded and starts exactly on time; the encoder options apply only then (see
-    :data:`~sashimi.config.VIDEO_TRIM`; ``preset`` is for H.264 and ``speed`` for WebM). Times are seconds or strings such as ``'1h22m'`` or ``'00:24:09'``. The output
-    defaults to ``<stem>_extracted<suffix>`` next to the input. Returns
-    ``(status, message, output_path)``; the message gives the clip's real length, and explains
-    keyframes when a copied clip came out longer than asked.
+    Cuts a section out of every video found (see :func:`sashimi.video.trim`), from `start`
+    (default the beginning) to `end`, or for `duration`; with neither, to the end of the video.
+    Times are seconds or strings such as ``'1h22m'`` or ``'00:24:09'``.
+
+    By default streams are copied: instant and lossless, but the clip starts at the keyframe at
+    or before `start`, and the success message explains when it came out longer than asked. With
+    `accurate` the clip is re-encoded and starts exactly on time; the encoder options apply only
+    then (``preset`` is for H.264 and ``speed`` for WebM; see :data:`~sashimi.config.VIDEO_TRIM`).
+
+    The container is `container`, or else `output`'s extension if it names one, or else the
+    input's (MKV for anything else). Each clip is written as ``<stem>.extracted.<ext>`` next to
+    its video, under `output_dir`, or to `output` for a single video. Invalid times raise
+    :class:`~sashimi.errors.InvalidOptionsError` before anything runs.
     """
-    source = pathlib.Path(input_path)
-    try:
-        start_secs = start if isinstance(start, (int, float)) else parse_time_to_seconds(start)
-        end_secs = end if isinstance(end, (int, float)) else parse_time_to_seconds(end)
-    except ValueError as err:
-        return ("error", f"Time Parsing Failure: {err}", source)
-    if start_secs >= end_secs:
-        return (
-            "error",
-            f"Invalid Bounds: Start time ({start_secs}s) cannot meet or exceed End time ({end_secs}s).",
-            source,
+    start_s, end_s, duration_s = _seconds(start), _seconds(end), _seconds(duration)
+    CopyTrimConfig.from_params(container="mkv", start_seconds=start_s, end_seconds=end_s, duration_seconds=duration_s)
+    encoding = {"crf": crf, "preset": preset, "speed": speed, "audio_bitrate_kbps": audio_bitrate_kbps}
+    if not accurate and (
+        used := [key for key, value in {**encoding, "mute": mute or None}.items() if value is not None]
+    ):
+        raise InvalidOptionsError(
+            f"{', '.join(used)} only {'applies' if len(used) == 1 else 'apply'} to an accurate cut."
         )
+    output_container = _CONTAINER_FOR_SUFFIX.get(pathlib.Path(output).suffix.lower()) if output is not None else None
 
-    target = pathlib.Path(output_path) if output_path else source.with_name(f"{source.stem}_extracted{source.suffix}")
-    if target.exists() and not force:
-        return ("exists", f"File already exists: {target.name}. Pass -f to overwrite.", target)
+    def container_for(source: pathlib.Path) -> Container:
+        return container or output_container or _CONTAINER_FOR_SUFFIX.get(source.suffix.lower(), "mkv")
 
-    try:
-        container = _CONTAINER_FOR_SUFFIX.get(target.suffix.lower()) or _container_for(source)
-        encoding = {"crf": crf, "preset": preset, "speed": speed, "audio_bitrate_kbps": audio_bitrate_kbps}
-        config = VIDEO_TRIM.from_params(
+    def config_for(source: pathlib.Path) -> TrimConfig:
+        return VIDEO_TRIM.from_params(
             encoding,
-            container=container,
-            start_seconds=start_secs,
-            end_seconds=end_secs,
+            container=container_for(source),
+            start_seconds=start_s,
+            end_seconds=end_s,
+            duration_seconds=duration_s,
             accurate=accurate,
-            mute=mute or None,
+            mute=(mute or None) if accurate else None,
         )
-        trim(source, target, config, max_workers=max_workers)
-    except UserInputError as e:
-        return ("error", e.user_message, target)
-    except SashimiError as e:
-        return ("error", f"FFmpeg execution failed: {str(e).splitlines()[0]}", target)
-    requested = end_secs - start_secs
-    try:
-        actual = probe(target).duration or requested
-    except SashimiError:
-        actual = requested
-    message = f"Extracted {actual:.1f}s segment ➔ {target.name}"
-    if actual > requested + _LONGER_THAN_ASKED:
-        message += f" ({requested:.1f}s requested). {KEYFRAME_NOTE} {_ACCURATE_HINT}"
-    return ("success", message, target)
+
+    def name_for(source: pathlib.Path, stem: str) -> str:
+        chosen = container_for(source)
+        keep = _CONTAINER_FOR_SUFFIX.get(source.suffix.lower()) == chosen
+        return output_name(stem, source.suffix if keep else chosen, "extracted")
+
+    def process(source: pathlib.Path, target: pathlib.Path, progress: Callable[[float, str], None] | None) -> str:
+        config = config_for(source)
+        trim(source, target, config, max_workers=max_workers, on_progress=progress)
+        return _clip_message(config, source, target)
+
+    return run_batch(
+        paths,
+        extensions=extensions,
+        recursive=recursive,
+        force=force,
+        name_for=name_for,
+        process=process,
+        success_message="Extracted to {name}",
+        on_file_progress=on_file_progress,
+        output=output,
+        output_dir=output_dir,
+    )
+
+
+def extract(
+    paths: PathInput | Sequence[PathInput],
+    start: str | float | None = None,
+    end: str | float | None = None,
+    *,
+    show_progress: bool = True,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Like :func:`extract_generator`, but runs to completion and returns a summary."""
+    return consume_generator(extract_generator(paths, start, end, **kwargs), show_progress, "Extracting", "extract")

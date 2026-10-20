@@ -32,6 +32,7 @@ def test_importing_config_loads_only_pydantic():
         (config.IMAGE_RESIZE, ("jpeg", "png", "webp", "gif", "bmp", "tiff")),
         (config.VIDEO_CONVERT, ("gif", "webp", "webm", "mp4")),
         (config.VIDEO_TRANSFORM, ("mp4", "webm")),
+        (config.VIDEO_PREVIEW, ("gif", "webp")),
         (config.VIDEO_TRIM, ("mkv", "mp4", "webm", "mov")),
         (config.AUDIO_CONVERT, ("mp3", "m4a", "ogg", "wav", "flac")),
         (config.CONTACT_SHEET, ("jpeg", "png", "webp", "gif")),
@@ -75,11 +76,12 @@ ALL_MODELS = {
         config.VIDEO_CONVERT,
         config.VIDEO_TRANSFORM,
         config.VIDEO_TRIM,
+        config.VIDEO_PREVIEW,
         config.AUDIO_CONVERT,
         config.CONTACT_SHEET,
     )
     for model in family.models
-} | {config.IcoConfig}
+} | {config.IcoConfig, config.FaviconPackConfig}
 
 
 @pytest.mark.parametrize("model", sorted(ALL_MODELS, key=lambda m: m.__name__), ids=lambda m: m.__name__)

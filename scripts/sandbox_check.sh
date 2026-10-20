@@ -5,7 +5,7 @@
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-IMAGE=sashimi-sandbox-check
+IMAGE=${SASHIMI_SANDBOX_IMAGE:-sashimi-sandbox-check}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 SKIP_LONG=0
@@ -69,12 +69,17 @@ run image-to-webp-lossless "$F/rgba.png"
 run image-to-gif "$F/rgba.png"
 run image-resize "$F/photo.jpg"
 run image-to-ico "$F/rgba.png"
+run image-to-ico-background "$F/rgba.png"
+run favicon-pack "$F/photo.jpg"
 run heic-to-jpeg "$F/photo.heic"
 run video-to-gif "$F/ref.mkv"
 run gif-to-webm "$WORK/out/video-to-gif/result.gif"
 run video-to-webm "$F/ref.mkv"
 run video-to-mp4-640 "$F/ref.mkv"
 run video-to-webp "$F/ref.mkv"
+run video-preview-gif "$F/ref.mkv"
+run video-preview-webp-portrait "$F/ref.mkv"
+run video-remux-to-mov "$F/ref.mkv"
 run video-trim "$F/ref.mkv"
 run video-trim-accurate "$F/ref.mkv"
 run video-trim-wrong-container "$F/ref.mkv"

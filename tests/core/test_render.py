@@ -27,6 +27,27 @@ def test_label_sits_in_bottom_right_corner():
     assert tile.getpixel((5, 5)) == (0, 255, 0)
 
 
+def test_padded_labels_share_a_height_and_centre_their_text():
+    font = _render.load_font(None, 14)
+    short = _render.padded_label("01:05", font, (0, 0, 0, 255), (255, 255, 255))
+    long = _render.padded_label("1:01:05", font, (0, 0, 0, 255), (255, 255, 255))
+    assert short.height == long.height and long.width > short.width
+    ink = short.getchannel("R").point(lambda v: 255 if v > 128 else 0).getbbox()
+    assert ink is not None
+    left, top, right, bottom = ink
+    assert left >= 4 and short.width - right >= 3
+    assert top >= 3 and short.height - bottom >= 3
+
+
+def test_padded_label_sits_inside_the_margin():
+    font = _render.load_font(None, 14)
+    label = _render.padded_label("01:05", font, (0, 0, 0, 255), (255, 255, 255))
+    tile = Image.new("RGB", (200, 100), (0, 255, 0))
+    _render.stamp(tile, label, 4)
+    assert tile.getpixel((199 - 4, 99 - 4)) == (0, 0, 0)
+    assert tile.getpixel((199 - 3, 99 - 3)) == (0, 255, 0)
+
+
 def header(emoji_dir=None, text="🎬 holiday.mkv"):
     font = _render.load_font(None, 18)
     style = _render.HeaderStyle(font, 18)

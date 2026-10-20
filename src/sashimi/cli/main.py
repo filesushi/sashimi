@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 from typing import Annotated, Optional
 
 import typer
@@ -23,8 +22,9 @@ def _version_callback(value: bool) -> None:
 
 app = typer.Typer(
     name="sashimi",
-    help="Convert images, video and audio, make video contact sheets, and trim videos losslessly.",
-    add_completion=False,
+    help="Convert images, video and audio, make video contact sheets and previews, and trim videos losslessly.",
+    add_completion=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
     no_args_is_help=True,
     rich_markup_mode="rich",
     epilog=f"[dim]Powered by sashimi v{__version__}[/dim]",
@@ -39,11 +39,19 @@ def main_callback(
     ] = None,
     verbose: Annotated[
         int,
-        typer.Option("--verbose", "-v", count=True, help="Increase logging verbosity. -v for INFO, -vv for DEBUG."),
+        typer.Option(
+            "--verbose",
+            "-v",
+            count=True,
+            metavar="",
+            show_default=False,
+            help="More logging on stderr: -v for progress notes, -vv for debugging.",
+        ),
     ] = 0,
 ):
     """
-    sashimi: convert images, video and audio, make video contact sheets, and trim videos losslessly.
+    sashimi: convert images, video and audio, make video contact sheets and previews, and trim
+    videos losslessly. Logging and warnings go to stderr, so --json output on stdout stays clean.
     """
     if verbose >= 2:
         log_level = logging.DEBUG
@@ -51,8 +59,6 @@ def main_callback(
         log_level = logging.INFO
     else:
         log_level = logging.WARNING
-    if "--json" in sys.argv:
-        log_level = logging.CRITICAL
 
     from rich.console import Console
     from rich.logging import RichHandler
@@ -69,7 +75,7 @@ def main_callback(
         logger.info(f"Logging level set to {logging.getLevelName(log_level)}")
 
 
-CONVERT, SHEETS, INSPECT, FILES, CONFIG = "Convert", "Contact sheets", "Inspect", "Files", "Configuration"
+CONVERT, SHEETS, INSPECT, FILES, CONFIG = "Convert", "Sheets & previews", "Inspect", "Files", "Configuration"
 
 app.command(
     name="convert",
@@ -87,6 +93,12 @@ app.command(name="rotate", no_args_is_help=True, rich_help_panel=CONVERT, short_
     convert_cmd.rotate_cmd
 )
 app.command(
+    name="favicon",
+    no_args_is_help=True,
+    rich_help_panel=CONVERT,
+    short_help="Make a favicon pack (.zip): ICO, PNG icons, manifest and HTML tags.",
+)(convert_cmd.favicon_cmd)
+app.command(
     name="extract",
     no_args_is_help=True,
     rich_help_panel=CONVERT,
@@ -94,12 +106,24 @@ app.command(
 )(files_cmd.extract_cmd)
 app.command(name="trim", no_args_is_help=True, hidden=True, short_help="Alias of extract.")(files_cmd.extract_cmd)
 app.command(
+    name="remux",
+    no_args_is_help=True,
+    rich_help_panel=CONVERT,
+    short_help="Change a video's container (e.g. MP4 to MKV) without re-encoding.",
+)(files_cmd.remux_cmd)
+app.command(
     name="thumbs",
     no_args_is_help=True,
     rich_help_panel=SHEETS,
     short_help="Make video contact sheets (static or animated).",
     cls=thumbs_cmd.ThumbsCommand,
 )(thumbs_cmd.thumbs_cmd)
+app.command(
+    name="preview",
+    no_args_is_help=True,
+    rich_help_panel=SHEETS,
+    short_help="Make preview GIFs/WebPs from short clips across each video.",
+)(thumbs_cmd.preview_cmd)
 app.command(
     name="info",
     no_args_is_help=True,

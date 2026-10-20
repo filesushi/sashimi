@@ -46,7 +46,7 @@ EXPECTED = {
         "--start": d(C.Mp4VideoConfig, "start_seconds"),
         "--duration": f"to the end; GIF/WebP {d(C.GifVideoConfig, 'duration_seconds')}s",
         "--quality": f"{d(C.JpegImageConfig, 'quality')}; animated WebP {d(C.WebpVideoConfig, 'quality')}",
-        "--background": d(C.JpegImageConfig, "background_color"),
+        "--background": f"{d(C.JpegImageConfig, 'background_color')}; ICO transparent",
         "--optimize": f"{on(C.JpegImageConfig, 'optimize')} for JPEG/WebP, {on(C.PngImageConfig, 'optimize')} for PNG/GIF",
         "--subsampling": d(C.JpegImageConfig, "jpeg_subsampling"),
         "--webp-method": d(C.WebpImageConfig, "webp_method"),
@@ -72,8 +72,20 @@ EXPECTED = {
         "--bit-depth": d(C.WavAudioConfig, "wav_bit_depth"),
         "--flac-level": d(C.FlacAudioConfig, "flac_compression_level"),
     },
-    "resize": {"--format": "same as input", "--quality": d(C.JpegResizeConfig, "quality")},
-    "extract": {"--output": "<name>_extracted.<ext> next to the input", "--workers": "min(4, CPUs)"},
+    "resize": {
+        "--format": "same as input",
+        "--quality": d(C.JpegResizeConfig, "quality"),
+        "--background": d(C.JpegImageConfig, "background_color"),
+        "--output": "<name>.resized.<ext> next to the input",
+    },
+    "extract": {
+        "--output": "<name>.extracted.<ext> next to the input",
+        "--workers": "min(4, CPUs)",
+        "--start": d(C.CopyTrimConfig, "start_seconds"),
+        "--end": "the end",
+        "--duration": "to the end",
+        "--format": "from -o, else the input's, else mkv",
+    },
     "thumbs": {
         "--workers": "min(4, CPUs)",
         "--format": f"{d(C.JpegSheetConfig, 'target')}, animated {d(C.AnimatedWebpSheetConfig, 'target')}",
@@ -84,7 +96,8 @@ EXPECTED = {
         "--quality": f"{d(C.JpegSheetConfig, 'quality')}, animated {d(C.AnimatedWebpSheetConfig, 'quality')}",
         "--start-offset": d(C.JpegSheetConfig, "start_offset_percent"),
         "--end-offset": d(C.JpegSheetConfig, "end_offset_percent"),
-        "--duration": d(C.AnimatedWebpSheetConfig, "sample_duration"),
+        "--clip-length": d(C.AnimatedWebpSheetConfig, "sample_duration"),
+        "--output": "<name>.sheet.jpg (animated: <name>.animated-sheet.webp)",
         "--fps": d(C.AnimatedWebpSheetConfig, "fps"),
         "--bg-color": d(C.JpegSheetConfig, "grid_bg_color"),
         "--header-bg": d(C.JpegSheetConfig, "header_bg_color"),
@@ -97,14 +110,46 @@ EXPECTED = {
         "--timestamp-size": d(C.JpegSheetConfig, "timestamp_font_size"),
     },
 }
+EXPECTED["convert"]["--output"] = "<name>.<format> next to the input"
 EXPECTED["resize"].update(
     {
         flag: EXPECTED["convert"][flag]
-        for flag in ("--background", "--optimize", "--subsampling", "--webp-method", "--compress-level")
+        for flag in ("--optimize", "--subsampling", "--webp-method", "--compress-level")
         + ("--tiff-compression", "--resample")
     }
 )
 EXPECTED["rotate"] = {flag: EXPECTED["convert"][flag] for flag in ("--workers", "--crf", "--preset", "--audio-bitrate")}
+EXPECTED["rotate"].update({"--format": "mp4", "--output": "<name>.rotated.mp4 next to the input"})
+P = C.WebpPreviewConfig
+EXPECTED["preview"] = {
+    "--format": "webp",
+    "--output": "<name>.preview.webp next to the video",
+    "--workers": "min(4, CPUs)",
+    "--samples": d(P, "samples"),
+    "--clip-length": d(P, "sample_duration"),
+    "--start-offset": d(P, "start_offset_percent"),
+    "--end-offset": d(P, "end_offset_percent"),
+    "--height": d(P, "max_height"),
+    "--width": "no limit",
+    "--crop": d(P, "crop"),
+    "--fps": d(P, "fps"),
+    "--quality": d(P, "quality"),
+}
+F = C.FaviconPackConfig
+EXPECTED["favicon"] = {
+    "--output": "<name>.favicons.zip next to the image",
+    "--ico-sizes": d(F, "ico_sizes"),
+    "--fit": d(F, "fit"),
+    "--resample": d(F, "resample"),
+    "--background": d(F, "background_color"),
+    "--name": "none",
+    "--short-name": "none",
+    "--theme-color": "none",
+    "--manifest-background": "none",
+}
+EXPECTED["remux"] = {"--format": "mkv, or from -o", "--output": "<name>.mkv next to the input"}
+for notes in EXPECTED.values():
+    notes["--output-dir"] = "next to each input"
 EXPECTED["extract"].update({flag: EXPECTED["rotate"][flag] for flag in ("--crf", "--preset", "--audio-bitrate")})
 EXPECTED["convert"]["--speed"] = EXPECTED["rotate"]["--speed"] = EXPECTED["extract"]["--speed"] = d(
     C.WebmVideoConfig, "speed"
@@ -117,6 +162,9 @@ MODELS = {
     "rotate": list(C.VIDEO_TRANSFORM.models),
     "extract": [C.H264TrimConfig, C.Vp9TrimConfig],
     "thumbs": list(C.CONTACT_SHEET.models),
+    "preview": list(C.VIDEO_PREVIEW.models),
+    "favicon": [C.FaviconPackConfig],
+    "remux": [],
 }
 
 
@@ -213,3 +261,21 @@ def test_config_defaults_shows_sashimi_toml_for_thumbs(tmp_path):
 def test_config_defaults_unknown_format():
     result = runner.invoke(app, ["config", "defaults", "rotate", "gif"])
     assert result.exit_code == 2 and "mp4, webm" in result.stderr
+
+
+@pytest.mark.parametrize("operation", ["convert", "resize", "rotate", "favicon", "extract", "thumbs", "preview"])
+def test_config_defaults_renders_every_command(operation):
+    result = runner.invoke(app, ["config", "defaults", operation], env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.output
+    report = json.loads(runner.invoke(app, ["config", "defaults", operation, "--json"]).stdout)
+    assert report and all(row["description"] for section in report for row in section["fields"])
+
+
+def test_config_defaults_for_new_outputs():
+    output = " ".join(
+        runner.invoke(app, ["config", "defaults", "preview", "webp"], env={"COLUMNS": "250"}).stdout.split()
+    )
+    assert "--width max_width │ no limit" in output
+    ico = runner.invoke(app, ["config", "defaults", "convert", "ico", "--json"]).stdout
+    background = next(r for r in json.loads(ico)[0]["fields"] if r["field"] == "background_color")
+    assert (background["option"], background["default"], background["accepted"]) == ("--background", None, "#rrggbb")

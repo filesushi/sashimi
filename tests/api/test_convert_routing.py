@@ -5,13 +5,15 @@ import pytest
 from PIL import Image
 
 from sashimi.api.convert import _source_extensions, convert_files_generator
+from sashimi.config import JpegImageConfig
+from sashimi.errors import InvalidOptionsError
 
 from tests.conftest import needs_ffmpeg
 
 
 def finals(gen):
     items = list(gen)
-    return [(p.name, status, msg) for p, status, msg in items[1:] if status != "starting"]
+    return [(p.name, status, msg) for p, status, msg, _ in items[1:] if status != "starting"]
 
 
 def test_source_extensions_per_target():
@@ -33,8 +35,13 @@ def test_skip_reasons(tmp_path):
 
 
 def test_unknown_target():
-    with pytest.raises(ValueError):
+    with pytest.raises(InvalidOptionsError):
         convert_files_generator(".", "docx")  # type: ignore[arg-type]
+
+
+def test_config_must_match_the_target():
+    with pytest.raises(InvalidOptionsError):
+        convert_files_generator(".", "png", image_config=JpegImageConfig())
 
 
 @needs_ffmpeg

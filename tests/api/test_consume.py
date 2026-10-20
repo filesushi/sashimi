@@ -5,7 +5,7 @@ import pathlib
 import sys
 import types
 
-from sashimi.api._consume import consume_generator
+from sashimi.api._consume import build_report, consume_generator
 
 
 def test_rejected_inputs_are_reported_but_do_not_advance_progress(monkeypatch):
@@ -31,16 +31,32 @@ def test_rejected_inputs_are_reported_but_do_not_advance_progress(monkeypatch):
 
     def gen():
         yield 2
-        yield (missing, "error", "Path does not exist")
-        yield (txt, "skipped", "Not a video file")
-        yield (a, "starting", "Processing...")
-        yield (a, "exists", "Contact sheet already exists")
-        yield (b, "starting", "Processing...")
-        yield (b, "skipped", "No video track found in container.")
+        yield (missing, "error", "Path does not exist", None)
+        yield (txt, "skipped", "Not a video file", None)
+        yield (a, "starting", "Processing...", None)
+        yield (a, "exists", "Contact sheet already exists", pathlib.Path("a.sheet.jpg"))
+        yield (b, "starting", "Processing...", None)
+        yield (b, "skipped", "No video track found in container.", None)
 
-    payload = consume_generator(gen(), show_progress=True, desc="test")
+    payload = consume_generator(gen(), show_progress=True, desc="test", command="thumbs")
 
     assert sum(updates) == 2
+    assert (payload["schema"], payload["command"]) == (1, "thumbs")
     assert payload["summary"]["errors"] == 1
     assert payload["summary"]["skipped"] == 2
     assert len(payload["results"]) == 4
+    assert payload["results"][2] == {
+        "file": "a.mp4",
+        "status": "exists",
+        "message": "Contact sheet already exists",
+        "output": "a.sheet.jpg",
+    }
+
+
+def test_report_shape():
+    report = build_report("convert", 1, [(pathlib.Path("a.png"), "success", "ok", pathlib.Path("a.webp"))], 2.0)
+    assert list(report) == ["schema", "command", "summary", "results"]
+    assert list(report["summary"]) == [
+        "total_found", "success", "exists", "skipped", "errors", "time_taken_seconds", "avg_time_seconds",
+    ]  # fmt: skip
+    assert report["summary"]["avg_time_seconds"] == 2.0

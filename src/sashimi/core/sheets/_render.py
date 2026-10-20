@@ -147,9 +147,35 @@ def timestamp_label(
     return label
 
 
-def stamp(tile: Image.Image, label: Image.Image) -> None:
-    """Composites a timestamp label onto a tile's bottom-right corner, in place."""
-    padding = 2
-    x = max(0, tile.width - label.width - padding + 1)
-    y = max(0, tile.height - label.height - padding + 1)
+LABEL_REFERENCE = "0123456789:Aj"
+"""Characters whose combined height sets every padded label's height, so all labels match."""
+
+
+@functools.lru_cache(maxsize=512)
+def padded_label(
+    text: str, font: Font, bg_color: tuple[int, int, int, int], text_color: tuple[int, int, int], padding: int = 4
+) -> Image.Image:
+    """
+    An RGBA label for animated sheets: `padding` pixels around the text on every side, the same
+    height for every label, and the text centred on it whatever the font's internal spacing.
+    """
+    draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    try:
+        left, _, right, _ = draw.textbbox((0, 0), text, font=font)
+        _, top, _, bottom = draw.textbbox((0, 0), LABEL_REFERENCE, font=font)
+    except (OSError, ValueError):
+        left, top, right, bottom = 0, 0, 50, 14
+    label = Image.new("RGBA", (int(right - left) + 2 * padding, int(bottom - top) + 2 * padding), bg_color)
+    ImageDraw.Draw(label).text((padding - left, padding - top), text, fill=text_color, font=font)
+    return label
+
+
+def stamp(tile: Image.Image, label: Image.Image, margin: int | None = None) -> None:
+    """
+    Composites a timestamp label onto a tile's bottom-right corner, in place, `margin` pixels in
+    from both edges (still sheets: 1).
+    """
+    inset = 1 if margin is None else margin
+    x = max(0, tile.width - label.width - inset)
+    y = max(0, tile.height - label.height - inset)
     tile.paste(label, (x, y), label)

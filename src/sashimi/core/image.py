@@ -1,19 +1,25 @@
 # SPDX-FileCopyrightText: 2026 The FileSushi Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Image conversion, resizing and ICO generation with Pillow."""
+"""Image conversion, resizing, ICO generation and favicon packs with Pillow."""
 
 import contextlib
+import html
+import io
+import json
 import os
 import warnings
+import zipfile
 from collections.abc import Iterator
-from typing import Any, Literal
+from typing import Any
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from sashimi.config import (
     DEFAULT_MAX_PIXELS,
+    FAVICON_PNG_SIZES,
     BmpImageConfig,
+    FaviconPackConfig,
     GifImageConfig,
     IcoConfig,
     ImageConvertConfig,
@@ -25,9 +31,9 @@ from sashimi.config import (
 )
 from sashimi.core._atomic import PathLike, atomic_output
 from sashimi.core._ffmpeg import ProgressCallback
-from sashimi.errors import MediaTooLargeError, UnsupportedMediaError
+from sashimi.errors import MediaTooLargeError, ProcessingError, UnsupportedMediaError
 
-__all__ = ["convert", "to_ico", "heif_available"]
+__all__ = ["convert", "to_ico", "favicon_pack", "heif_available"]
 
 NOT_AN_IMAGE = "This file isn't an image we can convert."
 DAMAGED_IMAGE = "This image file is damaged or incomplete."
@@ -205,6 +211,29 @@ def convert(
         on_progress(1.0, "done")
 
 
+def _square(img: Image.Image, fit: str) -> Image.Image:
+    """The image upright, in RGBA, padded (transparent) or cropped to a centred square."""
+    oriented = ImageOps.exif_transpose(img).convert("RGBA")
+    if fit == "crop":
+        edge = min(oriented.size)
+        left, top = (oriented.width - edge) // 2, (oriented.height - edge) // 2
+        return oriented.crop((left, top, left + edge, top + edge))
+    edge = max(oriented.size)
+    square = Image.new("RGBA", (edge, edge), (0, 0, 0, 0))
+    square.paste(oriented, ((edge - oriented.width) // 2, (edge - oriented.height) // 2))
+    return square
+
+
+def _filled(img: Image.Image, color: tuple[int, int, int]) -> Image.Image:
+    """An RGBA image with its transparent areas filled with `color`."""
+    return Image.alpha_composite(Image.new("RGBA", img.size, (*color, 255)), img)
+
+
+def _ico_base(square: Image.Image, sizes: tuple[int, ...], resample: Resample) -> Image.Image:
+    largest = max(sizes)
+    return square.resize((largest, largest), _RESAMPLE[resample])
+
+
 def to_ico(
     input_path: PathLike,
     output_path: PathLike,
@@ -216,21 +245,124 @@ def to_ico(
 ) -> None:
     """
     Makes a multi-size .ico (favicon). Non-square images are padded or cropped to a square (see
-    ``IcoConfig.fit``); small images are scaled up to the largest size, since icons need fixed sizes.
+    ``IcoConfig.fit``); small images are scaled up to the largest size, since icons need fixed
+    sizes. Transparent areas stay transparent unless ``IcoConfig.background_color`` is set.
     """
     config = config or IcoConfig()
-    largest = max(config.sizes)
     with _open_image(input_path, max_pixels) as img:
-        oriented = ImageOps.exif_transpose(img).convert("RGBA")
-        if config.fit == "crop":
-            edge = min(oriented.size)
-            left, top = (oriented.width - edge) // 2, (oriented.height - edge) // 2
-            square = oriented.crop((left, top, left + edge, top + edge))
-        else:
-            edge = max(oriented.size)
-            square = Image.new("RGBA", (edge, edge), (0, 0, 0, 0))
-            square.paste(oriented, ((edge - oriented.width) // 2, (edge - oriented.height) // 2))
-        base = square.resize((largest, largest), _RESAMPLE[config.resample])
+        square = _square(img, config.fit)
+        if config.background_color is not None:
+            square = _filled(square, config.background_color)
+        base = _ico_base(square, config.sizes, config.resample)
         _save(base, output_path, "ICO", {"sizes": [(s, s) for s in config.sizes]}, scratch_dir)
+    if on_progress:
+        on_progress(1.0, "done")
+
+
+_TOUCH_ICON = 180
+_MANIFEST_ICONS = (192, 512)
+_TAB_ICONS = (16, 32, 48)
+
+
+def _png_name(size: int) -> str:
+    if size == _TOUCH_ICON:
+        return "apple-touch-icon.png"
+    if size in _MANIFEST_ICONS:
+        return f"icon-{size}x{size}.png"
+    return f"favicon-{size}x{size}.png"
+
+
+def _hex(color: tuple[int, int, int]) -> str:
+    return "#" + "".join(f"{channel:02x}" for channel in color)
+
+
+def favicon_manifest(config: FaviconPackConfig) -> str:
+    """The pack's ``site.webmanifest``: JSON, with icon paths relative to the manifest. Pure."""
+    manifest: dict[str, Any] = {}
+    if config.name:
+        manifest["name"] = config.name
+    if config.short_name:
+        manifest["short_name"] = config.short_name
+    manifest["icons"] = [
+        {"src": _png_name(size), "sizes": f"{size}x{size}", "type": "image/png"} for size in _MANIFEST_ICONS
+    ]
+    if config.theme_color is not None:
+        manifest["theme_color"] = _hex(config.theme_color)
+    if config.manifest_background_color is not None:
+        manifest["background_color"] = _hex(config.manifest_background_color)
+    return json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
+
+
+def favicon_html(config: FaviconPackConfig) -> str:
+    """The pack's ``favicon.html``: the ``<head>`` tags, with paths relative to the page. Pure."""
+
+    def tag(element: str, **attributes: str) -> str:
+        text = " ".join(f'{key}="{html.escape(value, quote=True)}"' for key, value in attributes.items())
+        return f"<{element} {text}>"
+
+    lines = [tag("link", rel="icon", href="favicon.ico", sizes="any")]
+    lines += [
+        tag("link", rel="icon", type="image/png", sizes=f"{size}x{size}", href=_png_name(size)) for size in _TAB_ICONS
+    ]
+    lines.append(tag("link", rel="apple-touch-icon", sizes="180x180", href=_png_name(_TOUCH_ICON)))
+    lines.append(tag("link", rel="manifest", href="site.webmanifest"))
+    if config.theme_color is not None:
+        lines.append(tag("meta", name="theme-color", content=_hex(config.theme_color)))
+    return "\n".join(lines) + "\n"
+
+
+def _zip_entry(name: str) -> zipfile.ZipInfo:
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_STORED
+    info.create_system = 3
+    info.external_attr = 0o644 << 16
+    return info
+
+
+def favicon_pack(
+    input_path: PathLike,
+    output_path: PathLike,
+    config: FaviconPackConfig | None = None,
+    *,
+    scratch_dir: PathLike | None = None,
+    max_pixels: int = DEFAULT_MAX_PIXELS,
+    on_progress: ProgressCallback | None = None,
+) -> None:
+    """
+    Makes a favicon pack: a .zip holding ``favicon.ico``, PNG icons (``favicon-16x16.png``,
+    ``favicon-32x32.png``, ``favicon-48x48.png``, ``apple-touch-icon.png`` at 180 px, filled with
+    ``background_color``, and ``icon-192x192.png``/``icon-512x512.png`` for the manifest), a
+    ``site.webmanifest`` and ``favicon.html`` with the ``<head>`` tags. Paths inside are relative,
+    so the files belong next to the pages that use them (or adjust the paths).
+
+    The image is padded or cropped to a square as ``fit`` says and scaled to each size, up if
+    needed. The zip's entries, order and timestamps are fixed, so the same input and config give
+    the same bytes. Written atomically.
+    """
+    config = config or FaviconPackConfig()
+    entries: list[tuple[str, bytes]] = []
+    with _open_image(input_path, max_pixels) as img:
+        square = _square(img, config.fit)
+        buffer = io.BytesIO()
+        _ico_base(square, config.ico_sizes, config.resample).save(
+            buffer, "ICO", sizes=[(s, s) for s in config.ico_sizes]
+        )
+        entries.append(("favicon.ico", buffer.getvalue()))
+        for size in FAVICON_PNG_SIZES:
+            icon = square.resize((size, size), _RESAMPLE[config.resample])
+            if size == _TOUCH_ICON:
+                icon = _filled(icon, config.background_color).convert("RGB")
+            buffer = io.BytesIO()
+            icon.save(buffer, "PNG", compress_level=9)
+            entries.append((_png_name(size), buffer.getvalue()))
+    entries.append(("site.webmanifest", favicon_manifest(config).encode("utf-8")))
+    entries.append(("favicon.html", favicon_html(config).encode("utf-8")))
+    try:
+        with atomic_output(output_path, scratch_dir) as temp:
+            with zipfile.ZipFile(temp, "w") as archive:
+                for name, data in entries:
+                    archive.writestr(_zip_entry(name), data)
+    except OSError as e:
+        raise ProcessingError(f"Cannot write {os.fspath(output_path)}: {e}") from e
     if on_progress:
         on_progress(1.0, "done")

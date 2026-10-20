@@ -3,7 +3,7 @@
 
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AfterValidator, Field, StringConstraints, field_validator, model_validator
 
 from sashimi.config._base import RGB, ConfigFamily, ParamsModel, TargetName, sentence
 
@@ -139,29 +139,72 @@ class TiffResizeConfig(_NeedsSize, TiffImageConfig):
     """Like :class:`TiffImageConfig`, but `max_width` or `max_height` is required."""
 
 
+def _split_sizes(v: object) -> object:
+    if isinstance(v, str):
+        return tuple(part for part in v.replace(" ", "").split(",") if part)
+    return v
+
+
+def _check_icon_sizes(v: tuple[int, ...]) -> tuple[int, ...]:
+    if not v or any(not 16 <= s <= 256 for s in v):
+        raise ValueError("icon sizes must be between 16 and 256 pixels")
+    return tuple(sorted(set(v)))
+
+
 class IcoConfig(ParamsModel):
     """A multi-size .ico (favicon). Sizes are square icon edges in pixels."""
 
     sizes: tuple[int, ...] = (16, 32, 48, 64, 128, 256)
     """Icon sizes to include, 16 to 256 pixels."""
     fit: Literal["pad", "crop"] = "pad"
-    """Non-square images: centre them on a transparent square ("pad") or crop the centre ("crop")."""
+    """Non-square images: centre them on a square ("pad") or crop the centre ("crop")."""
     resample: Resample = "lanczos"
     """Filter used when scaling."""
+    background_color: RGB | None = None
+    """Fill transparent areas (and the padding) with this colour. Blank keeps them transparent."""
 
-    @field_validator("sizes", mode="before")
-    @classmethod
-    def _split(cls, v: object) -> object:
-        if isinstance(v, str):
-            return tuple(part for part in v.replace(" ", "").split(",") if part)
-        return v
+    _split = field_validator("sizes", mode="before")(_split_sizes)
+    _check_sizes = field_validator("sizes")(_check_icon_sizes)
 
-    @field_validator("sizes")
-    @classmethod
-    def _check_sizes(cls, v: tuple[int, ...]) -> tuple[int, ...]:
-        if not v or any(not 16 <= s <= 256 for s in v):
-            raise ValueError("icon sizes must be between 16 and 256 pixels")
-        return tuple(sorted(set(v)))
+
+FAVICON_PNG_SIZES = (16, 32, 48, 180, 192, 512)
+"""The PNG sizes in a favicon pack: browser tabs (16, 32, 48), Apple touch icon (180), web app (192, 512)."""
+
+
+def _single_line(value: str) -> str:
+    if any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError("must be a single line of text")
+    return value
+
+
+_ManifestText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=100), AfterValidator(_single_line)]
+
+
+class FaviconPackConfig(ParamsModel):
+    """
+    A favicon pack (.zip): ``favicon.ico``, PNG icons at 16, 32, 48, 180, 192 and 512 pixels, a
+    ``site.webmanifest`` and ``favicon.html``, the ``<head>`` tags that use them.
+    """
+
+    ico_sizes: tuple[int, ...] = (16, 32, 48)
+    """Sizes inside favicon.ico, 16 to 256 pixels."""
+    fit: Literal["pad", "crop"] = "pad"
+    """Non-square images: centre them on a square ("pad") or crop the centre ("crop")."""
+    resample: Resample = "lanczos"
+    """Filter used when scaling."""
+    background_color: RGB = WHITE
+    """Fills the Apple touch icon (180 px), which must be opaque because iOS shows transparency as black."""
+    name: _ManifestText = ""
+    """The web app's name in site.webmanifest. Blank leaves it out."""
+    short_name: _ManifestText = ""
+    """A short name for home screens (about 12 characters). Blank leaves it out."""
+    theme_color: RGB | None = None
+    """Browser UI colour, in the manifest and a theme-color tag. Blank leaves it out."""
+    manifest_background_color: RGB | None = None
+    """Splash screen colour in the manifest. Blank leaves it out."""
+
+    _split = field_validator("ico_sizes", mode="before")(_split_sizes)
+    _check_sizes = field_validator("ico_sizes")(_check_icon_sizes)
 
 
 ImageConvertConfig = (

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import hashlib
+import subprocess
 from unittest.mock import patch
 
 import pytest
@@ -81,9 +82,31 @@ def test_sheet_user_errors(junk_blob, tmp_path):
         sheets.render(junk_blob, tmp_path / "r", AnimatedWebpSheetConfig())
 
 
-def test_too_short_for_animated(silent_video_blob, tmp_path):
+def test_clip_shorter_than_a_tile_gets_one_tile(silent_video_blob, tmp_path):
+    config = AnimatedWebpSheetConfig(sample_duration=5, width=400, fps=4, show_header=False, gap=0)
+    sheets.render(silent_video_blob, tmp_path / "r", config)
+    with Image.open(tmp_path / "r") as img:
+        assert img.size == (400, 224) and img.n_frames == 12
+
+
+def test_too_short_for_animated(tmp_path):
+    short = tmp_path / "original.blob"
+    subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=s=160x90:r=10:d=0.6", "-c:v", "libx264",
+         "-f", "mp4", str(short)],
+        check=True,
+    )  # fmt: skip
     with pytest.raises(MediaTooShortError):
-        sheets.render(silent_video_blob, tmp_path / "r", AnimatedWebpSheetConfig(sample_duration=5))
+        sheets.render(short, tmp_path / "r", AnimatedWebpSheetConfig())
+
+
+def test_animated_sheet_default_grid(video_blob, rotated_video_blob, tmp_path):
+    config = AnimatedWebpSheetConfig(fps=2, sample_duration=1, show_header=False, gap=0)
+    sheets.render(video_blob, tmp_path / "land", config)
+    sheets.render(rotated_video_blob, tmp_path / "portrait", config)
+    with Image.open(tmp_path / "land") as land, Image.open(tmp_path / "portrait") as portrait:
+        assert land.size == (1278, round(426 * 9 / 16 / 2) * 2 * 3)
+        assert portrait.size == (1280, round(320 * 16 / 9 / 2) * 2 * 2)
 
 
 def test_animated_memory_guard(video_blob, tmp_path):

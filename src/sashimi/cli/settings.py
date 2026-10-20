@@ -29,8 +29,8 @@ GLOBAL_CONFIG_DIR = pathlib.Path.home() / ".sashimi"
 GLOBAL_CONFIG_FILENAME = "sashimi.toml"
 PROJECT_CONFIG_FILENAMES = ["sashimi.toml", ".sashimi.toml"]
 
-DEFAULT_CONFIG_DICT: dict[str, Any] = {"global": {"verbose": 0, "priority": "normal"}}
-"""Settings that apply when no file sets them. Sheet defaults come from the config models."""
+DEFAULT_CONFIG_DICT: dict[str, Any] = {}
+"""Settings that apply when no file sets them: none. Sheet defaults come from the config models."""
 
 
 def _recursive_merge(base: dict, new: MutableMapping) -> dict:
@@ -191,13 +191,11 @@ PATH_KEYS = {"header_font_path": "header_font", "timestamp_font_path": "timestam
 """TOML keys naming local files, and the :func:`sashimi.sheets.render` arguments they become."""
 
 
-SECTIONS = ("global", "thumbs", "animated_thumbs")
+SECTIONS = ("thumbs", "animated_thumbs")
 
 
 def known_keys(section: str) -> frozenset[str]:
     """The keys sashimi reads from one section of a sashimi.toml file (none for an unknown section)."""
-    if section == "global":
-        return frozenset({"verbose", "priority"})
     if section not in SECTIONS:
         return frozenset()
     from sashimi.config import CONTACT_SHEET

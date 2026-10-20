@@ -6,11 +6,73 @@ the Python API; every break is listed here. See [MIGRATION.md](MIGRATION.md) for
 ## 0.6.0 — unreleased
 
 The first release on PyPI, as **`sashimi-convert`**. Builds labelled 0.5.1 were shared privately
-but never published; 0.6.0 contains all of their changes, listed here too. No conversion output
-changes. The breaking changes are validation and error types; [MIGRATION.md](MIGRATION.md) shows
-what to change.
+but never published; 0.6.0 contains all of their changes, listed here too. It also brings over
+what ftool still did better (a sampled preview, remuxing, the animated-sheet grid and labels,
+cuts to the end) and settles the batch and CLI behaviour before it goes public: one output-naming
+policy, one meaning per flag and one JSON report. [MIGRATION.md](MIGRATION.md) shows what to change.
+
+Outputs are byte-identical to 0.5.1 except: animated contact sheets (a 3x3 grid by default, 4x2
+for portrait videos, and padded time labels), still sheets of videos with an aspect ratio from
+0.55 to 0.6 such as 9:16 (8x2 instead of 7x2), and animated sheets of clips shorter than one
+tile's clip (one tile instead of an error).
 
 ### Breaking
+
+- **Animated contact sheets default to a 3x3 grid** (4x2 for portrait videos, aspect ratio under
+  0.95), where `cols`/`rows` `"auto"` used the still sheets' table (6x5 tiles of about 205 px for
+  16:9 at 1280 px). 3x3 renders about 2.4 times faster, with 426 px tiles. Explicit `cols`/`rows`
+  are unchanged. Their time labels have 4 px of padding and centred text (still sheets keep theirs).
+- **Still sheets of 9:16 videos use 8x2** instead of 7x2: the automatic grid's first step moved
+  from an aspect ratio of 0.55 to 0.6.
+- **Animated sheets of short clips:** a video shorter than `sample_duration`, but at least a
+  second long, gets one tile of the whole video instead of `MediaTooShortError`.
+- **One output-naming policy for the batch API and CLI** (see the README's "Where outputs go"):
+  conversions write `<stem>.<ext>` as before; derived outputs write `<stem>.<role>.<ext>`.
+  - Contact sheets: `<video name>.<format>` (`clip.mp4.jpeg`) becomes `clip.sheet.jpg`, and
+    animated ones `clip.animated-sheet.webp`.
+  - Resized images: `photo_resized.jpg` becomes `photo.resized.jpg`; rotated videos
+    `clip_rotated.mp4` become `clip.rotated.mp4`; cuts `clip_extracted.mkv` become `clip.extracted.mkv`.
+  - The `suffix` argument of `resize_images(_generator)` and `transform_videos(_generator)`, and
+    the CLI's `--suffix`, are removed.
+  - Two inputs that would share an output (`a.png` and `a.jpeg` → `a.webp`) both keep their
+    extension in the name (`a.png.webp`, `a.jpeg.webp`), where the second used to be reported as
+    existing, or with `force` overwrote the first. An output that would replace one of the batch's
+    inputs is an `error`, even with `force`.
+  - Without `force`, the output is moved into place only if its name is still free, so a file
+    created meanwhile is never replaced. With `force`, a replaced file is reported ("… (replaced
+    the existing file)").
+- **The batch protocol's results have four items:** `(path, status, message, output)`, where
+  `output` is the file written (or `None`). Every non-generator batch function returns the same
+  report as the CLI's `--json`: `schema` (1), `command`, `summary` (with `avg_time_seconds`) and
+  `results` (each with `output`). The CLI's `avg_processing_time_seconds` is now `avg_time_seconds`.
+- **`sashimi.api.extract` is a batch operation:** `extract(paths, start=None, end=None, *,
+  duration=None, container=None, accurate=False, …, output=None, output_dir=None)` returns the
+  report, and `extract_generator` yields the protocol. Invalid times and options raise
+  `InvalidOptionsError` before anything runs, instead of returning `("error", "Time Parsing
+  Failure: …", path)`; per-file failures are results classified by type. `output_path` is now
+  `output`. `parse_time_to_seconds` raises `InvalidOptionsError` instead of `ValueError`.
+- **`sashimi.api.flatten`** returns the report (with `dry_run`, `renamed` and `removed_dirs`)
+  instead of `{"moved", "renamed", "removed_dirs"}`, raises `InvalidOptionsError` for a missing
+  folder or a file instead of `FileNotFoundError`/`NotADirectoryError`, and leaves symbolic links
+  and the files and folders they point to where they are (see Fixed).
+- `convert_files_generator` raises `InvalidOptionsError` instead of `ValueError` for an unknown
+  target or a config for another format.
+- **Lossless trims convert text subtitles the container can't hold** (MP4 `mov_text` to SRT for
+  MKV, SRT/ASS/WebVTT to `mov_text` for MP4 and MOV, to WebVTT for WebM), where
+  `check_copy_compatible` refused them with `InvalidOptionsError`. Bitmap subtitles are still
+  refused where they were. Commands for files without such subtitles are unchanged.
+- **CLI flags mean one thing each:**
+  - `-o` is the output file everywhere (`-o/--output`); `thumbs`, `resize` and `rotate` used it
+    for the format, which is `--format` (no short flag) in every command;
+  - `thumbs --duration` (seconds per animated tile) is `--clip-length`, so `--duration` always
+    means the output's length;
+  - `-h` is `--help` everywhere; `--height` has no short flag (it was `-h` in `convert` and `resize`);
+  - `extract` needs a start, an end or a `--duration`, but no longer both a start and an end;
+  - `--json` prints the shared report for `extract` and `flatten` too (`extract` printed a flat
+    `{status, message, output, seconds}`).
+- **The `[global]` section of `sashimi.toml` is gone.** `verbose` and `priority` were accepted but
+  never read; files that still set them now get the unknown-settings warning, and `sashimi config
+  set global.…` is refused.
 
 - **MP3 and M4A sample rates are limited to what the encoders accept.** `Mp3AudioConfig.sample_rate`
   takes 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100 or 48000 (LAME's rates), and
@@ -30,6 +92,48 @@ what to change.
 
 ### Added
 
+- **Previews:** `sashimi.video.preview(input, output, config, *, max_workers, scratch_dir,
+  on_progress)` joins `samples` clips of `sample_duration` seconds, spread across the video
+  between `start_offset_percent` and `end_offset_percent`, into a GIF or animated WebP scaled to
+  fit `max_height` (and `max_width`), optionally centre-cropped to `crop` ("9:16" or "1:1").
+  Defaults, as ftool's: 5 × 2 s from the middle 80%, 360 px tall, 15 fps. Clips never overlap, so
+  short videos get fewer; a video shorter than one clip becomes one clip; under half a second is
+  `MediaTooShortError`. One ffmpeg run, ffmpeg only (no moviepy or numpy), with the pure
+  `build_preview_command` and `plan_preview`. Config: `VIDEO_PREVIEW` (`GifPreviewConfig`,
+  `WebpPreviewConfig`, `PreviewConfig`, `PreviewCrop`), the clips' total limited to 30 s
+  (`MAX_GIF_SECONDS`) and the count to `MAX_PREVIEW_SAMPLES` (10). Batch: `make_previews` and
+  `make_previews_generator`. CLI: `sashimi preview`.
+- **Favicon packs:** `sashimi.image.favicon_pack(input, output_zip, config, *, scratch_dir,
+  max_pixels, on_progress)` writes a .zip with `favicon.ico`, PNGs at 16, 32, 48, 180 (Apple
+  touch icon, filled with `background_color` because iOS shows transparency as black), 192 and
+  512 px (`FAVICON_PNG_SIZES`), `site.webmanifest` and `favicon.html` with the `<head>` tags.
+  Paths inside are relative; the manifest is written with `json` and the HTML escaped, so names
+  can't break either. The zip's entries, order and timestamps are fixed, so the bytes are the same
+  every run. Config: `FaviconPackConfig` (`ico_sizes`, `fit`, `resample`, `background_color`,
+  `name`, `short_name`, `theme_color`, `manifest_background_color`). Also `favicon_manifest` and
+  `favicon_html`. Batch: `make_favicon_packs(_generator)`, writing `<stem>.favicons.zip`. CLI:
+  `sashimi favicon`.
+- **`IcoConfig.background_color`:** fills transparent areas and the padding of `.ico` files; unset
+  (the default) keeps them transparent, byte for byte as before. CLI: `convert … ico --background`.
+- **Remuxing:** `sashimi remux` and `sashimi.api.remux_files(_generator)` copy every stream of
+  each video into MKV (or MP4, WebM, MOV) without re-encoding, writing `<stem>.mkv`. It's a
+  `video.trim` with a `CopyTrimConfig` and no end, so the container check runs before anything is
+  written, and outputs are atomic. Sources are never changed or removed (ftool's `--cleanup` is
+  not ported). Also `video.subtitle_conversions` and `build_trim_command(…, subtitles=…)`.
+- **Cuts to the end and by length:** `sashimi extract clip.mp4 10m` cuts from 10 minutes to the
+  end, and `-d/--duration` gives a length instead of an end time. `extract` also takes a
+  directory, `-r`, `--format` (the container) and `--output-dir`.
+- **`-o/--output` and `--output-dir`** on every batch command, and `output`/`output_dir` on every
+  batch function. Outputs under `output_dir` keep the subfolders of a searched directory; files
+  already in `output_dir` aren't picked up as inputs.
+- `sashimi.api` exports `output_name` (the naming policy), `sheet_name`, `build_report`,
+  `YieldType`, `plan_flatten` and `FlattenPlan`.
+- `sashimi flatten --dry-run` (`-n`) and `--json`.
+- **Shell completion:** `sashimi --install-completion` sets it up for the shell you run it from
+  (bash, zsh, fish or PowerShell), and `--show-completion` prints the script instead.
+- `sashimi config defaults` covers `favicon` and `preview`.
+- `scripts/sandbox_check.sh` runs the preview, favicon pack, ICO background and remux too, and
+  takes its image tag from `SASHIMI_SANDBOX_IMAGE`.
 - `MP3_SAMPLE_RATES` and `AAC_SAMPLE_RATES` in `sashimi.config`, next to `OPUS_SAMPLE_RATES`.
 - Tests that pin what FileSushi relies on (`tests/core/test_filesushi_contract.py`): `ConfigFamily.key`,
   `model_for` ignoring non-discriminating options, an `annotated_types.Le` in `model_fields` for
@@ -51,6 +155,16 @@ what to change.
 
 ### Changed
 
+- **Quieter CLI output:** one file gets one line ("Success: clip.mp4: Preview created:
+  clip.preview.webp (1.2s)") instead of a panel and a table; several files get a heading, the
+  progress bar, the summary and the table as before. Status lines have no emoji.
+- All logging goes to stderr, so `--json` output on stdout stays clean without the CLI checking
+  its own arguments; warnings now also show in `--json` runs, on stderr.
+- `--verbose` shows no `<int>` placeholder in the help.
+- `flatten` asks for confirmation on stderr, saying how many files will move and be renamed.
+- The help panel "Contact sheets" is "Sheets & previews".
+- `IcoConfig.fit` says "a square" rather than "a transparent square", since the padding takes
+  `background_color` when one is set.
 - Package metadata uses PEP 639: `License-Expression: Apache-2.0`, with `LICENSE` and `AUTHORS` as
   licence files, and no licence classifier. Building needs hatchling 1.27 or later, and the
   wheel and sdist are written as core metadata 2.4 whichever hatchling builds them.
@@ -77,6 +191,21 @@ what to change.
 
 ### Fixed
 
+- **`flatten` is safe** (it was ftool's code, with ftool's bugs):
+  - symbolic links are left where they are, and so are the files and folders a link in the tree
+    points to, so no link ends up dangling (relative links used to be moved and broken);
+  - every destination is planned before anything moves, plain names before renamed ones, so
+    names don't depend on the order files are found in (`c/a_x.txt` could take `a_x.txt` and push
+    `a/x.txt` to `a_x_1.txt` depending on the walk);
+  - names clash case-insensitively, so a plan works the same on every filesystem;
+  - files are moved by hard-linking then unlinking, which fails rather than replace a file that
+    appeared after planning, so there's no check-then-rename race (where hard links aren't
+    supported, Windows renames without replacing, and elsewhere it checks just before renaming);
+  - it has tests.
+- `convert photo.png jpeg -f` no longer silently replaces an unrelated `photo.jpg`: the result
+  says it was replaced, and without `-f` it's never touched.
+- The batch API's error classification maps `OSError` (for example a full disk while creating an
+  output folder) to an `error` result with its reason.
 - CLI help shows option defaults again. Rich read `[default: …]` in help text as a markup tag and
   removed it, leaving lines like "Sheet width in pixels ." Help defaults are now pinned to the
   config models by `tests/cli/test_help_defaults.py`, and the options that lacked one

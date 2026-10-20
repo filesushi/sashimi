@@ -80,7 +80,31 @@ def option(*names: str, help: str, panel: str | None = None, **kwargs: Any) -> A
 
 
 Recursive = Annotated[bool, option("-r", "--recursive", help="Search directories recursively.", panel=GENERAL)]
-Force = Annotated[bool, option("-f", "--force", help="Overwrite existing outputs.", panel=GENERAL)]
+Force = Annotated[
+    bool, option("-f", "--force", help="Replace outputs that already exist (each one is reported).", panel=GENERAL)
+]
+OutputDir = Annotated[
+    Optional[pathlib.Path],
+    option(
+        "--output-dir",
+        help="Write outputs into this folder, created if needed, keeping the subfolders of searched "
+        "directories [default: next to each input].",
+        panel=GENERAL,
+        show_default=False,
+    ),
+]
+
+
+def output_option(default: str) -> Any:
+    """``-o/--output``: the output file, for a single input file."""
+    return option("--output", "-o", help=f"Output file, for a single input file [default: {default}].", panel=GENERAL)
+
+
+def format_option(help: str) -> Any:
+    """``--format`` (no short flag): the output format."""
+    return option("--format", help=help, panel=GENERAL)
+
+
 Workers = Annotated[
     Optional[int],
     option("--workers", min=1, help="Parallel ffmpeg processes/threads [default: min(4, CPUs)].", panel=GENERAL),
@@ -101,7 +125,6 @@ MaxHeight = Annotated[
     Optional[int],
     option(
         "--height",
-        "-h",
         help="[Image] Maximum height in pixels (never upscales) [default: source height].",
         panel=SIZE_TIME,
     ),
@@ -124,7 +147,7 @@ FitWidth = Annotated[
     Optional[int], option("--width", "-w", help="Maximum width in pixels (never upscales).", panel=SIZE_TIME)
 ]
 FitHeight = Annotated[
-    Optional[int], option("--height", "-h", help="Maximum height in pixels (never upscales).", panel=SIZE_TIME)
+    Optional[int], option("--height", help="Maximum height in pixels (never upscales).", panel=SIZE_TIME)
 ]
 
 Quality = Annotated[
@@ -146,6 +169,15 @@ Flatten = Annotated[
     option("--flatten", help="Flatten transparency onto --background (JPEG/BMP always do).", panel=IMAGE),
 ]
 Background = Annotated[
+    Optional[str],
+    option(
+        "--background",
+        help="Colour behind flattened transparency, e.g. '#000000'; for ICO, fills transparency "
+        "[default: #ffffff; ICO transparent].",
+        panel=IMAGE,
+    ),
+]
+ImageBackground = Annotated[
     Optional[str],
     option(
         "--background",
@@ -251,20 +283,21 @@ def parse_time(value: str | None, flag: str) -> float | None:
     if value is None:
         return None
     from sashimi.api.extract import parse_time_to_seconds
+    from sashimi.errors import InvalidOptionsError
 
     try:
         return parse_time_to_seconds(value)
-    except ValueError as e:
-        fail(f"{flag}: {e}")
+    except InvalidOptionsError as e:
+        fail(f"{flag}: {e.user_message}")
 
 
-def parse_sizes(value: str | None) -> tuple[int, ...] | None:
+def parse_sizes(value: str | None, flag: str = "--ico-sizes") -> tuple[int, ...] | None:
     if value is None:
         return None
     try:
         return tuple(int(part) for part in value.replace(" ", "").split(",") if part)
     except ValueError:
-        fail(f"--ico-sizes: {value!r} should be numbers separated by commas")
+        fail(f"{flag}: {value!r} should be numbers separated by commas")
 
 
 def enum_value(value: Enum | None) -> Any:
@@ -286,3 +319,16 @@ def split_options(model: Any, options: dict[str, Any]) -> tuple[dict[str, Any], 
 def exists_or_fail(path: pathlib.Path) -> None:
     if not path.exists():
         fail(f"Path does not exist: {path}", code=1)
+
+
+def format_from_output(given: str | None, output: pathlib.Path | None, formats: dict[str, str]) -> str | None:
+    """`given`, or else the format `output`'s extension names (from `formats`, extension to format), if any."""
+    if given is not None or output is None:
+        return given
+    return formats.get(output.suffix.lower())
+
+
+def single_file_or_fail(paths: list[pathlib.Path], output: pathlib.Path | None) -> None:
+    """``-o`` names one output, so it needs exactly one input, and that input must be a file."""
+    if output is not None and (len(paths) != 1 or paths[0].is_dir()):
+        fail("-o/--output needs a single input file; use --output-dir for several.")

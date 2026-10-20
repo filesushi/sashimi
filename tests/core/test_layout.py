@@ -14,10 +14,31 @@ from sashimi.core.sheets._layout import (
 
 
 @pytest.mark.parametrize(
-    "ratio, grid", [(16 / 9, (6, 5)), (4 / 3, (6, 4)), (2.35, (6, 7)), (0.56, (7, 2)), (9 / 16, (7, 2)), (3.0, (6, 8))]
+    "ratio, grid",
+    [
+        (16 / 9, (6, 5)),
+        (4 / 3, (6, 4)),
+        (2.35, (6, 7)),
+        (0.56, (8, 2)),
+        (9 / 16, (8, 2)),
+        (0.62, (7, 2)),
+        (3.0, (6, 8)),
+    ],
 )
 def test_grid_for_aspect(ratio, grid):
     assert grid_for_aspect(ratio) == grid
+
+
+@pytest.mark.parametrize(
+    "ratio, grid", [(16 / 9, (3, 3)), (4 / 3, (3, 3)), (1.0, (3, 3)), (2.35, (3, 3)), (9 / 16, (4, 2)), (0.8, (4, 2))]
+)
+def test_animated_grid_for_aspect(ratio, grid):
+    assert grid_for_aspect(ratio, animated=True) == grid
+    assert plan_layout(1280, "auto", "auto", 5, ratio, even=True, animated=True).cells == grid[0] * grid[1]
+
+
+def test_animated_grid_keeps_explicit_dimensions():
+    assert choose_grid(5, "auto", 16 / 9, animated=True) == (5, 3)
 
 
 def test_single_dimension_override():

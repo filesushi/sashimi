@@ -1,18 +1,20 @@
 # SPDX-FileCopyrightText: 2026 The FileSushi Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""`sashimi convert`, `resize` and `rotate`."""
+"""`sashimi convert`, `resize`, `rotate` and `favicon`."""
 
 from __future__ import annotations
 
 import pathlib
 from enum import Enum
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, List, Optional
 
 import typer
 
 from sashimi.cli import _options as opt
-from sashimi.cli._output import BatchRunner, console, err_console, exit_on_invalid_options, fail, warn_unused
+from sashimi.cli._output import BatchRunner, err_console, exit_on_invalid_options, fail, warn_unused
+
+MANIFEST = "Web app manifest"
 
 FLAGS = {
     "quality": "--quality",
@@ -49,6 +51,11 @@ FLAGS = {
     "flac_compression_level": "--flac-level",
     "sizes": "--ico-sizes",
     "fit": "--ico-fit",
+    "ico_sizes": "--ico-sizes",
+    "name": "--name",
+    "short_name": "--short-name",
+    "theme_color": "--theme-color",
+    "manifest_background_color": "--manifest-background",
     "target": "--format",
     "rotate": "angle",
     "flip": "--flip",
@@ -142,6 +149,8 @@ def _image_options(
 def convert_cmd(
     path: Annotated[pathlib.Path, typer.Argument(help="File or directory to convert.", show_default=False)],
     target: Annotated[Target, typer.Argument(help="Output format.", show_default=False)],
+    output: Annotated[Optional[pathlib.Path], opt.output_option("<name>.<format> next to the input")] = None,
+    output_dir: opt.OutputDir = None,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
     workers: opt.Workers = None,
@@ -189,9 +198,11 @@ def convert_cmd(
     [bold]Videos[/bold] → gif, webp (animated, up to 30 s), webm, mp4; [bold]animated GIFs[/bold] → webm, mp4
     [bold]Videos and audio[/bold] → mp3, m4a, wav, ogg, flac
 
-    Outputs are written next to each input. Files already in the target format are skipped.
+    Writes [cyan]<name>.<format>[/cyan] next to each input (.jpg for JPEG, .tif for TIFF), under
+    --output-dir, or to -o for a single file. Files already in the target format are skipped.
     """
     t = "jpeg" if target is Target.jpg else target.value
+    opt.single_file_or_fail([path], output)
 
     from sashimi.api._batch import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
     from sashimi.api.convert import TARGET_SUFFIX, convert_files_generator
@@ -243,9 +254,7 @@ def convert_cmd(
         else:
             configs[kind] = _validate(model, data)
 
-    if not json_output:
-        console.print(f"[bold]🔄 Converting to {t.upper()}...[/bold]")
-    runner = BatchRunner(f"Convert to {t.upper()}", json_output, limit_output)
+    runner = BatchRunner("convert", f"Convert to {t.upper()}", json_output, limit_output)
     gen = convert_files_generator(
         path,
         t,  # type: ignore[arg-type]
@@ -258,6 +267,8 @@ def convert_cmd(
         max_workers=workers,
         extensions=extensions,
         on_file_progress=runner.file_progress,
+        output=output,
+        output_dir=output_dir,
     )
     runner.run(gen)
 
@@ -267,12 +278,10 @@ def resize_cmd(
     width: opt.FitWidth = None,
     height: opt.FitHeight = None,
     output_format: Annotated[
-        Optional[ImageFormat],
-        opt.option("--format", "-o", help="Output format [default: same as input].", panel=opt.GENERAL),
+        Optional[ImageFormat], opt.format_option("Output format [default: same as input].")
     ] = None,
-    suffix: Annotated[
-        str, typer.Option("--suffix", help="Appended to each output's name.", rich_help_panel=opt.GENERAL)
-    ] = "_resized",
+    output: Annotated[Optional[pathlib.Path], opt.output_option("<name>.resized.<ext> next to the input")] = None,
+    output_dir: opt.OutputDir = None,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
     json_output: opt.JsonOutput = False,
@@ -280,7 +289,7 @@ def resize_cmd(
     quality: opt.ImageQuality = None,
     lossless: opt.Lossless = False,
     flatten: opt.Flatten = False,
-    background: opt.Background = None,
+    background: opt.ImageBackground = None,
     optimize: opt.Optimize = None,
     progressive: opt.Progressive = False,
     subsampling: opt.SubsamplingOpt = None,
@@ -294,14 +303,18 @@ def resize_cmd(
 ):
     """
     Shrink images to fit --width and/or --height (never upscaling), keeping their format unless
-    --format is given. Writes [cyan]<name>_resized.<ext>[/cyan] next to each image.
+    --format is given. Writes [cyan]<name>.resized.<ext>[/cyan] next to each image, under
+    --output-dir, or to -o for a single image (whose extension sets the format if --format doesn't).
     """
     from sashimi.api.resize import resize_images_generator
     from sashimi.config import IMAGE_RESIZE
+    from sashimi.config._base import normalize_target
 
     if width is None and height is None:
         fail("Give --width and/or --height to resize to.")
-    fmt = {"jpg": "jpeg"}.get(opt.enum_value(output_format), opt.enum_value(output_format))
+    opt.single_file_or_fail([path], output)
+    image_suffixes = {f".{name}": normalize_target(name) for name in ImageFormat.__members__} | {".tif": "tiff"}
+    fmt = normalize_target(opt.format_from_output(opt.enum_value(output_format), output, image_suffixes))
     options = _image_options(
         quality, lossless, flatten, background, optimize, progressive, subsampling, webp_method,
         compress_level, tiff_compression, resample, no_orient, keep_exif, strip_icc, width, height,
@@ -326,16 +339,15 @@ def resize_cmd(
             warn_unused(_flags(skipped), f"{source_format.upper()} images")
         return configs[source_format]
 
-    if not json_output:
-        console.print("[bold]📐 Resizing images...[/bold]")
-    runner = BatchRunner("Resize", json_output, limit_output)
+    runner = BatchRunner("resize", "Resize", json_output, limit_output)
     gen = resize_images_generator(
         path,
         configs[targets[0]] if fmt else config_for,
         recursive=recursive,
         force=force,
-        suffix=suffix,
         on_file_progress=runner.file_progress,
+        output=output,
+        output_dir=output_dir,
     )
     runner.run(gen)
 
@@ -344,12 +356,9 @@ def rotate_cmd(
     path: Annotated[pathlib.Path, typer.Argument(help="Video file or directory.", show_default=False)],
     angle: Annotated[Angle, typer.Argument(help="Clockwise rotation in degrees.")] = Angle.a90,
     flip: Annotated[Flip, typer.Option("--flip", help="Mirror the picture.", rich_help_panel=opt.GENERAL)] = Flip.none,
-    output_format: Annotated[
-        VideoFormat, typer.Option("--format", "-o", help="Output format.", rich_help_panel=opt.GENERAL)
-    ] = VideoFormat.mp4,
-    suffix: Annotated[
-        str, typer.Option("--suffix", help="Appended to each output's name.", rich_help_panel=opt.GENERAL)
-    ] = "_rotated",
+    output_format: Annotated[Optional[VideoFormat], opt.format_option("Output format [default: mp4].")] = None,
+    output: Annotated[Optional[pathlib.Path], opt.output_option("<name>.rotated.mp4 next to the input")] = None,
+    output_dir: opt.OutputDir = None,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
     workers: opt.Workers = None,
@@ -363,29 +372,112 @@ def rotate_cmd(
 ):
     """
     Rotate (clockwise) and/or flip videos, re-encoding them. Writes
-    [cyan]<name>_rotated.mp4[/cyan] next to each video. Videos are limited to 10 minutes.
+    [cyan]<name>.rotated.mp4[/cyan] next to each video, under --output-dir, or to -o for a single
+    video. Videos are limited to 10 minutes.
     """
     from sashimi.api.transform import transform_videos_generator
     from sashimi.config import VIDEO_TRANSFORM
 
-    model = VIDEO_TRANSFORM.model_for(target=output_format.value)
+    opt.single_file_or_fail([path], output)
+    fmt = opt.format_from_output(opt.enum_value(output_format), output, {".mp4": "mp4", ".webm": "webm"}) or "mp4"
+    model = VIDEO_TRANSFORM.model_for(target=fmt)
     options = {
-        "target": output_format.value, "rotate": int(angle.value), "flip": flip.value, "crf": crf,
+        "target": fmt, "rotate": int(angle.value), "flip": flip.value, "crf": crf,
         "preset": opt.enum_value(preset), "speed": speed, "audio_bitrate_kbps": audio_bitrate, "mute": mute or None,
     }  # fmt: skip
     data, unused = opt.split_options(model, options)
-    warn_unused(_flags(unused), f"{output_format.value.upper()} output")
+    warn_unused(_flags(unused), f"{fmt.upper()} output")
     config = _validate(model, data)
-    if not json_output:
-        console.print("[bold]🔃 Rotating videos...[/bold]")
-    runner = BatchRunner("Rotate", json_output, limit_output)
+    runner = BatchRunner("rotate", "Rotate", json_output, limit_output)
     gen = transform_videos_generator(
         path,
         config,
         recursive=recursive,
         force=force,
-        suffix=suffix,
         max_workers=workers,
         on_file_progress=runner.file_progress,
+        output=output,
+        output_dir=output_dir,
+    )
+    runner.run(gen)
+
+
+def favicon_cmd(
+    paths: Annotated[List[pathlib.Path], typer.Argument(help="Image files or directories.", show_default=False)],
+    output: Annotated[Optional[pathlib.Path], opt.output_option("<name>.favicons.zip next to the image")] = None,
+    output_dir: opt.OutputDir = None,
+    recursive: opt.Recursive = False,
+    force: opt.Force = False,
+    json_output: opt.JsonOutput = False,
+    limit_output: opt.LimitOutput = 50,
+    ico_sizes: Annotated[
+        Optional[str],
+        opt.option("--ico-sizes", help="Sizes inside favicon.ico, e.g. 16,32,48 [default: 16,32,48].", panel=opt.IMAGE),
+    ] = None,
+    fit: Annotated[
+        Optional[opt.IcoFit],
+        opt.option("--fit", help="Pad or crop non-square images [default: pad].", panel=opt.IMAGE),
+    ] = None,
+    resample: opt.ResampleOpt = None,
+    background: Annotated[
+        Optional[str],
+        opt.option(
+            "--background",
+            help="Fill for the Apple touch icon, which must be opaque [default: #ffffff].",
+            panel=opt.IMAGE,
+        ),
+    ] = None,
+    name: Annotated[
+        Optional[str],
+        opt.option("--name", help="The web app's name in site.webmanifest [default: none].", panel=MANIFEST),
+    ] = None,
+    short_name: Annotated[
+        Optional[str], opt.option("--short-name", help="A short name for home screens [default: none].", panel=MANIFEST)
+    ] = None,
+    theme_color: Annotated[
+        Optional[str],
+        opt.option(
+            "--theme-color",
+            help="Browser UI colour, e.g. '#336699', in the manifest and HTML [default: none].",
+            panel=MANIFEST,
+        ),
+    ] = None,
+    manifest_background: Annotated[
+        Optional[str],
+        opt.option(
+            "--manifest-background", help="Splash screen colour in the manifest [default: none].", panel=MANIFEST
+        ),
+    ] = None,
+):
+    """
+    Make a favicon pack for each image: a .zip with [cyan]favicon.ico[/cyan], PNG icons (16, 32, 48,
+    180 for Apple and 192, 512 for web apps), [cyan]site.webmanifest[/cyan] and [cyan]favicon.html[/cyan]
+    with the <head> tags to paste. Writes [cyan]<name>.favicons.zip[/cyan] next to each image,
+    under --output-dir, or to -o for a single image.
+    """
+    from sashimi.api.favicon import make_favicon_packs_generator
+    from sashimi.config import FaviconPackConfig
+
+    opt.single_file_or_fail(paths, output)
+    options = {
+        "ico_sizes": opt.parse_sizes(ico_sizes, "--ico-sizes"),
+        "fit": opt.enum_value(fit),
+        "resample": opt.enum_value(resample),
+        "background_color": background,
+        "name": name,
+        "short_name": short_name,
+        "theme_color": theme_color,
+        "manifest_background_color": manifest_background,
+    }
+    config = _validate(FaviconPackConfig, opt.given(options))
+    runner = BatchRunner("favicon", "Favicon packs", json_output, limit_output)
+    gen = make_favicon_packs_generator(
+        paths,
+        config,
+        recursive=recursive,
+        force=force,
+        on_file_progress=runner.file_progress,
+        output=output,
+        output_dir=output_dir,
     )
     runner.run(gen)

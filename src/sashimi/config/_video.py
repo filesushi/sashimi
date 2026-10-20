@@ -12,7 +12,9 @@ from sashimi.config._limits import (
     DEFAULT_GIF_SECONDS,
     GIF_TOO_LONG,
     MAX_GIF_SECONDS,
+    MAX_PREVIEW_SAMPLES,
     MAX_VIDEO_SECONDS,
+    PREVIEW_TOO_LONG,
     VIDEO_CLIP_TOO_LONG,
     WEBP_TOO_LONG,
 )
@@ -208,18 +210,74 @@ class Vp9TrimConfig(_Vp9Options, _AccurateRange):
     """The output container."""
 
 
+PreviewCrop = Literal["none", "9:16", "1:1"]
+
+
+class _Preview(ParamsModel):
+    samples: int = Field(default=5, ge=1, le=MAX_PREVIEW_SAMPLES)
+    """How many clips to take from across the video. Short videos get fewer, so clips never overlap."""
+    sample_duration: float = Field(default=2.0, gt=0, le=10)
+    """Length of each clip in seconds."""
+    start_offset_percent: float = Field(default=10.0, ge=0.0, le=100.0)
+    """Skip this much of the start of the video (intros, logos)."""
+    end_offset_percent: float = Field(default=10.0, ge=0.0, le=100.0)
+    """Skip this much of the end of the video (credits)."""
+    max_height: int = Field(default=360, ge=64, le=2160)
+    """Scale down to at most this height. Never upscales; keeps the aspect ratio."""
+    max_width: int | None = Field(default=None, ge=64, le=3840)
+    """Also scale down to at most this width. Blank sets no width limit."""
+    crop: PreviewCrop = "none"
+    """Crop the centre of the picture to this shape first, e.g. "9:16" for vertical video sites."""
+    fps: int = Field(default=15, ge=1, le=30)
+    """Frames per second."""
+    loop: bool = True
+    """Loop forever, or play once."""
+
+    @model_validator(mode="after")
+    def _check_length(self) -> Self:
+        if self.samples * self.sample_duration > MAX_GIF_SECONDS:
+            raise sentence(PREVIEW_TOO_LONG)
+        return self
+
+
+class GifPreviewConfig(_Preview):
+    """A GIF preview: short clips sampled from across a video, played one after another. No sound."""
+
+    target: Annotated[Literal["gif"], TargetName] = "gif"
+    """The output format."""
+
+
+class WebpPreviewConfig(_Preview):
+    """An animated WebP preview: short clips sampled from across a video, played one after another. No sound."""
+
+    target: Annotated[Literal["webp"], TargetName] = "webp"
+    """The output format."""
+    quality: int = Field(default=75, ge=0, le=100)
+    """Lossy quality, 0 (smallest) to 100 (best)."""
+
+
 VideoConvertConfig = GifVideoConfig | WebpVideoConfig | WebmVideoConfig | Mp4VideoConfig
 """Any video conversion config: one model per output format."""
 TransformConfig = Mp4TransformConfig | WebmTransformConfig
 """Any rotate/flip config."""
 TrimConfig = CopyTrimConfig | H264TrimConfig | Vp9TrimConfig
 """Any trim config: a stream copy, or an accurate re-encode."""
+PreviewConfig = GifPreviewConfig | WebpPreviewConfig
+"""Any preview config."""
 
 VIDEO_CONVERT: ConfigFamily[VideoConvertConfig] = ConfigFamily(
     "video convert",
     {"gif": GifVideoConfig, "webp": WebpVideoConfig, "webm": WebmVideoConfig, "mp4": Mp4VideoConfig},
 )
 """Video conversion, by ``target``: gif, webp (animated), webm, mp4."""
+
+VIDEO_PREVIEW: ConfigFamily[PreviewConfig] = ConfigFamily(
+    "video preview", {"gif": GifPreviewConfig, "webp": WebpPreviewConfig}
+)
+"""
+Previews (short clips sampled from across a video, played in turn), by ``target``: gif or webp.
+The clips' total length is at most :data:`MAX_GIF_SECONDS`.
+"""
 
 VIDEO_TRANSFORM: ConfigFamily[TransformConfig] = ConfigFamily(
     "video transform", {"mp4": Mp4TransformConfig, "webm": WebmTransformConfig}, default="mp4"

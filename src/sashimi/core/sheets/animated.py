@@ -7,8 +7,6 @@ import concurrent.futures
 import logging
 import math
 from collections.abc import Iterator
-from typing import Literal
-
 from PIL import Image
 
 from sashimi.config import MAX_FRAME_BYTES, AnimatedGifSheetConfig, AnimatedSheetConfig
@@ -25,7 +23,7 @@ from sashimi.core._ffmpeg import (
 )
 from sashimi.core._resources import resolve_max_workers
 from sashimi.core.sheets._layout import SheetLayout, check_tiles, clip_starts, plan_layout
-from sashimi.core.sheets._render import HeaderStyle, format_duration, load_font, render_header, stamp, timestamp_label
+from sashimi.core.sheets._render import HeaderStyle, format_duration, load_font, padded_label, render_header, stamp
 from sashimi.core.sheets.static import NO_FRAMES, check_sheet_size, header_lines, optional_path, probe_sheet_source
 from sashimi.errors import BinaryNotFoundError, InvalidOptionsError, ProcessingError, UnsupportedMediaError
 
@@ -34,6 +32,8 @@ __all__ = ["render_animated", "build_clip_command", "build_encode_command"]
 logger = logging.getLogger("sashimi")
 
 TOO_SHORT_FOR_ANIMATED = "This video is too short for an animated contact sheet."
+MIN_ANIMATED_SECONDS = 1.0
+LABEL_PADDING = 4
 TOO_BIG_TO_RENDER = (
     "These settings would make the animated sheet too large to render. Use a smaller width, a lower "
     "frame rate or shorter clips."
@@ -153,15 +153,20 @@ def render_animated(
     min(4, CPUs)), then composited in Python and encoded by one ffmpeg process using
     `max_workers` threads; ``max_workers=2`` stays near 20 threads in total. Decoded frames are
     held in memory (bounded at 400 MB) and nothing but the output is written to disk.
+
+    A video shorter than one clip (but at least a second long) gets a single tile of the whole video.
     """
     workers = resolve_max_workers(max_workers)
-    info = probe_sheet_source(input_path, config.sample_duration, TOO_SHORT_FOR_ANIMATED)
+    info = probe_sheet_source(input_path, min(config.sample_duration, MIN_ANIMATED_SECONDS), TOO_SHORT_FOR_ANIMATED)
     assert info.duration is not None and info.display_aspect_ratio
+    single = info.duration < config.sample_duration
+    clip_length = info.duration if single else config.sample_duration
+    cols, rows = (1, 1) if single else (config.cols, config.rows)
     layout: SheetLayout = plan_layout(
-        config.width, config.cols, config.rows, config.gap, info.display_aspect_ratio, even=True
+        config.width, cols, rows, config.gap, info.display_aspect_ratio, even=True, animated=True
     )
     check_tiles(layout)
-    frames_per_clip = max(1, round(config.sample_duration * config.fps))
+    frames_per_clip = max(1, round(clip_length * config.fps))
     frame_bytes = layout.thumb_w * layout.thumb_h * 3
     if layout.cells * frames_per_clip * frame_bytes > MAX_FRAME_BYTES:
         raise InvalidOptionsError(TOO_BIG_TO_RENDER)
@@ -169,8 +174,12 @@ def render_animated(
     header_h = header_style.height if config.show_header else 0
     sheet_w, sheet_h = layout.grid_width, header_h + layout.grid_height
     check_sheet_size(sheet_w, sheet_h, TOO_BIG_TO_RENDER)
-    starts = clip_starts(
-        info.duration, layout.cells, config.sample_duration, config.start_offset_percent, config.end_offset_percent
+    starts = (
+        [0.0]
+        if single
+        else clip_starts(
+            info.duration, layout.cells, clip_length, config.start_offset_percent, config.end_offset_percent
+        )
     )
 
     ffmpeg = ffmpeg_binary()
@@ -179,9 +188,7 @@ def render_animated(
         futures = {
             pool.submit(
                 _grab_clip,
-                build_clip_command(
-                    input_path, start, config.sample_duration, config.fps, layout.thumb_w, layout.thumb_h, ffmpeg
-                ),
+                build_clip_command(input_path, start, clip_length, config.fps, layout.thumb_w, layout.thumb_h, ffmpeg),
                 frame_bytes,
             ): slot
             for slot, start in enumerate(starts)
@@ -217,13 +224,14 @@ def render_animated(
                 tile = Image.frombytes("RGB", size, clip[min(k, len(clip) - 1)])
                 if config.show_timestamps:
                     seconds = starts[slot] + k / config.fps
-                    label = timestamp_label(
+                    label = padded_label(
                         format_duration(math.floor(seconds)),
                         ts_font,
                         config.timestamp_bg_color,
                         config.timestamp_text_color,
+                        LABEL_PADDING,
                     )
-                    stamp(tile, label)
+                    stamp(tile, label, LABEL_PADDING)
                 x, y = layout.cell_origin(slot)
                 canvas.paste(tile, (x, header_h + y))
             yield canvas.tobytes()

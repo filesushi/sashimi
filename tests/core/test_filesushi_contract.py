@@ -25,6 +25,7 @@ FAMILIES = {
     "IMAGE_RESIZE": (config.IMAGE_RESIZE, "target", {"target": "webp"}),
     "VIDEO_CONVERT": (config.VIDEO_CONVERT, "target", {"target": "mp4"}),
     "VIDEO_TRANSFORM": (config.VIDEO_TRANSFORM, "target", {"target": "webm"}),
+    "VIDEO_PREVIEW": (config.VIDEO_PREVIEW, "target", {"target": "gif"}),
     "VIDEO_TRIM": (config.VIDEO_TRIM, "container", {"container": "webm", "accurate": True}),
     "AUDIO_CONVERT": (config.AUDIO_CONVERT, "target", {"target": "mp3"}),
     "CONTACT_SHEET": (config.CONTACT_SHEET, "target", {"target": "gif", "animated": True}),
@@ -41,7 +42,8 @@ FORM_FIELDS = {
     "not_an_option": "ignored",
 }
 ALL_MODELS = sorted(
-    {model for family, _, _ in FAMILIES.values() for model in family.models} | {config.IcoConfig},
+    {model for family, _, _ in FAMILIES.values() for model in family.models}
+    | {config.IcoConfig, config.FaviconPackConfig},
     key=lambda model: model.__name__,
 )
 
@@ -121,3 +123,11 @@ def test_user_errors_take_a_message_and_a_detail(error_type):
     assert str(error) == "70000000 px"
     plain = error_type("A sentence.")
     assert plain.detail is None and str(plain) == "A sentence."
+
+
+def test_new_in_0_6_0_for_filesushi():
+    assert config.IcoConfig.model_fields["background_color"].default is None
+    assert config.FaviconPackConfig.model_fields["background_color"].default == (255, 255, 255)
+    assert config.FAVICON_PNG_SIZES == (16, 32, 48, 180, 192, 512)
+    assert config.MAX_PREVIEW_SAMPLES == 10
+    assert config.CONTACT_SHEET.model_for(animated=True).model_fields["cols"].default == "auto"

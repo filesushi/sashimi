@@ -16,6 +16,7 @@ import json
 import pathlib
 import sys
 import time
+import zipfile
 
 NETWORK_EVENTS = {"socket.connect", "socket.getaddrinfo", "socket.gethostbyname", "socket.bind", "urllib.Request"}
 network_attempts: list[str] = []
@@ -36,8 +37,11 @@ from sashimi.config import (  # noqa: E402
     IMAGE_CONVERT,
     IMAGE_RESIZE,
     VIDEO_CONVERT,
+    VIDEO_PREVIEW,
     VIDEO_TRANSFORM,
     VIDEO_TRIM,
+    FaviconPackConfig,
+    IcoConfig,
 )
 from sashimi.errors import UserInputError  # noqa: E402
 
@@ -74,6 +78,18 @@ JOBS = {
         "JPEG",
     ),
     "image-to-ico": ("ico", lambda s, d: image.to_ico(s, d), "ICO"),
+    "image-to-ico-background": (
+        "ico",
+        lambda s, d: image.to_ico(s, d, IcoConfig.from_params({"background_color": "#ffffff"})),
+        "ICO",
+    ),
+    "favicon-pack": (
+        "zip",
+        lambda s, d: image.favicon_pack(
+            s, d, FaviconPackConfig.from_params({"name": "Holiday", "theme_color": "#336699"})
+        ),
+        "zip",
+    ),
     "heic-to-jpeg": (
         "jpg",
         lambda s, d: image.convert(s, d, IMAGE_CONVERT.from_params({}, target="jpeg")),
@@ -105,6 +121,23 @@ JOBS = {
         "webp",
         lambda s, d: video.convert(s, d, VIDEO_CONVERT.from_params({}, target="webp"), max_workers=WORKERS),
         "WEBP",
+    ),
+    "video-preview-gif": (
+        "gif",
+        lambda s, d: video.preview(s, d, VIDEO_PREVIEW.from_params({}, target="gif"), max_workers=WORKERS),
+        "GIF",
+    ),
+    "video-preview-webp-portrait": (
+        "webp",
+        lambda s, d: video.preview(
+            s, d, VIDEO_PREVIEW.from_params({"crop": "9:16", "samples": 10}, target="webp"), max_workers=WORKERS
+        ),
+        "WEBP",
+    ),
+    "video-remux-to-mov": (
+        "mov",
+        lambda s, d: video.trim(s, d, VIDEO_TRIM.from_params({}, container="mov")),
+        "mov",
     ),
     "video-trim": (
         "mkv",
@@ -209,6 +242,11 @@ def validate(output: pathlib.Path, expected: str) -> str:
     """Opens the output with Pillow (images) or ffprobe (media) and returns a short description."""
     if expected == "json":
         return "probe: " + json.loads(output.read_text())["container"]
+    if expected == "zip":
+        with zipfile.ZipFile(output) as archive:
+            assert archive.testzip() is None, "corrupt zip"
+            json.loads(archive.read("site.webmanifest"))
+            return f"zip: {len(archive.namelist())} files"
     if expected.isupper():
         from PIL import Image
 

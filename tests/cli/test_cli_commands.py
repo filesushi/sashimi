@@ -54,7 +54,9 @@ def test_convert_command(tmp_path):
     Image.new("RGBA", (200, 100), (255, 0, 0, 128)).save(tmp_path / "a.png")
     result = runner.invoke(app, ["convert", "a.png", "webp", "--width", "50", "-q", "70%", "--json"])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["results"][0]["message"] == "Converted to a.webp"
+    report = json.loads(result.stdout)
+    assert (report["command"], report["results"][0]["message"]) == ("convert", "Converted to a.webp")
+    assert report["results"][0]["output"] == "a.webp"
     with Image.open(tmp_path / "a.webp") as img:
         assert img.size == (50, 25) and img.mode == "RGBA"
 
@@ -91,9 +93,36 @@ def test_extract_command(video_blob, tmp_path):
     clip.write_bytes(video_blob.read_bytes())
     result = runner.invoke(app, ["extract", "clip.mkv", "1s", "00:03"])
     assert result.exit_code == 0, result.output
-    assert (tmp_path / "clip_extracted.mkv").exists()
+    assert (tmp_path / "clip.extracted.mkv").exists()
     again = runner.invoke(app, ["extract", "clip.mkv", "1s", "3s"])
-    assert "already exists" in again.stdout
+    assert "already exists" in again.stdout and again.exit_code == 0
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize(
+    "args, length",
+    [(["4"], 2.0), (["-s", "4"], 2.0), (["-d", "2", "--accurate"], 2.0), (["-s", "1", "-d", "3", "--accurate"], 3.0)],
+)
+def test_extract_to_the_end_or_by_length(video_blob, tmp_path, args, length):
+    (tmp_path / "clip.mkv").write_bytes(video_blob.read_bytes())
+    result = runner.invoke(app, ["extract", "clip.mkv", *args, "-o", "cut.mkv", "--json"])
+    assert result.exit_code == 0, result.output
+    from sashimi import probe
+
+    assert probe(tmp_path / "cut.mkv").duration == pytest.approx(length, abs=0.15)
+
+
+def test_extract_needs_a_time(tmp_path):
+    (tmp_path / "clip.mkv").write_bytes(b"x")
+    result = runner.invoke(app, ["extract", "clip.mkv"])
+    assert result.exit_code == 2 and "--duration" in result.stderr
+
+
+def test_extract_refuses_bad_times_before_running(tmp_path):
+    (tmp_path / "clip.mkv").write_bytes(b"x")
+    for args, message in [(["5", "2"], "The end time must be after the start time."), (["abc"], "isn't a time")]:
+        result = runner.invoke(app, ["extract", "clip.mkv", *args])
+        assert result.exit_code == 2 and message in " ".join(result.stderr.split())
 
 
 @needs_ffmpeg
@@ -101,7 +130,7 @@ def test_thumbs_command_with_symlinked_input(video_blob, tmp_path):
     (tmp_path / "holiday.mkv").symlink_to(video_blob)
     result = runner.invoke(app, ["thumbs", "holiday.mkv", "--width", "400", "--cols", "2", "--rows", "1", "--json"])
     assert result.exit_code == 0, result.output
-    assert (tmp_path / "holiday.mkv.jpeg").exists()
+    assert (tmp_path / "holiday.sheet.jpg").exists()
     assert not (tmp_path / "home").exists() and not (tmp_path / "sashimi.toml").exists()
 
 
@@ -114,8 +143,8 @@ def test_extract_reports_real_length(video_blob, tmp_path, suffix, accurate):
     args = ["extract", "clip.mkv", "1.6", "3.6", "-o", f"cut{suffix}", "--json", *(["--accurate"] * accurate)]
     result = runner.invoke(app, args)
     assert result.exit_code == 0, result.output
-    message = json.loads(result.stdout)["message"]
-    assert ("--accurate" in message) is not accurate
+    message = json.loads(result.stdout)["results"][0]["message"]
+    assert ("accurate cut" in message) is not accurate
     assert message.startswith("Extracted 2.0s" if accurate else "Extracted 2.6s")
 
 

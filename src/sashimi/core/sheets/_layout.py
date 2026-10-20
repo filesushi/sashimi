@@ -12,10 +12,21 @@ from sashimi.errors import InvalidOptionsError, MediaTooLargeError
 BAD_SHAPE = "This video is too tall or too wide to make a contact sheet."
 
 
-def grid_for_aspect(aspect_ratio: float) -> tuple[int, int]:
-    """Columns x rows that suit a video's display aspect ratio (portrait videos get wide, short grids)."""
+ANIMATED_GRID = (3, 3)
+"""The automatic grid of an animated sheet: 3x3, for legible tiles and a quick render."""
+ANIMATED_PORTRAIT_GRID = (4, 2)
+"""The automatic grid of an animated sheet of a portrait video (aspect ratio under 0.95)."""
+
+
+def grid_for_aspect(aspect_ratio: float, animated: bool = False) -> tuple[int, int]:
+    """
+    Columns x rows that suit a video's display aspect ratio (portrait videos get wide, short
+    grids). Animated sheets use fewer, larger tiles: 3x3, or 4x2 for portrait videos.
+    """
+    if animated:
+        return ANIMATED_PORTRAIT_GRID if aspect_ratio < 0.95 else ANIMATED_GRID
     table = [
-        (0.55, (8, 2)),
+        (0.6, (8, 2)),
         (0.65, (7, 2)),
         (0.75, (6, 2)),
         (0.95, (5, 2)),
@@ -31,9 +42,9 @@ def grid_for_aspect(aspect_ratio: float) -> tuple[int, int]:
     return (6, 8)
 
 
-def choose_grid(cols: GridValue, rows: GridValue, aspect_ratio: float) -> tuple[int, int]:
+def choose_grid(cols: GridValue, rows: GridValue, aspect_ratio: float, animated: bool = False) -> tuple[int, int]:
     """Explicit cols/rows win individually; 'auto' dimensions come from the aspect ratio."""
-    auto_cols, auto_rows = grid_for_aspect(aspect_ratio)
+    auto_cols, auto_rows = grid_for_aspect(aspect_ratio, animated)
     return (cols if isinstance(cols, int) else auto_cols, rows if isinstance(rows, int) else auto_rows)
 
 
@@ -64,13 +75,20 @@ class SheetLayout:
 
 
 def plan_layout(
-    width: int, cols: GridValue, rows: GridValue, gap: int, aspect_ratio: float, even: bool = False
+    width: int,
+    cols: GridValue,
+    rows: GridValue,
+    gap: int,
+    aspect_ratio: float,
+    even: bool = False,
+    animated: bool = False,
 ) -> SheetLayout:
     """
     Fits the grid into `width` pixels. Tile height follows the display aspect ratio.
-    `even` rounds tiles to even sizes, which video encoders require.
+    `even` rounds tiles to even sizes, which video encoders require. `animated` picks the
+    animated sheets' automatic grid (see :func:`grid_for_aspect`).
     """
-    n_cols, n_rows = choose_grid(cols, rows, aspect_ratio)
+    n_cols, n_rows = choose_grid(cols, rows, aspect_ratio, animated)
     thumb_w = max(1, (width - (n_cols + 1) * gap) // n_cols)
     if even:
         thumb_w = max(2, thumb_w // 2 * 2)

@@ -1,35 +1,53 @@
 # SPDX-FileCopyrightText: 2026 The FileSushi Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""`sashimi extract`, `flatten` and `info`."""
+"""`sashimi extract`, `remux`, `flatten` and `info`."""
 
 from __future__ import annotations
 
-import json
 import pathlib
-import time
-from typing import Annotated, Optional
+from enum import Enum
+from typing import Annotated, List, Optional
 
 import typer
 
 from sashimi.cli import _options as opt
-from sashimi.cli._output import STATUS_STYLES, console, display_path, fail
+from sashimi.cli._output import BatchRunner, STATUS_STYLES, console, display_path, err_console, fail, print_json
+
+
+class Container(str, Enum):
+    mkv = "mkv"
+    mp4 = "mp4"
+    webm = "webm"
+    mov = "mov"
 
 
 def extract_cmd(
-    path: Annotated[pathlib.Path, typer.Argument(help="Video file to cut from.", show_default=False)],
+    path: Annotated[pathlib.Path, typer.Argument(help="Video file (or directory) to cut from.", show_default=False)],
     start_arg: Annotated[Optional[str], typer.Argument(help="Start time (or use --start).", show_default=False)] = None,
     end_arg: Annotated[Optional[str], typer.Argument(help="End time (or use --end).", show_default=False)] = None,
     start: Annotated[
-        Optional[str], typer.Option("--start", "-s", help="Start time, e.g. 42s, 1h22m, 00:24:09.")
+        Optional[str], opt.option("--start", "-s", help="Start time, e.g. 42s, 1h22m, 00:24:09 [default: 0].")
     ] = None,
-    end: Annotated[Optional[str], typer.Option("--end", "-e", help="End time, e.g. 50m42s, 00:50:42.")] = None,
-    output: Annotated[
-        Optional[pathlib.Path],
-        opt.option("--output", "-o", help="Output path [default: <name>_extracted.<ext> next to the input]."),
+    end: Annotated[
+        Optional[str], opt.option("--end", "-e", help="End time, e.g. 50m42s, 00:50:42 [default: the end].")
     ] = None,
+    duration: Annotated[
+        Optional[str],
+        opt.option(
+            "--duration", "-d", help="Length of the clip instead of an end time, e.g. 30s [default: to the end]."
+        ),
+    ] = None,
+    output_format: Annotated[
+        Optional[Container],
+        opt.format_option("Container: mkv, mp4, webm or mov [default: from -o, else the input's, else mkv]."),
+    ] = None,
+    output: Annotated[Optional[pathlib.Path], opt.output_option("<name>.extracted.<ext> next to the input")] = None,
+    output_dir: opt.OutputDir = None,
+    recursive: opt.Recursive = False,
     force: opt.Force = False,
     json_output: opt.JsonOutput = False,
+    limit_output: opt.LimitOutput = 50,
     workers: opt.Workers = None,
     accurate: Annotated[
         bool,
@@ -46,50 +64,87 @@ def extract_cmd(
     mute: opt.Mute = False,
 ):
     """
-    Cut a section out of a video. By default it doesn't re-encode: instant and lossless, but cuts
+    Cut a section out of a video, from START (default the beginning) to END, or for --duration;
+    with neither, to the end. By default it doesn't re-encode: instant and lossless, but cuts
     land on keyframes, so the clip may start before the requested time. [cyan]--accurate[/cyan]
-    re-encodes for an exact cut; the encoder options only apply with it.
+    re-encodes for an exact cut; the encoder options only apply with it. Writes
+    [cyan]<name>.extracted.<ext>[/cyan] next to the video, under --output-dir, or to -o.
 
-    [dim]Examples:  sashimi extract clip.mkv 00:24:09 00:50:42   ·   sashimi extract clip.mp4 -s 42s -e 1h22m --accurate[/dim]
+    [dim]Examples:  sashimi extract clip.mkv 00:24:09 00:50:42   ·   sashimi extract clip.mp4 -s 1h -d 90s --accurate   ·   sashimi extract clip.mp4 10m[/dim]
     """
     final_start, final_end = start or start_arg, end or end_arg
-    if not final_start or not final_end:
-        fail("Both a start and an end time are needed, e.g. [cyan]sashimi extract clip.mp4 1m30s 2m[/cyan].")
-    opt.exists_or_fail(path)
+    if final_start is None and final_end is None and duration is None:
+        fail("Give a start time, an end time or a --duration, e.g. [cyan]sashimi extract clip.mp4 1m30s 2m[/cyan].")
+    opt.single_file_or_fail([path], output)
     encoder_flags = {"--crf": crf, "--preset": preset, "--speed": speed, "--audio-bitrate": audio_bitrate}
     encoder_flags["--mute"] = mute or None
     if not accurate and (used := [flag for flag, value in encoder_flags.items() if value is not None]):
         fail(f"{', '.join(used)} only {'applies' if len(used) == 1 else 'apply'} with --accurate (a re-encoded cut).")
 
-    from sashimi.api.extract import extract
+    from sashimi.api.extract import extract_generator
+    from sashimi.errors import UserInputError
 
-    if not json_output:
-        console.print(
-            f"[bold]✂️  Extracting [yellow]{final_start}[/yellow] ➔ [yellow]{final_end}[/yellow] from [cyan]{display_path(path)}[/cyan]...[/bold]"
+    runner = BatchRunner("extract", "Extract", json_output, limit_output)
+    try:
+        gen = extract_generator(
+            path,
+            final_start,
+            final_end,
+            duration=duration,
+            container=opt.enum_value(output_format),
+            accurate=accurate,
+            crf=crf,
+            preset=opt.enum_value(preset),
+            speed=speed,
+            audio_bitrate_kbps=audio_bitrate,
+            mute=mute,
+            recursive=recursive,
+            force=force,
+            max_workers=workers,
+            on_file_progress=runner.file_progress,
+            output=output,
+            output_dir=output_dir,
         )
-    began = time.perf_counter()
-    status, message, target = extract(
-        path,
-        final_start,
-        final_end,
-        output_path=output,
-        force=force,
-        accurate=accurate,
-        crf=crf,
-        preset=opt.enum_value(preset),
-        speed=speed,
-        audio_bitrate_kbps=audio_bitrate,
-        mute=mute,
-        max_workers=workers,
-    )
-    elapsed = time.perf_counter() - began
+    except UserInputError as e:
+        fail(e.user_message)
+    runner.run(gen)
 
-    if json_output:
-        print(json.dumps({"status": status, "message": message, "output": str(target), "seconds": round(elapsed, 2)}))
-    else:
-        console.print(f"{STATUS_STYLES.get(status, status)}: {message} [dim]({elapsed:.1f}s)[/dim]")
-    if status == "error":
-        raise typer.Exit(code=1)
+
+def remux_cmd(
+    paths: Annotated[List[pathlib.Path], typer.Argument(help="Video files or directories.", show_default=False)],
+    output_format: Annotated[
+        Optional[Container], opt.format_option("Container: mkv, mp4, webm or mov [default: mkv, or from -o].")
+    ] = None,
+    output: Annotated[Optional[pathlib.Path], opt.output_option("<name>.mkv next to the input")] = None,
+    output_dir: opt.OutputDir = None,
+    recursive: opt.Recursive = False,
+    force: opt.Force = False,
+    json_output: opt.JsonOutput = False,
+    limit_output: opt.LimitOutput = 50,
+):
+    """
+    Copy each video into another container without re-encoding: instant, lossless, and every
+    stream is kept (all audio tracks, subtitles, attachments). MP4 subtitles are converted to
+    SRT for MKV. Videos the container can't hold are reported, and nothing is written for them.
+    Writes [cyan]<name>.mkv[/cyan] next to each video, under --output-dir, or to -o for a single
+    video. Source files are never changed or removed.
+    """
+    from sashimi.api.remux import remux_files_generator
+
+    opt.single_file_or_fail(paths, output)
+    suffixes = {".mkv": "mkv", ".mp4": "mp4", ".m4v": "mp4", ".webm": "webm", ".mov": "mov"}
+    container = opt.format_from_output(opt.enum_value(output_format), output, suffixes) or "mkv"
+    runner = BatchRunner("remux", f"Remux to {container.upper()}", json_output, limit_output)
+    gen = remux_files_generator(
+        paths,
+        container,  # type: ignore[arg-type]
+        recursive=recursive,
+        force=force,
+        on_file_progress=runner.file_progress,
+        output=output,
+        output_dir=output_dir,
+    )
+    runner.run(gen)
 
 
 def flatten_cmd(
@@ -97,31 +152,61 @@ def flatten_cmd(
         pathlib.Path,
         typer.Argument(exists=True, file_okay=False, dir_okay=True, help="Directory to flatten.", show_default=False),
     ],
+    dry_run: Annotated[bool, typer.Option("--dry-run", "-n", help="Show what would move, and change nothing.")] = False,
     force: Annotated[bool, typer.Option("-f", "--force", help="Don't ask for confirmation.")] = False,
+    json_output: opt.JsonOutput = False,
+    limit_output: opt.LimitOutput = 50,
 ):
     """
-    Move every file from subdirectories into the directory itself, renaming on name clashes,
-    then remove the emptied subdirectories. [bold yellow]Changes your files; asks first unless -f.[/bold yellow]
+    Move every file from subdirectories into the directory itself, then remove the emptied
+    subdirectories. The whole plan is made first; clashing names get the subfolder as a prefix
+    (a/x.txt becomes a_x.txt), and nothing is ever overwritten. Symbolic links, and the files
+    and folders they point to, stay where they are so links keep working.
+    [bold yellow]Changes your files; asks first unless -f or --dry-run.[/bold yellow]
     """
-    console.print(f"Directory to flatten: [cyan]{source_dir}[/cyan]")
-    if not force:
-        console.print(
-            "\n[bold yellow]WARNING:[/bold yellow] This moves all files from subdirectories into "
-            f"'[cyan]{source_dir.name}[/cyan]' and deletes empty subdirectories. Clashing names are renamed."
-        )
-        typer.confirm("Proceed?", abort=True)
-
-    from sashimi.api.flatten import flatten
+    from sashimi.api.flatten import flatten, plan_flatten
+    from sashimi.errors import SashimiError, UserInputError
 
     try:
-        stats = flatten(source_dir)
-    except (FileNotFoundError, NotADirectoryError) as e:
-        fail(str(e), code=1)
-    console.print("[bold green]Flattening complete![/bold green]")
-    console.print(
-        f"Moved [green]{stats['moved']}[/green] files ([yellow]{stats['renamed']}[/yellow] renamed due to clashes); "
-        f"removed [blue]{stats['removed_dirs']}[/blue] empty subdirectories."
-    )
+        plan = plan_flatten(source_dir)
+    except UserInputError as e:
+        fail(e.user_message, code=1)
+    except SashimiError as e:
+        fail(str(e).splitlines()[0], code=1)
+    if not dry_run and not force:
+        if not plan.moves:
+            err_console.print("Nothing to move.")
+        else:
+            err_console.print(
+                f"[bold yellow]This moves {len(plan.moves)} files from the subdirectories of "
+                f"'{display_path(source_dir)}' into it ({len(plan.renamed)} renamed) and deletes the "
+                "emptied subdirectories.[/bold yellow] Use --dry-run to see the plan."
+            )
+            typer.confirm("Proceed?", abort=True, err=True)
+
+    report = flatten(source_dir, dry_run=dry_run)
+    if json_output:
+        print_json(report)
+    else:
+        from rich.markup import escape
+
+        rows = report["results"]
+        for row in rows[:limit_output]:
+            status = STATUS_STYLES.get(row["status"], row["status"])
+            name = escape(display_path(pathlib.Path(row["file"])))
+            console.print(f"{status}: [cyan]{name}[/cyan]: {escape(row['message'])}")
+        if len(rows) > limit_output:
+            console.print(
+                f"[dim]Showing the first {limit_output} of {len(rows)}. Use --limit-output to show more.[/dim]"
+            )
+        summary = report["summary"]
+        console.print(
+            f"[bold]{'Would move' if dry_run else 'Moved'} {summary['success']} files[/bold] "
+            f"({len(report['renamed'])} renamed), left {summary['skipped']} in place, {summary['errors']} errors; "
+            f"{'would remove' if dry_run else 'removed'} {len(report['removed_dirs'])} empty subdirectories."
+        )
+    if report["summary"]["errors"]:
+        raise typer.Exit(code=1)
 
 
 def info_cmd(

@@ -15,7 +15,8 @@ from sashimi.config import (
     Vp9TrimConfig,
 )
 from sashimi.errors import InvalidOptionsError, MediaTooLongError
-from sashimi.video import build_convert_command, build_transform_command, build_trim_command
+from sashimi.core.probe import MediaInfo, StreamInfo
+from sashimi.video import build_convert_command, build_transform_command, build_trim_command, check_copy_compatible
 
 COMMON = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-filter_threads", "2"]
 FORMATS = "3g2,3gp,aac,asf,avi,flac,flv,gif,m4a,matroska,mj2,mov,mp3,mp4,mpeg,mpegts,ogg,wav,webm"
@@ -251,3 +252,52 @@ def test_transform_family():
     with pytest.raises(InvalidOptionsError) as e:
         VIDEO_TRANSFORM.from_params({"rotate": 90, "crf": 60})
     assert e.value.user_message == "Invalid value for crf: input should be less than or equal to 51."
+
+
+def test_whole_file_copy_is_a_remux():
+    cmd = build_trim_command("in.blob", "out.tmp", CopyTrimConfig(container="mkv"), duration=103.0)
+    assert cmd == [
+        *COMMON[:-1], "1", "-progress", "pipe:1", "-nostats", *PROGRESS[3:], "-i", "file:in.blob",
+        "-map", "0", "-c", "copy", "-avoid_negative_ts", "make_zero",
+        "-fflags", "+bitexact", "-f", "matroska", "file:out.tmp",
+    ]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "container, subtitles, expected",
+    [
+        ("mkv", ["mov_text"], ["-c:s:0", "srt"]),
+        ("mkv", ["subrip", "mov_text", "ass"], ["-c:s:1", "srt"]),
+        ("mkv", ["hdmv_pgs_subtitle", "subrip"], []),
+        ("mp4", ["subrip", "ass", "mov_text"], ["-c:s:0", "mov_text", "-c:s:1", "mov_text"]),
+        ("mov", ["webvtt"], ["-c:s:0", "mov_text"]),
+        ("webm", ["mov_text", "webvtt"], ["-c:s:0", "webvtt"]),
+        ("mp4", [], []),
+    ],
+)
+def test_text_subtitles_are_converted_for_the_container(container, subtitles, expected):
+    cmd = build_trim_command(
+        "in.blob", "out.tmp", CopyTrimConfig(container=container), duration=10.0, subtitles=subtitles
+    )
+    copy = cmd.index("copy")
+    assert cmd[copy + 1 : cmd.index("-avoid_negative_ts")] == expected
+
+
+def test_accurate_trims_drop_subtitles_whatever_they_are():
+    config = H264TrimConfig(container="mkv", duration_seconds=2)
+    with_subs = build_trim_command("a", "b", config, duration=10.0, threads=2, subtitles=["mov_text"])
+    assert with_subs == build_trim_command("a", "b", config, duration=10.0, threads=2)
+    assert "-sn" in with_subs
+
+
+def _info(*streams):
+    return MediaInfo(container="mov,mp4", streams=[StreamInfo(type=t, codec=c) for t, c in streams])
+
+
+def test_copy_check_lets_text_subtitles_through():
+    check_copy_compatible(_info(("video", "h264"), ("subtitle", "mov_text")), "mkv")
+    check_copy_compatible(_info(("video", "vp9"), ("subtitle", "mov_text")), "webm")
+    check_copy_compatible(_info(("video", "h264"), ("subtitle", "subrip")), "mp4")
+    with pytest.raises(InvalidOptionsError) as e:
+        check_copy_compatible(_info(("video", "h264"), ("subtitle", "hdmv_pgs_subtitle")), "mp4")
+    assert e.value.user_message == "This video can't be trimmed to MP4 without re-encoding. Try MKV instead."

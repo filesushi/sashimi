@@ -1,7 +1,105 @@
 # Migrating from 0.5 to 0.6
 
 0.6.0 is the first release on PyPI (`pip install sashimi-convert`). If you used a private 0.5.1
-build, replace it with 0.6.0. Conversion outputs are unchanged.
+build, replace it with 0.6.0. Conversion outputs are unchanged, except contact sheets as described
+in the next section. The single-file functions take the same arguments; the batch API and the CLI
+changed more, below.
+
+## Contact sheets
+
+| What | 0.5 | 0.6 |
+|---|---|---|
+| Animated sheet, `cols`/`rows` `"auto"` | the still sheets' table: 6x5 for 16:9, 7x2 for 9:16 | 3x3, or 4x2 for portrait videos (aspect ratio under 0.95) |
+| Animated sheet time labels | 2 px padding, text near the bottom edge | 4 px padding, text centred, 4 px from the tile's corner |
+| Still sheet of a 9:16 video | 7x2 | 8x2 (aspect ratios 0.55-0.6) |
+| Animated sheet of a clip shorter than `sample_duration` | `MediaTooShortError` | one tile of the whole clip (still `MediaTooShortError` under 1 s) |
+
+To keep 0.5's look for animated sheets, pass `cols` and `rows` explicitly, e.g. `cols=6, rows=5`
+for a 16:9 video; the labels can't be switched back. Nothing else about sheets changed.
+
+## Lossless trims and subtitles
+
+A stream-copy trim (`CopyTrimConfig`) of a file with text subtitles the container can't hold,
+for example an MP4 with `mov_text` into MKV, used to raise `InvalidOptionsError` ("This video
+can't be trimmed to MKV without re-encoding. Try MP4 instead."). It now converts those subtitles
+(to SRT for MKV, `mov_text` for MP4/MOV, WebVTT for WebM) and copies everything else. If you
+showed that error as advice, there's nothing to show any more for these files.
+
+## Batch API (`sashimi.api`)
+
+**Output names.** Every batch function follows one policy (`sashimi.api` docstring, README):
+
+| Function | 0.5 output | 0.6 output |
+|---|---|---|
+| `make_thumbs` (still) | `clip.mp4.jpeg` | `clip.sheet.jpg` |
+| `make_thumbs` (animated) | `clip.mp4.webp` | `clip.animated-sheet.webp` |
+| `resize_images` | `photo_resized.jpg` (`suffix=`) | `photo.resized.jpg` |
+| `transform_videos` | `clip_rotated.mp4` (`suffix=`) | `clip.rotated.mp4` |
+| `extract` | `clip_extracted.mkv` | `clip.extracted.mkv` |
+| `convert_files` | `photo.webp` | unchanged; but `a.png` and `a.jpeg` together give `a.png.webp` and `a.jpeg.webp` |
+
+The `suffix` argument is gone. Every batch function takes `output` (the path for a single input)
+and `output_dir`.
+
+**Results.** Generators yield 4-tuples `(path, status, message, output)` instead of 3-tuples:
+
+```python
+# 0.5
+for item in convert_files_generator(paths, "webp"):
+    if isinstance(item, tuple):
+        path, status, message = item
+# 0.6
+for item in convert_files_generator(paths, "webp"):
+    if isinstance(item, tuple):
+        path, status, message, output = item
+```
+
+The non-generator functions (`convert_files`, `make_thumbs`, …) return the report the CLI prints
+with `--json`. Its `summary` keys are the same as before; the report adds `schema`, `command`, and
+`output` on each result.
+
+**Errors.** `convert_files_generator` raises `InvalidOptionsError` instead of `ValueError` for an
+unknown target, and `parse_time_to_seconds` raises `InvalidOptionsError` instead of `ValueError`.
+
+**`extract`.**
+
+```python
+# 0.5
+status, message, output = extract("clip.mkv", "1m", "2m", output_path="cut.mkv", force=True)
+# 0.6
+report = extract("clip.mkv", "1m", "2m", output="cut.mkv", force=True)
+row = report["results"][0]      # {"file", "status", "message", "output"}
+extract("clip.mkv", "1m")                      # from 1 minute to the end
+extract("clip.mkv", "1m", duration="30s")      # 30 seconds from 1 minute
+```
+
+Invalid times raise `InvalidOptionsError` instead of returning an `"error"` tuple, and `start`
+defaults to the beginning.
+
+**`flatten`** returns the report (`results` with each move, `renamed`, `removed_dirs`,
+`dry_run`) instead of `{"moved": n, "renamed": n, "removed_dirs": n}`; `report["summary"]["success"]`
+is the number moved. It raises `InvalidOptionsError` instead of `FileNotFoundError` or
+`NotADirectoryError`. `plan_flatten(path)` shows the plan without changing anything, and
+`flatten(path, dry_run=True)` reports it.
+
+## Command line
+
+| 0.5 | 0.6 |
+|---|---|
+| `sashimi thumbs clip.mp4 -o png` | `sashimi thumbs clip.mp4 --format png` |
+| `sashimi resize photos/ -w 800 -o webp` | `sashimi resize photos/ -w 800 --format webp` |
+| `sashimi rotate clip.mp4 90 -o webm` | `sashimi rotate clip.mp4 90 --format webm` |
+| `sashimi thumbs clip.mp4 -a --duration 3` | `sashimi thumbs clip.mp4 -a --clip-length 3` |
+| `sashimi convert photo.png jpeg -h 600` | `sashimi convert photo.png jpeg --height 600` (`-h` is help) |
+| `--suffix _small` (resize, rotate) | gone; use `-o` or `--output-dir` |
+| `sashimi extract clip.mp4 10m 9999h` | `sashimi extract clip.mp4 10m` |
+
+`-o` is the output file in every command (for one input file), and `--output-dir` collects
+outputs in a folder. `--json` prints the same report from every command that processes files,
+`extract` and `flatten` included; read `results[0]["message"]` where you read `extract`'s
+`message`, and `summary.avg_time_seconds` where you read `avg_processing_time_seconds`. Delete the
+`[global]` section from your `sashimi.toml` files by hand (sashimi warns about it now); it never
+did anything.
 
 ## MP3 and M4A sample rates
 

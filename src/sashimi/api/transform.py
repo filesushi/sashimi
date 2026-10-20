@@ -4,7 +4,7 @@
 from collections.abc import Iterable, Iterator, Sequence
 from typing import Any
 
-from sashimi.api._batch import VIDEO_EXTENSIONS, FileProgress, PathInput, YieldType, run_batch
+from sashimi.api._batch import VIDEO_EXTENSIONS, FileProgress, PathInput, YieldType, output_name, run_batch
 from sashimi.api._consume import consume_generator
 from sashimi.config import TransformConfig
 from sashimi.core.video import transform
@@ -18,21 +18,27 @@ def transform_videos_generator(
     *,
     recursive: bool = False,
     force: bool = False,
-    suffix: str = "_rotated",
     max_workers: int | None = None,
     extensions: Iterable[str] = VIDEO_EXTENSIONS,
     on_file_progress: FileProgress | None = None,
+    output: PathInput | None = None,
+    output_dir: PathInput | None = None,
 ) -> Iterator[YieldType]:
-    """Rotates/flips every video found, writing ``<stem><suffix>.<target>`` next to it."""
+    """
+    Rotates/flips every video found, writing ``<stem>.rotated.<target>`` next to it, under
+    `output_dir`, or to `output` for a single video.
+    """
     return run_batch(
         paths,
         extensions=extensions,
         recursive=recursive,
         force=force,
-        output_for=lambda p: p.with_name(f"{p.stem}{suffix}.{config.target}"),
+        name_for=lambda _, stem: output_name(stem, config.target, "rotated"),
         process=lambda src, dst, progress: transform(src, dst, config, max_workers=max_workers, on_progress=progress),
         success_message="Saved {name}",
         on_file_progress=on_file_progress,
+        output=output,
+        output_dir=output_dir,
     )
 
 
@@ -44,4 +50,4 @@ def transform_videos(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Like :func:`transform_videos_generator`, but runs to completion and returns a summary."""
-    return consume_generator(transform_videos_generator(paths, config, **kwargs), show_progress, "Rotating")
+    return consume_generator(transform_videos_generator(paths, config, **kwargs), show_progress, "Rotating", "rotate")

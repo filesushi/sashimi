@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 
 if TYPE_CHECKING:
     from pydantic import ValidationError
@@ -85,13 +86,21 @@ def warn_unknown_settings(path: pathlib.Path, keys: list[str], project: bool) ->
     )
 
 
+def print_json(payload: Any) -> None:
+    """Prints a JSON report on stdout (logging and warnings go to stderr)."""
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
 class BatchRunner:
     """
     Consumes a batch generator and renders a Rich progress bar (with per-file progress for long
-    conversions) and a summary table, or a JSON payload. Exits 1 if any file failed.
+    conversions), then one line for a single file or a summary and table for several, or the
+    JSON report (:func:`sashimi.api.build_report`). Exits 1 if any file failed, and 2 if the
+    options were refused before any file was processed.
     """
 
-    def __init__(self, title: str, json_output: bool, limit_output: int = 50):
+    def __init__(self, command: str, title: str, json_output: bool, limit_output: int = 50):
+        self.command = command
         self.title = title
         self.json_output = json_output
         self.limit_output = limit_output
@@ -105,30 +114,33 @@ class BatchRunner:
             self._progress.update(self._task, description=f"{stage.capitalize()} {self._current}: {fraction:.0%}")
 
     def run(self, generator: Iterator[YieldType]) -> None:
+        from sashimi.api._consume import build_report
+        from sashimi.errors import UserInputError
+
         start_time = time.perf_counter()
-        results: list[tuple[pathlib.Path, str, str]] = []
-        first = next(generator, 0)
+        results: list[tuple[pathlib.Path, str, str, pathlib.Path | None]] = []
+        try:
+            first = next(generator, 0)
+        except UserInputError as e:
+            fail(e.user_message)
         total_files = first if isinstance(first, int) else 0
-        counts = {"success": 0, "error": 0, "exists": 0, "skipped": 0}
         started: set[pathlib.Path] = set()
 
         def record(item: YieldType) -> bool:
             """Collects a final result; returns True if it should advance the progress bar."""
-            if not (isinstance(item, tuple) and len(item) == 3):
+            if not (isinstance(item, tuple) and len(item) == 4):
                 return False
-            file_path, status, message = item
+            file_path, status, _, _ = item
             if status == "starting":
                 started.add(file_path)
                 name = file_path.name
                 self._current = name if len(name) <= 35 else name[:32] + "..."
                 return False
-            counts[status] = counts.get(status, 0) + 1
-            results.append((file_path, status, message))
+            results.append(item)
             return file_path in started
 
-        if self.json_output or total_files <= 0:
-            if total_files <= 0 and not self.json_output:
-                console.print("[yellow]No matching files found to process.[/yellow]")
+        quiet = self.json_output or total_files <= 0 or (total_files == 1 and not console.is_terminal)
+        if quiet:
             for item in generator:
                 record(item)
         else:
@@ -142,20 +154,22 @@ class BatchRunner:
                 TimeElapsedColumn,
             )
 
+            if total_files > 1:
+                console.print(f"[bold]{self.title}: {total_files} files[/bold]")
             columns = (
                 SpinnerColumn(),
                 TextColumn("[cyan]{task.description}"),
                 BarColumn(),
                 TaskProgressColumn(),
                 MofNCompleteColumn(),
-                TextColumn("•"),
+                TextColumn("-"),
                 TimeElapsedColumn(),
             )
-            with Progress(*columns, console=console, transient=False) as progress:
+            with Progress(*columns, console=console, transient=total_files == 1) as progress:
                 self._progress = progress
-                self._task = progress.add_task("Initializing...", total=total_files)
+                self._task = progress.add_task("Starting...", total=total_files)
                 for item in generator:
-                    if isinstance(item, tuple) and len(item) == 3 and item[1] == "starting":
+                    if isinstance(item, tuple) and len(item) == 4 and item[1] == "starting":
                         record(item)
                         progress.update(self._task, description=f"Processing: {self._current}")
                     elif record(item):
@@ -163,41 +177,39 @@ class BatchRunner:
                 self._progress = None
 
         elapsed = time.perf_counter() - start_time
-        avg = elapsed / counts["success"] if counts["success"] else 0.0
+        report = build_report(self.command, total_files, results, elapsed)
+        errors = report["summary"]["errors"]
         if self.json_output:
-            payload = {
-                "summary": {
-                    "total_found": total_files,
-                    "success": counts["success"],
-                    "exists": counts["exists"],
-                    "skipped": counts["skipped"],
-                    "errors": counts["error"],
-                    "time_taken_seconds": round(elapsed, 2),
-                    "avg_processing_time_seconds": round(avg, 2),
-                },
-                "results": [{"file": str(p), "status": s, "message": m} for p, s, m in results],
-            }
-            print(json.dumps(payload, indent=2, ensure_ascii=False))
-            raise typer.Exit(code=0 if counts["error"] == 0 else 1)
+            print_json(report)
+            raise typer.Exit(code=0 if errors == 0 else 1)
 
-        if results:
-            self._print_summary(results, counts, elapsed, avg)
-        if counts["error"]:
+        if not results:
+            console.print("[yellow]No matching files found to process.[/yellow]")
+        elif len(results) == 1:
+            path, status, message, _ = results[0]
+            style = STATUS_STYLES.get(status, status)
+            console.print(
+                f"{style}: [cyan]{escape(display_path(path))}[/cyan]: {escape(message)} [dim]({elapsed:.1f}s)[/dim]"
+            )
+        else:
+            self._print_summary(results, report["summary"])
+        if errors:
             raise typer.Exit(code=1)
 
-    def _print_summary(self, results: list, counts: dict[str, int], elapsed: float, avg: float) -> None:
+    def _print_summary(self, results: list, summary: dict[str, Any]) -> None:
         from rich.panel import Panel
         from rich.table import Table
 
+        elapsed, avg = summary["time_taken_seconds"], summary["avg_time_seconds"]
         grid = Table.grid(padding=(0, 4))
         for justify, style in (("right", "bold"), ("left", None), ("right", "bold"), ("left", None)):
             grid.add_column(justify=justify, style=style)  # type: ignore[arg-type]
-        grid.add_row("[green]Success:[/green]", str(counts["success"]), "Total Time:", f"{elapsed:.1f}s")
-        grid.add_row("[red]Errors:[/red]", str(counts["error"]), "Avg Time:", f"{avg:.1f}s/file" if avg else "N/A")
-        grid.add_row("[yellow]Exists:[/yellow]", str(counts["exists"]), "", "")
-        grid.add_row("[bright_black]Skipped:[/bright_black]", str(counts["skipped"]), "", "")
+        grid.add_row("[green]Success:[/green]", str(summary["success"]), "Total time:", f"{elapsed:.1f}s")
+        grid.add_row("[red]Errors:[/red]", str(summary["errors"]), "Average:", f"{avg:.1f}s/file" if avg else "N/A")
+        grid.add_row("[yellow]Exists:[/yellow]", str(summary["exists"]), "", "")
+        grid.add_row("[bright_black]Skipped:[/bright_black]", str(summary["skipped"]), "", "")
         console.print()
-        console.print(Panel(grid, title=f"{self.title} Summary", border_style="blue", expand=False))
+        console.print(Panel(grid, title=f"{self.title} summary", border_style="blue", expand=False))
         console.print()
 
         results.sort(key=lambda r: (STATUS_PRIORITY.get(r[1], 4), r[0]))
@@ -205,9 +217,9 @@ class BatchRunner:
         table.add_column("File", style="cyan", overflow="ellipsis")
         table.add_column("Status", style="magenta")
         table.add_column("Details", style="green", overflow="fold")
-        for path, status, message in results[: self.limit_output]:
+        for path, status, message, _ in results[: self.limit_output]:
             style = STATUS_STYLES.get(status, f"[bold white]{status.capitalize()}[/bold white]")
-            table.add_row(display_path(path), style, message)
+            table.add_row(escape(display_path(path)), style, escape(message))
         console.print(table)
         if len(results) > self.limit_output:
             console.print(
