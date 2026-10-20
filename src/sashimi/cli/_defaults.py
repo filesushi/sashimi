@@ -12,12 +12,12 @@ from typing import TYPE_CHECKING, Any
 
 import annotated_types
 
-from sashimi.cli import convert_cmd, thumbs_cmd
+from sashimi.cli import convert_cmd, edit_cmd, thumbs_cmd
 
 if TYPE_CHECKING:
     from sashimi.config import ParamsModel
 
-OPERATIONS = ("convert", "resize", "rotate", "favicon", "extract", "thumbs", "preview")
+OPERATIONS = ("convert", "resize", "rotate", "favicon", "edit", "frames", "extract", "thumbs", "preview")
 DISCRIMINATORS = frozenset({"target", "container", "accurate", "animated"})
 NONE_MEANS = {
     "max_width": "source width",
@@ -29,6 +29,9 @@ NONE_MEANS = {
     "theme_color": "none",
     "manifest_background_color": "none",
     "preview.max_width": "no limit",
+    "crop_width": "to the right edge",
+    "crop_height": "to the bottom edge",
+    "keep": "every frame",
 }
 EXTRACT_FLAGS = {
     "start_seconds": "--start",
@@ -57,6 +60,8 @@ def flags_for(operation: str) -> dict[str, str]:
         return EXTRACT_FLAGS
     if operation == "favicon":
         return FAVICON_FLAGS
+    if operation in ("edit", "frames"):
+        return edit_cmd.FLAGS
     return convert_cmd.FLAGS
 
 
@@ -161,6 +166,10 @@ def models_for(operation: str, fmt: str | None = None) -> list[tuple[str, type[P
             found.append(("Images → favicon pack (ZIP)", config.FaviconPackConfig))
     elif operation == "preview":
         add(config.VIDEO_PREVIEW, "Video previews")
+    elif operation == "edit":
+        add(config.IMAGE_EDIT, "Edited images")
+    elif operation == "frames":
+        add(config.IMAGE_FRAMES, "Animations (frames and speed)")
     elif operation == "extract":
         for container in config.VIDEO_TRIM.targets:
             if fmt in (None, container):

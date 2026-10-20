@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pathlib
 from enum import Enum
-from typing import Annotated, List, Optional
+from typing import Annotated, Any, List, Optional
 
 import typer
 
@@ -46,6 +46,7 @@ def extract_cmd(
     output_dir: opt.OutputDir = None,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
+    dry_run: opt.DryRun = False,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
     workers: opt.Workers = None,
@@ -84,7 +85,7 @@ def extract_cmd(
     from sashimi.api.extract import extract_generator
     from sashimi.errors import UserInputError
 
-    runner = BatchRunner("extract", "Extract", json_output, limit_output)
+    runner = BatchRunner("extract", "Extract", json_output, limit_output, dry_run=dry_run)
     try:
         gen = extract_generator(
             path,
@@ -104,10 +105,11 @@ def extract_cmd(
             on_file_progress=runner.file_progress,
             output=output,
             output_dir=output_dir,
+            dry_run=dry_run,
         )
     except UserInputError as e:
         fail(e.user_message)
-    runner.run(gen)
+    runner.run(gen, [path])
 
 
 def remux_cmd(
@@ -119,6 +121,7 @@ def remux_cmd(
     output_dir: opt.OutputDir = None,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
+    dry_run: opt.DryRun = False,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
 ):
@@ -134,7 +137,7 @@ def remux_cmd(
     opt.single_file_or_fail(paths, output)
     suffixes = {".mkv": "mkv", ".mp4": "mp4", ".m4v": "mp4", ".webm": "webm", ".mov": "mov"}
     container = opt.format_from_output(opt.enum_value(output_format), output, suffixes) or "mkv"
-    runner = BatchRunner("remux", f"Remux to {container.upper()}", json_output, limit_output)
+    runner = BatchRunner("remux", f"Remux to {container.upper()}", json_output, limit_output, dry_run=dry_run)
     gen = remux_files_generator(
         paths,
         container,  # type: ignore[arg-type]
@@ -143,8 +146,9 @@ def remux_cmd(
         on_file_progress=runner.file_progress,
         output=output,
         output_dir=output_dir,
+        dry_run=dry_run,
     )
-    runner.run(gen)
+    runner.run(gen, paths)
 
 
 def flatten_cmd(
@@ -213,11 +217,26 @@ def info_cmd(
     path: Annotated[pathlib.Path, typer.Argument(help="Media file to inspect.", show_default=False)],
     json_output: opt.JsonOutput = False,
 ):
-    """Show a media file's container, duration, dimensions, frame rate and codecs (via ffprobe)."""
+    """
+    Show a media file's container, duration, dimensions, frame rate and codecs (via ffprobe), or
+    an image's format, size and frames, with each frame's duration, numbered from 1 as
+    [bold]sashimi frames[/bold] takes them.
+    """
     opt.exists_or_fail(path)
     from sashimi import probe
+    from sashimi.core.edit import frames_info
     from sashimi.core.sheets._render import format_duration, format_size
-    from sashimi.errors import SashimiError, UserInputError
+    from sashimi.errors import SashimiError, UnsupportedMediaError, UserInputError
+
+    try:
+        image_info = frames_info(path)
+    except UnsupportedMediaError:
+        image_info = None
+    except UserInputError as e:
+        fail(e.user_message, code=1)
+    if image_info is not None:
+        _print_image_info(path, image_info, json_output, format_size(path.stat().st_size))
+        return
 
     try:
         info = probe(path)
@@ -253,4 +272,48 @@ def info_cmd(
     rows += [("Audio", info.audio_codec or "none"), ("Streams", ", ".join(info.codecs) or "—")]
     for label, value in rows:
         table.add_row(label, value)
+    console.print(table)
+
+
+MAX_FRAME_RUNS = 10
+
+
+def _frame_runs(durations: list[int]) -> str:
+    """Frame durations as runs numbered from 1 ("1-3: 70 ms, 4: 60 ms"), or their range if there are many."""
+    runs: list[tuple[int, int, int]] = []
+    for number, duration in enumerate(durations, start=1):
+        if runs and runs[-1][2] == duration:
+            runs[-1] = (runs[-1][0], number, duration)
+        else:
+            runs.append((number, number, duration))
+    if len(runs) > MAX_FRAME_RUNS:
+        return f"{min(durations)}-{max(durations)} ms (each frame's: sashimi info --json)"
+    return ", ".join(f"{a}: {d} ms" if a == b else f"{a}-{b}: {d} ms" for a, b, d in runs)
+
+
+def _print_image_info(path: pathlib.Path, info: Any, json_output: bool, size: str) -> None:
+    if json_output:
+        print(info.model_dump_json(indent=2))
+        return
+    from rich.markup import escape
+    from rich.table import Table
+
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column(style="bold cyan", justify="right")
+    table.add_column()
+    rows = [
+        ("File", display_path(path)),
+        ("Format", info.format.upper()),
+        ("Size", size),
+        ("Dimensions", f"{info.width}x{info.height}"),
+        ("Frames", str(info.frames)),
+    ]
+    if info.animated:
+        loop = "plays once" if info.loop is None else "loops forever" if info.loop == 0 else f"loops {info.loop} times"
+        rows += [
+            ("Duration", f"{sum(info.durations_ms) / 1000:.2f} s, {loop}"),
+            ("Frame durations", _frame_runs(info.durations_ms)),
+        ]
+    for label, value in rows:
+        table.add_row(label, escape(value))
     console.print(table)

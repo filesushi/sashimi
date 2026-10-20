@@ -42,6 +42,7 @@ def resize_images_generator(
     on_file_progress: FileProgress | None = None,
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
+    dry_run: bool = False,
 ) -> Iterator[YieldType]:
     """
     Shrinks every image found, writing ``<stem>.resized.<ext>`` next to it, under `output_dir`, or
@@ -73,6 +74,7 @@ def resize_images_generator(
         on_file_progress=on_file_progress,
         output=output,
         output_dir=output_dir,
+        dry_run=dry_run,
     )
 
 
@@ -84,4 +86,10 @@ def resize_images(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Like :func:`resize_images_generator`, but runs to completion and returns a summary."""
-    return consume_generator(resize_images_generator(paths, config, **kwargs), show_progress, "Resizing", "resize")
+    return consume_generator(
+        resize_images_generator(paths, config, **kwargs),
+        show_progress,
+        "Resizing",
+        "resize",
+        dry_run=kwargs.get("dry_run", False),
+    )

@@ -239,3 +239,70 @@ def test_probe_real_files(video_blob, rotated_video_blob, audio_blob):
     assert (r.width, r.height, r.rotation) == (180, 320, 90)
     a = probe(audio_blob)
     assert a.has_audio and not a.has_video and a.container == "mp3"
+
+
+def _moov_before_mdat(path):
+    data = path.read_bytes()
+    return 0 <= data.find(b"moov") < data.find(b"mdat")
+
+
+def test_mp4_copies_h264_and_aac(video_blob, tmp_path):
+    out = tmp_path / "result.bin"
+    assert video.convert(video_blob, out, Mp4VideoConfig(), max_workers=2) == "copy"
+    info = probe(out)
+    assert (info.video_codec, info.audio_codec, info.width, info.height) == ("h264", "aac", 320, 180)
+    assert info.duration == pytest.approx(6.0, abs=0.1)
+    assert _moov_before_mdat(out) and leftovers(tmp_path) == []
+    first, second = tmp_path / "a", tmp_path / "b"
+    for path in (first, second):
+        video.convert(video_blob, path, Mp4VideoConfig(), max_workers=2)
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_mp4_copy_keeps_the_display_rotation(rotated_video_blob, tmp_path):
+    out = tmp_path / "result.bin"
+    assert video.convert(rotated_video_blob, out, Mp4VideoConfig(), max_workers=2) == "copy"
+    info = probe(out)
+    assert (info.width, info.height, info.rotation) == (180, 320, 90)
+
+
+def test_mp4_reencodes_only_the_audio_when_it_isnt_aac(tmp_path):
+    src = tmp_path / "original.blob"
+    subprocess.run(
+        [
+            *("ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"),
+            *("-f", "lavfi", "-i", "testsrc2=s=320x180:r=25:d=2", "-f", "lavfi", "-i", "sine=d=2"),
+            *("-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "libopus"),
+            *("-f", "matroska", str(src)),
+        ],
+        check=True,
+    )
+    out = tmp_path / "result.bin"
+    assert video.convert(src, out, Mp4VideoConfig(), max_workers=2) == "copy_video"
+    assert (probe(out).video_codec, probe(out).audio_codec) == ("h264", "aac")
+    assert video.convert(src, out, Mp4VideoConfig(mute=True), max_workers=2) == "copy"
+    assert not probe(out).has_audio
+
+
+def test_mp4_options_that_need_a_reencode(video_blob, silent_video_blob, tmp_path):
+    out = tmp_path / "result.bin"
+    assert video.convert(silent_video_blob, out, Mp4VideoConfig(), max_workers=2) == "copy"
+    assert video.convert(video_blob, out, Mp4VideoConfig(crf=30), max_workers=2) == "encode"
+    assert video.convert(video_blob, out, Mp4VideoConfig(max_width=160), max_workers=2) == "encode"
+    assert probe(out).width == 160
+    assert video.convert(video_blob, out, VIDEO_CONVERT.from_params({}, target="webm"), max_workers=2) == "encode"
+
+
+def test_mp4_falls_back_to_a_reencode_when_the_copy_fails(video_blob, tmp_path, monkeypatch):
+    from sashimi.core import video as core_video
+
+    real = core_video._copy_command
+
+    def broken(*args, **kwargs):
+        cmd = real(*args, **kwargs)
+        return [*cmd[:-1], "-bsf:v", "no_such_filter", cmd[-1]]
+
+    monkeypatch.setattr(core_video, "_copy_command", broken)
+    out = tmp_path / "result.bin"
+    assert video.convert(video_blob, out, Mp4VideoConfig(), max_workers=2) == "encode"
+    assert probe(out).video_codec == "h264" and leftovers(tmp_path) == []

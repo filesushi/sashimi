@@ -10,7 +10,7 @@ Output naming policy, used by every batch function:
 - a conversion writes ``<stem>.<ext>`` (``photo.png`` → ``photo.webp``, ``clip.mp4`` → ``clip.mkv``);
 - an output derived from the input writes ``<stem>.<role>.<ext>``: ``clip.sheet.jpg``,
   ``clip.animated-sheet.webp``, ``clip.preview.gif``, ``photo.resized.jpg``, ``clip.rotated.mp4``,
-  ``clip.extracted.mkv``, ``logo.favicons.zip``;
+  ``clip.extracted.mkv``, ``logo.favicons.zip``, ``photo.edited.jpg`` (edits and frame selection);
 - outputs go next to their inputs, or under ``output_dir`` (keeping the folders below a directory
   that was searched), or to the single ``output`` path given for a single input;
 - when two inputs would be written to the same file (``a.png`` and ``a.jpeg`` → ``a.webp``), each
@@ -18,7 +18,10 @@ Output naming policy, used by every batch function:
 - an output that would replace one of the batch's own inputs is an error, even with ``force``;
 - an existing output is reported as ``exists`` and left alone unless ``force``. Without ``force``
   the output is moved into place only if the name is still free, so a file created meanwhile is
-  never replaced. With ``force`` it is replaced, and the result says so.
+  never replaced. With ``force`` it is replaced, and the result says so;
+- with ``dry_run`` nothing is processed or written: each file's result says what would be
+  written (``success``, "Would write …" or "Would replace …") or why not (``exists``,
+  ``error``, ``skipped``), from the plan alone, without opening any input.
 """
 
 import functools
@@ -230,13 +233,15 @@ def run_batch(
     reject_reason: Callable[[pathlib.Path], str] | None = None,
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
+    dry_run: bool = False,
 ) -> Iterator[YieldType]:
     """
     Runs ``process(input, output, on_progress)`` over discovered files, naming outputs with
     `name_for` (see the module's naming policy). `output` names the one output when exactly one
     file is found (InvalidOptionsError otherwise); `output_dir` collects outputs in one folder,
     created as needed, and files already inside it aren't picked up as inputs. Existing outputs
-    are reported as ``exists`` unless `force`.
+    are reported as ``exists`` unless `force`. With `dry_run`, `process` never runs and no folder
+    is created: each file gets the result the plan predicts.
     """
     sources = as_paths(paths)
     files, rejected = discover(sources, extensions, recursive, reject_reason)
@@ -265,6 +270,9 @@ def run_batch(
             continue
         if existed and target.is_dir():
             yield (file_path, "error", f"{target.name} is a folder, so it was not replaced.", target)
+            continue
+        if dry_run:
+            yield (file_path, "success", f"Would {'replace' if existed else 'write'} {target.name}", target)
             continue
         progress = functools.partial(on_file_progress, file_path) if on_file_progress is not None else None
         try:

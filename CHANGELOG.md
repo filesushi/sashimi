@@ -8,16 +8,45 @@ the Python API; every break is listed here. See [MIGRATION.md](MIGRATION.md) for
 The first release on PyPI, as **`sashimi-convert`**. Builds labelled 0.5.1 were shared privately
 but never published; 0.6.0 contains all of their changes, listed here too. It also brings over
 what ftool still did better (a sampled preview, remuxing, the animated-sheet grid and labels,
-cuts to the end) and settles the batch and CLI behaviour before it goes public: one output-naming
-policy, one meaning per flag and one JSON report. [MIGRATION.md](MIGRATION.md) shows what to change.
+cuts to the end), adds image editing (rotate, flip, crop, and brightness, contrast and saturation
+that match CSS filters, for still images and every frame of animated GIFs and WebPs), frame
+selection and speed for animations, and an MP4 conversion that copies the streams when it can,
+and settles the batch and CLI behaviour before it goes public: one output-naming policy, one
+meaning per flag, one JSON report, `--dry-run` everywhere and exit codes that report skipped
+files you named. [MIGRATION.md](MIGRATION.md) shows what to change.
 
 Outputs are byte-identical to 0.5.1 except: animated contact sheets (a 3x3 grid by default, 4x2
 for portrait videos, and padded time labels), still sheets of videos with an aspect ratio from
-0.55 to 0.6 such as 9:16 (8x2 instead of 7x2), and animated sheets of clips shorter than one
-tile's clip (one tile instead of an error).
+0.55 to 0.6 such as 9:16 (8x2 instead of 7x2), animated sheets of clips shorter than one tile's
+clip (one tile instead of an error), and MP4 conversions of 8-bit H.264 videos with default
+encoder settings, which are now copied instead of re-encoded (see Breaking).
 
 ### Breaking
 
+- **"To MP4" copies the streams when it can.** `video.convert` with an `Mp4VideoConfig` now picks
+  the fastest route that gives what a re-encode would, as far as anyone watching can tell
+  (`video.plan_mp4_route`, pure):
+  - `copy`: the video is 8-bit 4:2:0 H.264 (`yuv420p`/`yuvj420p`) with even dimensions and the
+    audio is AAC, absent, or dropped by `mute`: both are copied, in a fraction of a second;
+  - `copy_video`: the same video with other audio (Opus, MP3, …), or an `audio_bitrate_kbps`
+    other than its default: the video is copied and the audio re-encoded to AAC;
+  - `encode`: everything else, as before, byte for byte. A start time, a length shorter than
+    the rest of the video, a `max_width` below the video's width, or a `crf` or `preset` other
+    than the defaults (23, `veryfast`) asks for a re-encode; HEVC, VP9, AV1, 10-bit and 4:4:4
+    video are always re-encoded, since many browsers can't play them in MP4.
+  The copy routes keep the re-encode's streams (the first video and audio track; no subtitles
+  or data), its length limit (`-t`, `MAX_VIDEO_SECONDS`) and `+faststart`, and keep the
+  source's display rotation as metadata. If ffmpeg can't copy a file, it is re-encoded instead.
+  `video.convert` returns the route taken (`VideoRoute`: `"copy"`, `"copy_video"` or
+  `"encode"`; always `"encode"` for other targets), where it returned `None`. There is no
+  option for the route.
+- **CLI exit codes:** a file named on the command line that is skipped (unsupported, already in
+  the target format, too short, not animated) now exits 1, like a failure; it exited 0. A
+  directory search that skips files it can't use still exits 0, and so does an output that
+  already exists.
+- **`sashimi info` on an image** prints the image's format, size and frames (with each frame's
+  duration), and `--json` prints `sashimi.image.frames_info`'s fields, instead of ffprobe's view
+  (which refused most images). Videos and audio are unchanged.
 - **Animated contact sheets default to a 3x3 grid** (4x2 for portrait videos, aspect ratio under
   0.95), where `cols`/`rows` `"auto"` used the still sheets' table (6x5 tiles of about 205 px for
   16:9 at 1280 px). 3x3 renders about 2.4 times faster, with 426 px tiles. Explicit `cols`/`rows`
@@ -66,7 +95,8 @@ tile's clip (one tile instead of an error).
     for the format, which is `--format` (no short flag) in every command;
   - `thumbs --duration` (seconds per animated tile) is `--clip-length`, so `--duration` always
     means the output's length;
-  - `-h` is `--help` everywhere; `--height` has no short flag (it was `-h` in `convert` and `resize`);
+  - `-h` is `--help` everywhere; `--height` is `-H` (it was `-h` in `convert` and `resize`), in
+    `preview` too;
   - `extract` needs a start, an end or a `--duration`, but no longer both a start and an end;
   - `--json` prints the shared report for `extract` and `flatten` too (`extract` printed a flat
     `{status, message, output, seconds}`).
@@ -92,6 +122,61 @@ tile's clip (one tile instead of an error).
 
 ### Added
 
+- **Image editing:** `sashimi.image.edit(input, output, config, *, scratch_dir, max_pixels,
+  on_progress)` applies, in this order: the EXIF orientation (so the picture is as it is shown),
+  `rotate` (0, 90, 180, 270, clockwise) and `flip` (`horizontal`, `vertical`), the crop box
+  (`crop_left`, `crop_top`, `crop_width`, `crop_height`, in pixels of the rotated and flipped
+  picture; unset means no crop), then `brightness`, `contrast` and `saturation` (multipliers,
+  0-2, 1 unchanged). The adjustments are CSS `filter: brightness() contrast() saturate()` as the
+  Filter Effects spec defines them (in sRGB, unpremultiplied, clamped after each step), not
+  Pillow's `ImageEnhance`, so a browser preview with the same CSS matches: brightness and
+  contrast exactly, saturation within one 8-bit level, all three together within two
+  (`image.adjust_colors`, pinned by tests against the spec's formulas). The output format is
+  `config.target`; pass the source's own (`frames_info(path).edit_target`) to keep it.
+  Transparency is kept by PNG, WebP, GIF and TIFF; JPEG and BMP flatten it onto white. JPEG,
+  WebP and JPEG-compressed TIFF are re-saved at quality 92 (`EDIT_QUALITY`). A crop box outside
+  the picture raises `InvalidOptionsError` ("The crop area must fit inside the picture, which is
+  400x300 pixels."); a no-op edit still writes a valid copy. Config: `IMAGE_EDIT` by `target`
+  (`JpegEditConfig`, `PngEditConfig`, `WebpEditConfig`, `GifEditConfig`, `BmpEditConfig`,
+  `TiffEditConfig`), each with the edit fields plus that format's save fields from the image
+  models (`quality`, `keep_exif`, `keep_icc`, …). Also `image.crop_box` and `image.aspect_crop`
+  (the largest centred box of a shape such as "16:9", for UIs and the CLI's `--aspect`), and
+  `CROP_ASPECTS` (free, 1:1, 4:3, 16:9, 9:16).
+- **Animated GIF and WebP edits:** saved as GIF or WebP, every frame of an animation gets the same
+  edit, keeping each frame's duration and the loop count. GIF frames keep their colours exactly
+  when they have at most 256 (any edit of a GIF source does), with transparency and disposal 2
+  when a frame has transparent pixels. Animations whose decoded frames would take more than
+  `MAX_ANIMATION_BYTES` (256 MiB: width × height × 4 × frames) raise `MediaTooLargeError` before
+  any frame is decoded. Animated PNGs raise `UnsupportedMediaError`; saved as a still format, an
+  animation gives its first frame.
+- **Frame selection:** `sashimi.image.select_frames(input, output, config, …)` keeps some frames
+  of an animated GIF or WebP (`keep`: frame numbers from 0, "0-9,12" or a list; unset keeps all;
+  kept frames play in their original order) and changes its `speed` (0.25-4, dividing every
+  frame's duration; frames browsers would play at 100 ms count as 100 ms, and none gets shorter
+  than `MIN_FRAME_MS`, 20 ms). Frames are as shown in the animation, so dropping some never leaves
+  holes. Config: `IMAGE_FRAMES` by `target` (`GifFramesConfig`, `WebpFramesConfig`).
+- **Frame information:** `sashimi.image.frames_info(path) -> FramesInfo` gives the format,
+  `edit_target`, size as shown, frame count, each frame's duration and the loop count, read from
+  the file's blocks without decoding pixels (300 frames in about 2-40 ms).
+  `sashimi.image.frame_strip(input, output, FrameStripConfig)` draws every frame as a small tile
+  in one still WebP (a sprite sheet for frame pickers) and returns the `FrameStrip` layout;
+  `plan_frame_strip` computes it without the image.
+- **Batch editing:** `sashimi.api.edit_images(_generator)(paths, config_or_function, *,
+  crop_aspect=…)` and `edit_frames(_generator)(paths, config_or_function, *, drop=…)`, writing
+  `<stem>.edited.<ext>` in each image's own format.
+- **CLI:** `sashimi edit` (`--rotate`, `--flip`, `--crop WxH+X+Y`, `--aspect 16:9`,
+  `--brightness`, `--contrast`, `--saturation` and the save options) and `sashimi frames`
+  (`--keep 1-10,15`, `--drop 3`, `--speed 2`; frames numbered from 1, as `sashimi info` lists
+  them). `sashimi config defaults edit|frames [format]` describes their options.
+- **`--dry-run` (`-n`) on every command that processes files** (`convert`, `resize`, `rotate`,
+  `edit`, `frames`, `favicon`, `extract`, `remux`, `thumbs`, `preview`, as well as `flatten`):
+  outputs are planned under the naming policy and each file is reported as "Would write …",
+  "Would replace …" (with `-f`), existing, or skipped, without opening or writing anything. Every
+  batch function takes `dry_run`.
+- `MediaInfo.pixel_format` (ffprobe's `pix_fmt` of the video, e.g. `yuv420p`).
+- `sashimi.config` exports `Rotation` and `Flip`, the types of `rotate` and `flip`.
+- `scripts/sandbox_check.sh` runs edits (photo, GIF, WebP, two animations at the frame budget
+  and one over it), frame selection (GIF, WebP), a frame strip and the three MP4 routes too.
 - **Previews:** `sashimi.video.preview(input, output, config, *, max_workers, scratch_dir,
   on_progress)` joins `samples` clips of `sample_duration` seconds, spread across the video
   between `start_offset_percent` and `end_offset_percent`, into a GIF or animated WebP scaled to
@@ -155,6 +240,12 @@ tile's clip (one tile instead of an error).
 
 ### Changed
 
+- Every batch report (and the CLI's `--json`) has a top-level `dry_run` (false unless it was a
+  dry run), after `command`; it was only in `flatten`'s.
+- `convert` says in its message when an MP4 was copied: "Converted to clip.mp4 (video and audio
+  copied, not re-encoded)" or "(video copied, audio re-encoded)".
+- The image models share per-format save fields with the edit models (internal; every field,
+  default, description and order is unchanged).
 - **Quieter CLI output:** one file gets one line ("Success: clip.mp4: Preview created:
   clip.preview.webp (1.2s)") instead of a panel and a table; several files get a heading, the
   progress bar, the summary and the table as before. Status lines have no emoji.
@@ -191,6 +282,7 @@ tile's clip (one tile instead of an error).
 
 ### Fixed
 
+- A file named on the command line that was skipped no longer exits 0 (see Breaking).
 - **`flatten` is safe** (it was ftool's code, with ftool's bugs):
   - symbolic links are left where they are, and so are the files and folders a link in the tree
     points to, so no link ends up dangling (relative links used to be moved and broken);

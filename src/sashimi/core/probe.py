@@ -54,6 +54,8 @@ class MediaInfo(BaseModel):
     display_aspect_ratio: float | None = None
     fps: float | None = None
     video_codec: str | None = None
+    pixel_format: str | None = None
+    """The video's pixel format as ffprobe names it, e.g. ``yuv420p`` (8-bit 4:2:0) or ``yuv420p10le``."""
     audio_codec: str | None = None
     codecs: list[str] = []
     """Codec names of every stream, in stream order."""
@@ -139,6 +141,7 @@ def parse_ffprobe_json(data: dict[str, Any]) -> MediaInfo:
             display_aspect_ratio=round(dar, 6) if dar else None,
             fps=_ratio(video.get("avg_frame_rate")) or _ratio(video.get("r_frame_rate")),
             video_codec=video.get("codec_name"),
+            pixel_format=video.get("pix_fmt"),
         )
     return MediaInfo(**info)
 

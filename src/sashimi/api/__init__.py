@@ -11,7 +11,8 @@ Output naming, the same for every function here:
 - a conversion writes ``<stem>.<ext>`` (``photo.png`` → ``photo.webp``; ``remux_files`` too);
 - a derived output writes ``<stem>.<role>.<ext>``: ``.sheet`` and ``.animated-sheet``
   (``make_thumbs``), ``.preview`` (``make_previews``), ``.resized``, ``.rotated``,
-  ``.extracted`` and ``.favicons`` (``make_favicon_packs``, a ``.zip``);
+  ``.extracted``, ``.favicons`` (``make_favicon_packs``, a ``.zip``) and ``.edited``
+  (``edit_images`` and ``edit_frames``);
 - outputs go next to each input, or under ``output_dir`` (keeping the subfolders of searched
   directories), or to ``output`` when exactly one file is processed;
 - when two inputs would get the same output (``a.png`` and ``a.jpeg`` → ``a.webp``), both keep
@@ -19,7 +20,9 @@ Output naming, the same for every function here:
   of the inputs is an error;
 - an existing output is reported as ``exists`` and kept unless ``force``, which replaces it and
   says so in the result. Without ``force`` nothing is ever replaced, even a file that appears
-  while the batch runs.
+  while the batch runs;
+- ``dry_run=True`` plans every output and reports what would be written, replaced or skipped,
+  without processing anything.
 
 Every ``*_generator`` yields the protocol described in ``YieldType``; the other functions run it
 and return :func:`build_report`'s report, the same JSON the CLI prints with ``--json``.
@@ -39,6 +42,7 @@ if TYPE_CHECKING:
     )
     from ._batch import YieldType, output_name
     from ._consume import build_report
+    from .edit import edit_frames, edit_frames_generator, edit_images, edit_images_generator
     from .extract import extract, extract_generator, parse_time_to_seconds
     from .favicon import make_favicon_packs, make_favicon_packs_generator
     from .flatten import FlattenPlan, flatten, plan_flatten
@@ -67,6 +71,10 @@ _EXPORTS = {
     "convert_images_generator": ".convert",
     "to_jpeg": ".convert",
     "to_png": ".convert",
+    "edit_images": ".edit",
+    "edit_images_generator": ".edit",
+    "edit_frames": ".edit",
+    "edit_frames_generator": ".edit",
     "extract": ".extract",
     "extract_generator": ".extract",
     "parse_time_to_seconds": ".extract",

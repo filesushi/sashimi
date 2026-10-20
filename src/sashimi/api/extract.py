@@ -118,6 +118,7 @@ def extract_generator(
     on_file_progress: FileProgress | None = None,
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
+    dry_run: bool = False,
 ) -> Iterator[YieldType]:
     """
     Cuts a section out of every video found (see :func:`sashimi.video.trim`), from `start`
@@ -180,6 +181,7 @@ def extract_generator(
         on_file_progress=on_file_progress,
         output=output,
         output_dir=output_dir,
+        dry_run=dry_run,
     )
 
 
@@ -192,4 +194,10 @@ def extract(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Like :func:`extract_generator`, but runs to completion and returns a summary."""
-    return consume_generator(extract_generator(paths, start, end, **kwargs), show_progress, "Extracting", "extract")
+    return consume_generator(
+        extract_generator(paths, start, end, **kwargs),
+        show_progress,
+        "Extracting",
+        "extract",
+        dry_run=kwargs.get("dry_run", False),
+    )

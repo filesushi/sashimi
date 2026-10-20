@@ -18,9 +18,9 @@ sheet headers from a local image folder (pilmoji; never downloads anything).
 | Module | Contents |
 |---|---|
 | `sashimi.config` | every config model, limit and user-facing constant; needs only pydantic |
-| `sashimi.video` | `convert` (to GIF, animated WebP, WebM, MP4), `preview` (short clips from across a video, as GIF or animated WebP), `trim` (lossless or frame-accurate cut; with no end, a lossless remux), `transform` (rotate/flip) |
+| `sashimi.video` | `convert` (to GIF, animated WebP, WebM, MP4; MP4 copies H.264 and AAC instead of re-encoding when that gives the same result), `preview` (short clips from across a video, as GIF or animated WebP), `trim` (lossless or frame-accurate cut; with no end, a lossless remux), `transform` (rotate/flip) |
 | `sashimi.audio` | `convert` (extract from video, or convert audio, to MP3, M4A, WAV, OGG/Opus, FLAC) |
-| `sashimi.image` | `convert` (to JPEG, PNG, WebP, GIF, BMP, TIFF; also resizes), `to_ico`, `favicon_pack` (a .zip of ICO, PNG icons, web manifest and HTML tags) |
+| `sashimi.image` | `convert` (to JPEG, PNG, WebP, GIF, BMP, TIFF; also resizes), `to_ico`, `favicon_pack` (a .zip of ICO, PNG icons, web manifest and HTML tags), `edit` (rotate, flip, crop, brightness, contrast, saturation; every frame of animated GIF and WebP), `select_frames` (keep frames, change speed), `frames_info`, `frame_strip` |
 | `sashimi.sheets` | `render` (still JPEG/PNG/WebP or animated WebP/GIF contact sheets) |
 | `sashimi` | `probe(path) -> MediaInfo` |
 | `sashimi.api` | batch helpers: discover files, name outputs, progress, reports |
@@ -71,12 +71,35 @@ app can validate forms against the same models the workers use, and read their d
 bounds and descriptions from `model_fields` (or `model_json_schema()`).
 
 Each operation has a family that picks the model: `IMAGE_CONVERT`, `IMAGE_RESIZE`,
-`VIDEO_CONVERT`, `VIDEO_PREVIEW`, `VIDEO_TRANSFORM`, `VIDEO_TRIM` (by `container` and `accurate`),
-`AUDIO_CONVERT` and `CONTACT_SHEET` (by `animated` and `target`); `IcoConfig` and
-`FaviconPackConfig` stand alone. `FAMILY.from_params(params, target=...)` rejects
+`IMAGE_EDIT`, `IMAGE_FRAMES`, `VIDEO_CONVERT`, `VIDEO_PREVIEW`, `VIDEO_TRANSFORM`, `VIDEO_TRIM`
+(by `container` and `accurate`), `AUDIO_CONVERT` and `CONTACT_SHEET` (by `animated` and
+`target`); `IcoConfig`, `FaviconPackConfig` and `FrameStripConfig` stand alone. `FAMILY.from_params(params, target=...)` rejects
 unknown keys, treats `None` or a missing key as "use the default", and raises
 `InvalidOptionsError` with a readable `user_message` for anything invalid, including limits that
 don't depend on the file (a GIF over 30 seconds, an MP4 `crf` over 51).
+
+## Editing images
+
+`sashimi.image.edit` applies a fixed order: the photo's EXIF orientation, then `rotate` and
+`flip`, then the crop box (in pixels of the rotated and flipped picture, as a viewer sees it),
+then `brightness`, `contrast` and `saturation`. The three adjustments are the CSS filters of the
+same names, as the Filter Effects spec defines them, so a web page can preview an edit live with
+`filter: brightness(b) contrast(c) saturate(s)` (in that order) and get the same picture.
+Animated GIFs and WebPs have every frame edited; `select_frames` keeps or drops frames and
+changes the speed, and `frames_info` lists the frames without decoding them.
+
+```python
+from sashimi import image
+from sashimi.config import IMAGE_EDIT
+
+info = image.frames_info("upload.blob")                     # format, size, frames, durations
+x, y, w, h = image.aspect_crop(info.width, info.height, "16:9")
+config = IMAGE_EDIT.from_params(
+    {"crop_left": x, "crop_top": y, "crop_width": w, "crop_height": h, "contrast": 1.2},
+    target=info.edit_target,                                 # keep the source's format
+)
+image.edit("upload.blob", "out/edited.bin", config)
+```
 
 ## Command line
 
@@ -87,7 +110,12 @@ sashimi convert clip.mkv gif -s 1m30s -d 5 --fps 15  # videos: gif webp webm mp4
 sashimi convert talk.mp4 mp3 --bitrate 128 --mono    # video or audio to mp3 m4a wav ogg flac
 sashimi convert logo.png ico --background '#ffffff'  # favicon.ico with an opaque background
 sashimi favicon logo.png --name "My site"            # favicon pack: ICO, PNGs, manifest, <head> tags
-sashimi resize photos/ --width 800 --height 800      # shrink, keeping each format
+sashimi resize photos/ --width 800 -H 800           # shrink, keeping each format
+sashimi edit photo.jpg --rotate 90 --crop 1200x800+0+100  # crop is measured after rotating
+sashimi edit photos/ --aspect 1:1 --saturation 1.2   # centred square crop, more vivid
+sashimi edit clip.gif --brightness 1.3               # every frame of an animation
+sashimi frames clip.gif --drop 1-5 --speed 1.5       # frames are numbered from 1
+sashimi convert clip.mkv mp4                         # copies H.264/AAC when it can, else re-encodes
 sashimi rotate phone.mp4 90                          # rotate/flip and re-encode
 sashimi extract clip.mkv 1m30s 2m                    # lossless cut (alias: trim)
 sashimi extract clip.mkv 1h -d 90s --accurate        # exact 90 s cut from 1 h, re-encoded
@@ -98,6 +126,8 @@ sashimi thumbs clip.mp4 -a --format gif              # animated sheet (3x3 clips
 sashimi preview clip.mp4                             # 5 x 2 s clips from across the video
 sashimi preview clip.mp4 --format gif --crop 9:16    # vertical GIF preview
 sashimi info clip.mkv                                # container, duration, codecs
+sashimi info clip.gif                                # an image's size, frames and their durations
+sashimi convert photos/ webp -n                      # --dry-run: what would be written, change nothing
 sashimi flatten downloads/ --dry-run                 # see what flatten would move
 sashimi config set thumbs.cols 4                     # change CLI defaults
 sashimi config defaults convert webp                 # every option's default for WebP output
@@ -125,6 +155,7 @@ Every command, and every `sashimi.api` batch function, names its outputs the sam
 | A preview | `<stem>.preview.<ext>` | `clip.mp4` → `clip.preview.webp` |
 | A resized image, rotated video, cut | `<stem>.resized.<ext>`, `<stem>.rotated.<ext>`, `<stem>.extracted.<ext>` | `photo.jpg` → `photo.resized.jpg` |
 | A favicon pack | `<stem>.favicons.zip` | `logo.png` → `logo.favicons.zip` |
+| An edited image or animation (`edit`, `frames`) | `<stem>.edited.<ext>`, in the image's own format | `photo.jpg` → `photo.edited.jpg` |
 
 - Outputs go next to their inputs. `--output-dir DIR` puts them in `DIR` instead, keeping the
   subfolders of a directory you passed, and `-o FILE` names the output of a single input file.
@@ -135,28 +166,36 @@ Every command, and every `sashimi.api` batch function, names its outputs the sam
 - An output that already exists is left alone and reported as "Exists". `--force` replaces it
   and says so in the result ("replaced the existing file"). Without `--force` nothing is ever
   replaced, even a file that appears while sashimi works.
+- `-n/--dry-run` shows each file's plan ("Would write a.webp", "Would replace a.webp" with
+  `--force`, "Output already exists", or why it's skipped) without reading or writing anything.
 - Nothing ever deletes or changes an input, except `flatten`, which moves files (see `sashimi
   flatten --help`; `--dry-run` shows the plan first).
 
 ### Scripting: exit codes and `--json`
 
-Exit codes: 0 when every file succeeded, already existed or was skipped (not a video, too
-short); 1 when any file failed; 2 when the options were refused before anything ran.
+Exit codes:
+
+| Code | When |
+|---|---|
+| 0 | every file succeeded or already existed ("Exists"), including when a directory search skipped files it can't use |
+| 1 | any file failed, or a file you named was skipped (not a video, already in that format, too short, not animated), or a path doesn't exist |
+| 2 | the options were refused before anything ran |
 
 With `--json`, a command prints one report on stdout; logging and warnings go to stderr. Every
-command that processes files (`convert`, `resize`, `rotate`, `favicon`, `extract`, `remux`,
-`thumbs`, `preview`, `flatten`) prints the same shape, which the batch functions in
-`sashimi.api` also return:
+command that processes files (`convert`, `resize`, `rotate`, `edit`, `frames`, `favicon`,
+`extract`, `remux`, `thumbs`, `preview`, `flatten`) prints the same shape, which the batch
+functions in `sashimi.api` also return:
 
 ```json
-{"schema": 1, "command": "convert",
+{"schema": 1, "command": "convert", "dry_run": false,
  "summary": {"total_found": 2, "success": 2, "exists": 0, "skipped": 0, "errors": 0,
              "time_taken_seconds": 0.4, "avg_time_seconds": 0.2},
  "results": [{"file": "a.png", "status": "success", "message": "Converted to a.webp", "output": "a.webp"}]}
 ```
 
-`status` is `success`, `exists`, `skipped` or `error`. `flatten` adds `dry_run`, `renamed` and
-`removed_dirs`. `info --json` prints the probe result, and `config ... --json` its own data.
+`status` is `success`, `exists`, `skipped` or `error`. Every report also has `"dry_run": false`
+(true with `--dry-run`, when the results are the plan), and `flatten` adds `renamed` and
+`removed_dirs`. MP4 conversions say in the message when the streams were copied. `info --json` prints the probe result, and `config ... --json` its own data.
 
 ## Development
 

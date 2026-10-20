@@ -87,6 +87,7 @@ def thumbs_cmd(
     output_dir: opt.OutputDir = None,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
+    dry_run: opt.DryRun = False,
     workers: opt.Workers = None,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
@@ -228,7 +229,9 @@ def thumbs_cmd(
     warn_unused([FLAGS.get(field, field) for field in unused], f"{config.target.upper()} sheets")
 
     extensions = settings.video_extensions()
-    runner = BatchRunner("thumbs", "Animated sheets" if animated else "Contact sheets", json_output, limit_output)
+    runner = BatchRunner(
+        "thumbs", "Animated sheets" if animated else "Contact sheets", json_output, limit_output, dry_run=dry_run
+    )
     gen = make_thumbs_generator(
         paths,
         config,
@@ -242,8 +245,9 @@ def thumbs_cmd(
         on_file_progress=runner.file_progress,
         output=output,
         output_dir=output_dir,
+        dry_run=dry_run,
     )
-    runner.run(gen)
+    runner.run(gen, paths)
 
 
 PREVIEW_FLAGS = {
@@ -284,6 +288,7 @@ def preview_cmd(
     output_dir: opt.OutputDir = None,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
+    dry_run: opt.DryRun = False,
     workers: opt.Workers = None,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
@@ -300,7 +305,7 @@ def preview_cmd(
         Optional[float], _option("--end-offset", help="Skip this % of the end [default: 10].", panel=PREVIEW)
     ] = None,
     height: Annotated[
-        Optional[int], _option("--height", help="Maximum height in pixels [default: 360].", panel=PREVIEW)
+        Optional[int], _option("--height", "-H", help="Maximum height in pixels [default: 360].", panel=PREVIEW)
     ] = None,
     width: Annotated[
         Optional[int], _option("--width", help="Maximum width in pixels [default: no limit].", panel=PREVIEW)
@@ -347,7 +352,7 @@ def preview_cmd(
         config = model.model_validate(data)
     except ValidationError as e:
         exit_on_invalid_options(e, PREVIEW_FLAGS, model)
-    runner = BatchRunner("preview", "Previews", json_output, limit_output)
+    runner = BatchRunner("preview", "Previews", json_output, limit_output, dry_run=dry_run)
     gen = make_previews_generator(
         paths,
         config,
@@ -357,5 +362,6 @@ def preview_cmd(
         on_file_progress=runner.file_progress,
         output=output,
         output_dir=output_dir,
+        dry_run=dry_run,
     )
-    runner.run(gen)
+    runner.run(gen, paths)

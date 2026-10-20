@@ -3,13 +3,16 @@
 
 """Video conversion (GIF/animated WebP/WebM/MP4), lossless or frame-accurate trimming, and rotate/flip."""
 
+import logging
 from collections.abc import Sequence
+from typing import Literal
 
 from sashimi.config import (
     DURATION_TOLERANCE_SECONDS,
     MAX_VIDEO_SECONDS,
     CopyTrimConfig,
     GifVideoConfig,
+    Mp4VideoConfig,
     TransformConfig,
     TrimConfig,
     VideoConvertConfig,
@@ -29,11 +32,19 @@ from sashimi.core._ffmpeg import (
 )
 from sashimi.core._resources import resolve_max_workers
 from sashimi.core.probe import VIDEO_CONTAINERS, MediaInfo, probe
-from sashimi.errors import InvalidOptionsError, MediaTooLongError, UnsupportedMediaError
+from sashimi.errors import (
+    BinaryNotFoundError,
+    InvalidOptionsError,
+    MediaTooLongError,
+    ProcessingError,
+    UnsupportedMediaError,
+)
 
 __all__ = [
+    "VideoRoute",
     "build_convert_command",
     "convert",
+    "plan_mp4_route",
     "subtitle_conversions",
     "build_trim_command",
     "check_copy_compatible",
@@ -41,6 +52,8 @@ __all__ = [
     "build_transform_command",
     "transform",
 ]
+
+logger = logging.getLogger("sashimi")
 
 NOT_A_VIDEO = "This file doesn't look like a video we can read."
 TOO_LONG_VIDEO = (
@@ -156,6 +169,76 @@ def _progress_args() -> list[str]:
     return ["-progress", "pipe:1", "-nostats"]
 
 
+VideoRoute = Literal["copy", "copy_video", "encode"]
+"""
+How :func:`convert` makes an MP4: ``copy`` copies the video and audio as they are, ``copy_video``
+copies the video and re-encodes the audio, and ``encode`` re-encodes both. Every other target
+is always ``encode``.
+"""
+COPYABLE_PIXEL_FORMATS = frozenset({"yuv420p", "yuvj420p"})
+"""H.264 pixel formats that play everywhere an MP4 re-encode does (8-bit 4:2:0)."""
+_MP4_DEFAULTS = Mp4VideoConfig()
+
+
+def plan_mp4_route(info: MediaInfo, config: Mp4VideoConfig) -> VideoRoute:
+    """
+    The fastest route to the MP4 a re-encode with `config` would give, as far as anyone watching
+    can tell. Pure.
+
+    The video is copied when it is 8-bit 4:2:0 H.264 with even dimensions and nothing asks for
+    a re-encode: no start time, no length shorter than the rest of the video, no ``max_width``
+    below the video's width, and ``crf`` and ``preset`` at their defaults (a value other than the
+    default asks for a different encode; the default is taken to mean "an MP4", which the copy
+    already is). The audio is copied too when it is AAC and ``audio_bitrate_kbps`` is at its
+    default, or when there is none or ``mute`` drops it; otherwise only the audio is re-encoded.
+    HEVC, VP9 and everything else are re-encoded, since many browsers can't play them in MP4.
+    """
+    remaining = (info.duration or 0.0) - config.start_seconds
+    reencode = (
+        config.start_seconds > 0
+        or (config.duration_seconds is not None and config.duration_seconds < remaining)
+        or (config.max_width is not None and (info.width is None or config.max_width < info.width))
+        or config.crf != _MP4_DEFAULTS.crf
+        or config.preset != _MP4_DEFAULTS.preset
+        or info.video_codec != "h264"
+        or info.pixel_format not in COPYABLE_PIXEL_FORMATS
+        or not info.width
+        or not info.height
+        or info.width % 2
+        or info.height % 2
+    )
+    if reencode:
+        return "encode"
+    if config.mute or not info.has_audio:
+        return "copy"
+    if info.audio_codec == "aac" and config.audio_bitrate_kbps == _MP4_DEFAULTS.audio_bitrate_kbps:
+        return "copy"
+    return "copy_video"
+
+
+def _copy_command(
+    input_path: PathLike,
+    output_path: PathLike,
+    config: Mp4VideoConfig,
+    route: VideoRoute,
+    *,
+    t_value: float,
+    threads: int,
+    ffmpeg: str,
+) -> list[str]:
+    copy_audio = route == "copy"
+    cmd = [ffmpeg, *base_args(1 if copy_audio else threads), *_progress_args(), *INPUT_PROTOCOLS]
+    cmd += ["-t", fmt_seconds(t_value), "-i", file_arg(input_path)]
+    audio = ["-an"] if config.mute else ["-map", "0:a:0?"]
+    cmd += ["-map", "0:v:0", *audio, "-sn", "-dn", "-c:v", "copy"]
+    if not config.mute:
+        cmd += ["-c:a", "copy"] if copy_audio else ["-c:a", "aac", "-b:a", f"{config.audio_bitrate_kbps}k"]
+    if not copy_audio:
+        cmd += ["-threads", str(threads)]
+    cmd += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart"]
+    return [*cmd, *OUTPUT_FLAGS, "-f", "mp4", file_arg(output_path)]
+
+
 def build_convert_command(
     input_path: PathLike,
     output_path: PathLike,
@@ -164,6 +247,7 @@ def build_convert_command(
     duration: float,
     threads: int,
     ffmpeg: str = "ffmpeg",
+    route: VideoRoute = "encode",
 ) -> list[str]:
     """
     Builds the ffmpeg command for :func:`convert`. Pure: no filesystem or process access.
@@ -175,9 +259,16 @@ def build_convert_command(
     :data:`~sashimi.config.DURATION_TOLERANCE_SECONDS`, at most
     :data:`~sashimi.config.MAX_VIDEO_SECONDS`), so a file whose header understates its length
     can't be encoded past it.
+
+    `route` is the MP4 route (see :func:`plan_mp4_route`); the copy routes use ``-c:v copy``
+    with the same streams, length, ``+faststart`` and length limits as the re-encode.
     """
     _check_start(config.start_seconds, duration)
     t_value = _length_limit(config.duration_seconds, config.start_seconds, duration)
+    if route != "encode":
+        if not isinstance(config, Mp4VideoConfig) or config.start_seconds > 0:
+            raise ValueError(f"route {route!r} is only for MP4 output from the start of the video")
+        return _copy_command(input_path, output_path, config, route, t_value=t_value, threads=threads, ffmpeg=ffmpeg)
 
     cmd = [ffmpeg, *base_args(threads), *_progress_args(), *INPUT_PROTOCOLS, "-threads", str(threads)]
     if config.start_seconds > 0:
@@ -228,10 +319,16 @@ def convert(
     max_workers: int | None = None,
     scratch_dir: PathLike | None = None,
     on_progress: ProgressCallback | None = None,
-) -> None:
+) -> VideoRoute:
     """
     Converts a video (or animated GIF) to GIF, animated WebP, WebM or MP4, as `config` says (see
-    :data:`~sashimi.config.VIDEO_CONVERT`).
+    :data:`~sashimi.config.VIDEO_CONVERT`), and returns the route taken.
+
+    An MP4 takes the fastest route that gives what a re-encode would (see
+    :func:`plan_mp4_route`): ``copy`` when the video is H.264 and the audio AAC (or absent or
+    muted), ``copy_video`` when only the audio needs re-encoding, else ``encode``. If a copy
+    fails (ffmpeg can't remux the source), it re-encodes instead and returns ``encode``. Every
+    other target returns ``encode``.
 
     `max_workers` is the number of threads each ffmpeg stage may use (default min(4, CPUs)).
     One ffmpeg process runs; with ``max_workers=2`` it uses roughly 15 threads in total.
@@ -241,14 +338,35 @@ def convert(
     info = _probe_video(input_path)
     assert info.duration is not None
     remaining = info.duration - config.start_seconds
-    with atomic_output(output_path, scratch_dir) as temp:
-        cmd = build_convert_command(
-            input_path, temp, config, duration=info.duration, threads=threads, ffmpeg=ffmpeg_binary()
-        )
-        expected = min(config.duration_seconds or remaining, remaining)
-        run_ffmpeg(cmd, progress_total=expected, on_progress=on_progress, stage="encoding")
+    expected = min(config.duration_seconds or remaining, remaining)
+
+    def run(route: VideoRoute) -> VideoRoute:
+        with atomic_output(output_path, scratch_dir) as temp:
+            cmd = build_convert_command(
+                input_path,
+                temp,
+                config,
+                duration=info.duration or 0.0,
+                threads=threads,
+                ffmpeg=ffmpeg_binary(),
+                route=route,
+            )
+            run_ffmpeg(cmd, progress_total=expected, on_progress=on_progress, stage="encoding")
+        return route
+
+    planned = plan_mp4_route(info, config) if isinstance(config, Mp4VideoConfig) else "encode"
+    try:
+        taken = run(planned)
+    except BinaryNotFoundError:
+        raise
+    except ProcessingError as e:
+        if planned == "encode":
+            raise
+        logger.info(f"Copying into MP4 failed, re-encoding instead: {str(e).splitlines()[0]}")
+        taken = run("encode")
     if on_progress:
         on_progress(1.0, "done")
+    return taken
 
 
 def _can_copy(info: MediaInfo, container: str) -> bool:

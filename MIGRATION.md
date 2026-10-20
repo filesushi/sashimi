@@ -1,9 +1,41 @@
 # Migrating from 0.5 to 0.6
 
 0.6.0 is the first release on PyPI (`pip install sashimi-convert`). If you used a private 0.5.1
-build, replace it with 0.6.0. Conversion outputs are unchanged, except contact sheets as described
-in the next section. The single-file functions take the same arguments; the batch API and the CLI
-changed more, below.
+build, replace it with 0.6.0. Conversion outputs are unchanged, except contact sheets and MP4s of
+H.264 videos, as described in the next sections. The single-file functions take the same
+arguments; the batch API and the CLI changed more, below. Image editing and frame selection are
+new (`sashimi.image.edit`, `select_frames`, `frames_info`; see the changelog).
+
+## MP4 conversions copy when they can
+
+`video.convert` with an MP4 config copies the video, and the audio when it is AAC, instead of
+re-encoding, when the result would look the same: 8-bit 4:2:0 H.264 with even dimensions, no
+start time, no length shorter than the video, no `max_width` below the video's width, and `crf`
+and `preset` at their defaults. Such outputs are the source's streams remuxed: much faster,
+original quality, and usually a different size from 0.5's re-encode. Everything else is
+re-encoded exactly as before.
+
+| You want | 0.5 | 0.6 |
+|---|---|---|
+| An MP4 of an H.264 + AAC video | re-encoded at crf 23 | streams copied (route `"copy"`) |
+| The same, with Opus or MP3 audio | re-encoded | video copied, audio to AAC (`"copy_video"`) |
+| A smaller file from an H.264 video | `Mp4VideoConfig()` | set `crf` (e.g. 28) or `max_width`, which re-encode |
+| HEVC, VP9, 10-bit, a cut, a resize | re-encoded | unchanged |
+
+`video.convert` returns the route (`"copy"`, `"copy_video"` or `"encode"`) instead of `None`;
+code that ignored the return value needs no change. `video.plan_mp4_route(info, config)` tells
+you the route without running anything.
+
+## Command line: exit codes, `info` and `--dry-run`
+
+- A file you name that is skipped (not a video, already in the target format, too short, not
+  animated) now exits 1. Scripts that treated "skipped" as success for named files should check
+  the `--json` results instead. Searching a directory still exits 0 when it skips files.
+- `sashimi info photo.png --json` prints the image's fields (`format`, `edit_target`, `width`,
+  `height`, `frames`, `durations_ms`, `loop`, `animated`) instead of ffprobe's. GIFs are images
+  here too. Videos and audio print what they did.
+- Every command that writes files takes `-n/--dry-run`, and `--height` is `-H`.
+- Every `--json` report and batch report has a top-level `dry_run` key.
 
 ## Contact sheets
 
@@ -90,7 +122,7 @@ is the number moved. It raises `InvalidOptionsError` instead of `FileNotFoundErr
 | `sashimi resize photos/ -w 800 -o webp` | `sashimi resize photos/ -w 800 --format webp` |
 | `sashimi rotate clip.mp4 90 -o webm` | `sashimi rotate clip.mp4 90 --format webm` |
 | `sashimi thumbs clip.mp4 -a --duration 3` | `sashimi thumbs clip.mp4 -a --clip-length 3` |
-| `sashimi convert photo.png jpeg -h 600` | `sashimi convert photo.png jpeg --height 600` (`-h` is help) |
+| `sashimi convert photo.png jpeg -h 600` | `sashimi convert photo.png jpeg -H 600` (`-h` is help) |
 | `--suffix _small` (resize, rotate) | gone; use `-o` or `--output-dir` |
 | `sashimi extract clip.mp4 10m 9999h` | `sashimi extract clip.mp4 10m` |
 

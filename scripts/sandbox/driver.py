@@ -35,6 +35,8 @@ from sashimi.config import (  # noqa: E402
     AUDIO_CONVERT,
     CONTACT_SHEET,
     IMAGE_CONVERT,
+    IMAGE_EDIT,
+    IMAGE_FRAMES,
     IMAGE_RESIZE,
     VIDEO_CONVERT,
     VIDEO_PREVIEW,
@@ -48,6 +50,17 @@ from sashimi.errors import UserInputError  # noqa: E402
 INPUT = pathlib.Path("/vault/input/original.blob")
 OUTPUT_DIR = pathlib.Path("/vault/output")
 WORKERS = 2
+
+
+def route(expected, convert):
+    """Runs an MP4 conversion and checks the route it took."""
+    taken = convert()
+    assert taken == expected, f"took the {taken} route, expected {expected}"
+    return taken
+
+
+EDIT = {"rotate": 90, "flip": "horizontal", "crop_left": 20, "crop_top": 10, "crop_width": 200, "crop_height": 300}
+ADJUST = {"brightness": 1.2, "contrast": 0.9, "saturation": 1.4}
 
 JOBS = {
     "image-png-to-jpeg": (
@@ -228,6 +241,68 @@ JOBS = {
         "user-error",
     ),
     "probe": ("json", lambda s, d: d.write_text(sashimi.probe(s).model_dump_json()), "json"),
+    "image-edit-photo": (
+        "jpg",
+        lambda s, d: image.edit(s, d, IMAGE_EDIT.from_params({**EDIT, **ADJUST}, target="jpeg")),
+        "JPEG",
+    ),
+    "image-edit-gif": (
+        "gif",
+        lambda s, d: image.edit(s, d, IMAGE_EDIT.from_params({**EDIT, **ADJUST}, target="gif")),
+        "GIF",
+    ),
+    "image-edit-webp": (
+        "webp",
+        lambda s, d: image.edit(s, d, IMAGE_EDIT.from_params({**EDIT, **ADJUST}, target="webp")),
+        "WEBP",
+    ),
+    "image-edit-gif-budget": (
+        "gif",
+        lambda s, d: image.edit(s, d, IMAGE_EDIT.from_params(ADJUST, target="gif")),
+        "GIF",
+    ),
+    "image-edit-webp-budget": (
+        "webp",
+        lambda s, d: image.edit(s, d, IMAGE_EDIT.from_params(ADJUST, target="webp")),
+        "WEBP",
+    ),
+    "image-edit-over-budget": (
+        "gif",
+        lambda s, d: image.edit(s, d, IMAGE_EDIT.from_params({}, target="gif")),
+        "user-error",
+    ),
+    "image-frames-gif": (
+        "gif",
+        lambda s, d: image.select_frames(s, d, IMAGE_FRAMES.from_params({"keep": "0-59", "speed": 2}, target="gif")),
+        "GIF",
+    ),
+    "image-frames-webp": (
+        "webp",
+        lambda s, d: image.select_frames(s, d, IMAGE_FRAMES.from_params({"keep": "0-59", "speed": 2}, target="webp")),
+        "WEBP",
+    ),
+    "image-frame-strip": ("webp", lambda s, d: image.frame_strip(s, d), "WEBP"),
+    "video-to-mp4-copy": (
+        "mp4",
+        lambda s, d: route(
+            "copy", lambda: video.convert(s, d, VIDEO_CONVERT.from_params({}, target="mp4"), max_workers=WORKERS)
+        ),
+        "mp4",
+    ),
+    "video-to-mp4-copy-video": (
+        "mp4",
+        lambda s, d: route(
+            "copy_video", lambda: video.convert(s, d, VIDEO_CONVERT.from_params({}, target="mp4"), max_workers=WORKERS)
+        ),
+        "mp4",
+    ),
+    "video-to-mp4-encode": (
+        "mp4",
+        lambda s, d: route(
+            "encode", lambda: video.convert(s, d, VIDEO_CONVERT.from_params({}, target="mp4"), max_workers=WORKERS)
+        ),
+        "mp4",
+    ),
 }
 
 
@@ -267,8 +342,10 @@ def main() -> int:
 
     start = time.perf_counter()
     try:
-        run(INPUT, output)
+        returned = run(INPUT, output)
         report["seconds"] = round(time.perf_counter() - start, 2)
+        if isinstance(returned, str):
+            report["route"] = returned
     except UserInputError as e:
         report["seconds"] = round(time.perf_counter() - start, 2)
         (OUTPUT_DIR / "error.txt").write_text(e.user_message)

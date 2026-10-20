@@ -22,6 +22,7 @@ def make_favicon_packs_generator(
     on_file_progress: FileProgress | None = None,
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
+    dry_run: bool = False,
 ) -> Iterator[YieldType]:
     """
     A favicon pack (see :func:`sashimi.image.favicon_pack`) for every image found, written as
@@ -39,6 +40,7 @@ def make_favicon_packs_generator(
         on_file_progress=on_file_progress,
         output=output,
         output_dir=output_dir,
+        dry_run=dry_run,
     )
 
 
@@ -51,4 +53,4 @@ def make_favicon_packs(
 ) -> dict[str, Any]:
     """Like :func:`make_favicon_packs_generator`, but runs to completion and returns a summary."""
     gen = make_favicon_packs_generator(paths, config, **kwargs)
-    return consume_generator(gen, show_progress, "Favicon packs", "favicon")
+    return consume_generator(gen, show_progress, "Favicon packs", "favicon", dry_run=kwargs.get("dry_run", False))

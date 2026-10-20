@@ -35,6 +35,7 @@ def make_thumbs_generator(
     on_file_progress: FileProgress | None = None,
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
+    dry_run: bool = False,
 ) -> Iterator[YieldType]:
     """
     A contact sheet for every video found, still or animated as `config` says (a JPEG sheet by
@@ -63,6 +64,7 @@ def make_thumbs_generator(
         success_message=f"{'Animated sheet' if sheet.animated else 'Contact sheet'} created: {{name}}",
         output=output,
         output_dir=output_dir,
+        dry_run=dry_run,
     )
 
 
@@ -76,4 +78,10 @@ def make_thumbs(
     """Like :func:`make_thumbs_generator`, but runs to completion and returns a summary."""
     sheet = config or JpegSheetConfig()
     desc = "Making animated sheets" if sheet.animated else "Making contact sheets"
-    return consume_generator(make_thumbs_generator(paths, sheet, **kwargs), show_progress, desc, "thumbs")
+    return consume_generator(
+        make_thumbs_generator(paths, sheet, **kwargs),
+        show_progress,
+        desc,
+        "thumbs",
+        dry_run=kwargs.get("dry_run", False),
+    )

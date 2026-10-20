@@ -29,6 +29,8 @@ FAMILIES = {
     "VIDEO_TRIM": (config.VIDEO_TRIM, "container", {"container": "webm", "accurate": True}),
     "AUDIO_CONVERT": (config.AUDIO_CONVERT, "target", {"target": "mp3"}),
     "CONTACT_SHEET": (config.CONTACT_SHEET, "target", {"target": "gif", "animated": True}),
+    "IMAGE_EDIT": (config.IMAGE_EDIT, "target", {"target": "webp"}),
+    "IMAGE_FRAMES": (config.IMAGE_FRAMES, "target", {"target": "gif"}),
 }
 FORM_FIELDS = {
     "quality": 80,
@@ -43,7 +45,7 @@ FORM_FIELDS = {
 }
 ALL_MODELS = sorted(
     {model for family, _, _ in FAMILIES.values() for model in family.models}
-    | {config.IcoConfig, config.FaviconPackConfig},
+    | {config.IcoConfig, config.FaviconPackConfig, config.FrameStripConfig},
     key=lambda model: model.__name__,
 )
 
@@ -131,3 +133,29 @@ def test_new_in_0_6_0_for_filesushi():
     assert config.FAVICON_PNG_SIZES == (16, 32, 48, 180, 192, 512)
     assert config.MAX_PREVIEW_SAMPLES == 10
     assert config.CONTACT_SHEET.model_for(animated=True).model_fields["cols"].default == "auto"
+
+
+def test_new_in_0_6_0_for_filesushis_editors():
+    assert config.EDIT_QUALITY == 92
+    assert config.JpegEditConfig.model_fields["quality"].default == 92
+    assert config.MAX_ANIMATION_BYTES == 256 * 1024 * 1024
+    assert config.MIN_FRAME_MS == 20
+    assert config.CROP_ASPECTS == ("free", "1:1", "4:3", "16:9", "9:16")
+    for model in config.IMAGE_EDIT.models:
+        assert {name: model.model_fields[name].default for name in ("brightness", "contrast", "saturation")} == {
+            "brightness": 1.0,
+            "contrast": 1.0,
+            "saturation": 1.0,
+        }
+        assert model.model_fields["crop_width"].default is None and model.model_fields["rotate"].default == 0
+    assert config.GifFramesConfig.model_fields["keep"].default is None
+    assert config.GifFramesConfig.from_params({"keep": "0,2-3", "speed": "1.5"}).keep == (0, 2, 3)
+    assert "route" not in config.Mp4VideoConfig.model_fields
+
+
+def test_mp4_routes_are_named():
+    import typing
+
+    from sashimi import video
+
+    assert typing.get_args(video.VideoRoute) == ("copy", "copy_video", "encode")

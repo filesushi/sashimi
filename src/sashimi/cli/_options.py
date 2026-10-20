@@ -109,6 +109,15 @@ Workers = Annotated[
     Optional[int],
     option("--workers", min=1, help="Parallel ffmpeg processes/threads [default: min(4, CPUs)].", panel=GENERAL),
 ]
+DryRun = Annotated[
+    bool,
+    option(
+        "--dry-run",
+        "-n",
+        help="Show what would be written, replaced (with -f) or skipped, and change nothing.",
+        panel=GENERAL,
+    ),
+]
 JsonOutput = Annotated[bool, option("--json", help="Print a JSON report for scripting.", panel=GENERAL)]
 LimitOutput = Annotated[int, option("--limit-output", "-l", help="Maximum rows in the results table.", panel=GENERAL)]
 
@@ -125,6 +134,7 @@ MaxHeight = Annotated[
     Optional[int],
     option(
         "--height",
+        "-H",
         help="[Image] Maximum height in pixels (never upscales) [default: source height].",
         panel=SIZE_TIME,
     ),
@@ -147,7 +157,7 @@ FitWidth = Annotated[
     Optional[int], option("--width", "-w", help="Maximum width in pixels (never upscales).", panel=SIZE_TIME)
 ]
 FitHeight = Annotated[
-    Optional[int], option("--height", help="Maximum height in pixels (never upscales).", panel=SIZE_TIME)
+    Optional[int], option("--height", "-H", help="Maximum height in pixels (never upscales).", panel=SIZE_TIME)
 ]
 
 Quality = Annotated[

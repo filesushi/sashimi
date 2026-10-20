@@ -19,9 +19,10 @@ def test_basic_fields():
     info = parse_ffprobe_json(
         {
             "format": {"format_name": "matroska,webm", "duration": "103.5", "size": "1234", "bit_rate": "999"},
-            "streams": [video_stream(), {"codec_type": "audio", "codec_name": "aac"}],
+            "streams": [video_stream(pix_fmt="yuv420p"), {"codec_type": "audio", "codec_name": "aac"}],
         }
     )
+    assert info.pixel_format == "yuv420p"
     assert info.container == "matroska,webm"
     assert info.container_names == {"matroska", "webm"}
     assert (info.duration, info.size_bytes, info.bit_rate) == (103.5, 1234, 999)

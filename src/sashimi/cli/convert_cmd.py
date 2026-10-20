@@ -153,6 +153,7 @@ def convert_cmd(
     output_dir: opt.OutputDir = None,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
+    dry_run: opt.DryRun = False,
     workers: opt.Workers = None,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
@@ -254,7 +255,7 @@ def convert_cmd(
         else:
             configs[kind] = _validate(model, data)
 
-    runner = BatchRunner("convert", f"Convert to {t.upper()}", json_output, limit_output)
+    runner = BatchRunner("convert", f"Convert to {t.upper()}", json_output, limit_output, dry_run=dry_run)
     gen = convert_files_generator(
         path,
         t,  # type: ignore[arg-type]
@@ -269,8 +270,9 @@ def convert_cmd(
         on_file_progress=runner.file_progress,
         output=output,
         output_dir=output_dir,
+        dry_run=dry_run,
     )
-    runner.run(gen)
+    runner.run(gen, [path])
 
 
 def resize_cmd(
@@ -284,6 +286,7 @@ def resize_cmd(
     output_dir: opt.OutputDir = None,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
+    dry_run: opt.DryRun = False,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
     quality: opt.ImageQuality = None,
@@ -339,7 +342,7 @@ def resize_cmd(
             warn_unused(_flags(skipped), f"{source_format.upper()} images")
         return configs[source_format]
 
-    runner = BatchRunner("resize", "Resize", json_output, limit_output)
+    runner = BatchRunner("resize", "Resize", json_output, limit_output, dry_run=dry_run)
     gen = resize_images_generator(
         path,
         configs[targets[0]] if fmt else config_for,
@@ -348,8 +351,9 @@ def resize_cmd(
         on_file_progress=runner.file_progress,
         output=output,
         output_dir=output_dir,
+        dry_run=dry_run,
     )
-    runner.run(gen)
+    runner.run(gen, [path])
 
 
 def rotate_cmd(
@@ -361,6 +365,7 @@ def rotate_cmd(
     output_dir: opt.OutputDir = None,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
+    dry_run: opt.DryRun = False,
     workers: opt.Workers = None,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
@@ -388,7 +393,7 @@ def rotate_cmd(
     data, unused = opt.split_options(model, options)
     warn_unused(_flags(unused), f"{fmt.upper()} output")
     config = _validate(model, data)
-    runner = BatchRunner("rotate", "Rotate", json_output, limit_output)
+    runner = BatchRunner("rotate", "Rotate", json_output, limit_output, dry_run=dry_run)
     gen = transform_videos_generator(
         path,
         config,
@@ -398,8 +403,9 @@ def rotate_cmd(
         on_file_progress=runner.file_progress,
         output=output,
         output_dir=output_dir,
+        dry_run=dry_run,
     )
-    runner.run(gen)
+    runner.run(gen, [path])
 
 
 def favicon_cmd(
@@ -408,6 +414,7 @@ def favicon_cmd(
     output_dir: opt.OutputDir = None,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
+    dry_run: opt.DryRun = False,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
     ico_sizes: Annotated[
@@ -470,7 +477,7 @@ def favicon_cmd(
         "manifest_background_color": manifest_background,
     }
     config = _validate(FaviconPackConfig, opt.given(options))
-    runner = BatchRunner("favicon", "Favicon packs", json_output, limit_output)
+    runner = BatchRunner("favicon", "Favicon packs", json_output, limit_output, dry_run=dry_run)
     gen = make_favicon_packs_generator(
         paths,
         config,
@@ -479,5 +486,6 @@ def favicon_cmd(
         on_file_progress=runner.file_progress,
         output=output,
         output_dir=output_dir,
+        dry_run=dry_run,
     )
-    runner.run(gen)
+    runner.run(gen, paths)

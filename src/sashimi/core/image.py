@@ -15,6 +15,7 @@ from typing import Any
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from sashimi.config._image import _BmpSave, _GifSave, _JpegSave, _PngSave, _TiffSave, _WebpSave
 from sashimi.config import (
     DEFAULT_MAX_PIXELS,
     FAVICON_PNG_SIZES,
@@ -71,8 +72,11 @@ _TIFF_COMPRESSION = {"none": None, "lzw": "tiff_lzw", "deflate": "tiff_adobe_def
 
 
 @contextlib.contextmanager
-def _open_image(input_path: PathLike, max_pixels: int) -> Iterator[Image.Image]:
-    """Opens an image by content (first frame only), refusing unsupported formats and oversized images."""
+def _open_image(input_path: PathLike, max_pixels: int, *, load: bool = True) -> Iterator[Image.Image]:
+    """
+    Opens an image by content, refusing unsupported formats and oversized images. The first frame
+    is decoded unless `load` is False.
+    """
     if "HEIF" in _INPUT_FORMATS:
         heif_available()
     try:
@@ -88,10 +92,11 @@ def _open_image(input_path: PathLike, max_pixels: int) -> Iterator[Image.Image]:
             raise UnsupportedMediaError(NOT_AN_IMAGE, detail=f"Pillow format {img.format}")
         if img.width * img.height > max_pixels:
             raise MediaTooLargeError(TOO_LARGE_IMAGE, detail=f"{img.width}x{img.height}")
-        try:
-            img.load()
-        except (OSError, SyntaxError, ValueError) as e:
-            raise UnsupportedMediaError(DAMAGED_IMAGE, detail=str(e)) from e
+        if load:
+            try:
+                img.load()
+            except (OSError, SyntaxError, ValueError) as e:
+                raise UnsupportedMediaError(DAMAGED_IMAGE, detail=str(e)) from e
         yield img
 
 
@@ -135,8 +140,25 @@ def _render(img: Image.Image, config: ImageConvertConfig) -> tuple[Image.Image, 
     flatten = isinstance(config, (JpegImageConfig, BmpImageConfig)) or not config.preserve_transparency
     if _has_alpha(img) and flatten:
         img = _flatten(img, config.background_color)
+    img, kwargs = encode_for(img, config, config.background_color)
+    if isinstance(config, WebpImageConfig):
+        kwargs["optimize"] = config.optimize
+    if icc:
+        kwargs["icc_profile"] = icc
+    if exif is not None and len(exif):
+        kwargs["exif"] = exif
+    return img, kwargs
+
+
+SaveConfig = _JpegSave | _PngSave | _WebpSave | _GifSave | _BmpSave | _TiffSave
+
+
+def encode_for(
+    img: Image.Image, config: SaveConfig, background: tuple[int, int, int]
+) -> tuple[Image.Image, dict[str, Any]]:
+    """The image in a mode `config.target` can store, and the format's save() keyword arguments."""
     kwargs: dict[str, Any]
-    if isinstance(config, JpegImageConfig):
+    if isinstance(config, _JpegSave):
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
         kwargs = {
@@ -145,36 +167,27 @@ def _render(img: Image.Image, config: ImageConvertConfig) -> tuple[Image.Image, 
             "progressive": config.progressive,
             "subsampling": config.jpeg_subsampling,
         }
-    elif isinstance(config, WebpImageConfig):
+    elif isinstance(config, _WebpSave):
         if img.mode not in ("RGB", "RGBA"):
             img = img.convert("RGBA" if _has_alpha(img) else "RGB")
-        kwargs = {
-            "quality": config.quality,
-            "lossless": config.lossless,
-            "optimize": config.optimize,
-            "method": config.webp_method,
-        }
-    elif isinstance(config, PngImageConfig):
+        kwargs = {"quality": config.quality, "lossless": config.lossless, "method": config.webp_method}
+    elif isinstance(config, _PngSave):
         if img.mode not in ("1", "L", "LA", "I", "I;16", "P", "RGB", "RGBA"):
             img = img.convert("RGBA" if _has_alpha(img) else "RGB")
         kwargs = {"optimize": config.optimize, "compress_level": config.png_compress_level}
-    elif isinstance(config, GifImageConfig):
+    elif isinstance(config, _GifSave):
         if img.mode not in ("P", "L"):
             img = img.convert("RGBA" if _has_alpha(img) else "RGB")
         kwargs = {"optimize": config.optimize}
-    elif isinstance(config, TiffImageConfig):
+    elif isinstance(config, _TiffSave):
         kwargs = {"compression": _TIFF_COMPRESSION[config.tiff_compression]}
         if config.tiff_compression == "jpeg":
-            img = _flatten(img, config.background_color) if _has_alpha(img) else img.convert("RGB")
+            img = _flatten(img, background) if _has_alpha(img) else img.convert("RGB")
             kwargs["quality"] = config.quality
     else:
         if img.mode not in ("1", "L", "P", "RGB"):
             img = img.convert("RGB")
         kwargs = {}
-    if icc:
-        kwargs["icc_profile"] = icc
-    if exif is not None and len(exif):
-        kwargs["exif"] = exif
     return img, kwargs
 
 

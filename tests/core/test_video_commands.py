@@ -16,7 +16,13 @@ from sashimi.config import (
 )
 from sashimi.errors import InvalidOptionsError, MediaTooLongError
 from sashimi.core.probe import MediaInfo, StreamInfo
-from sashimi.video import build_convert_command, build_transform_command, build_trim_command, check_copy_compatible
+from sashimi.video import (
+    build_convert_command,
+    build_transform_command,
+    build_trim_command,
+    check_copy_compatible,
+    plan_mp4_route,
+)
 
 COMMON = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-filter_threads", "2"]
 FORMATS = "3g2,3gp,aac,asf,avi,flac,flv,gif,m4a,matroska,mj2,mov,mp3,mp4,mpeg,mpegts,ogg,wav,webm"
@@ -301,3 +307,101 @@ def test_copy_check_lets_text_subtitles_through():
     with pytest.raises(InvalidOptionsError) as e:
         check_copy_compatible(_info(("video", "h264"), ("subtitle", "hdmv_pgs_subtitle")), "mp4")
     assert e.value.user_message == "This video can't be trimmed to MP4 without re-encoding. Try MKV instead."
+
+
+def h264(**fields):
+    info = {
+        "container": "matroska,webm", "duration": 103.0, "has_video": True, "has_audio": True, "width": 1280,
+        "height": 720, "video_codec": "h264", "pixel_format": "yuv420p", "audio_codec": "aac",
+    }  # fmt: skip
+    return MediaInfo(**{**info, **fields})
+
+
+def mp4(**params):
+    return VIDEO_CONVERT.from_params(params, target="mp4")
+
+
+@pytest.mark.parametrize(
+    "info, params, route",
+    [
+        ({}, {}, "copy"),
+        ({"pixel_format": "yuvj420p"}, {}, "copy"),
+        ({"has_audio": False, "audio_codec": None}, {}, "copy"),
+        ({"audio_codec": "opus"}, {"mute": True}, "copy"),
+        ({"audio_codec": "opus"}, {}, "copy_video"),
+        ({"audio_codec": "mp3"}, {}, "copy_video"),
+        ({}, {"audio_bitrate_kbps": 96}, "copy_video"),
+        ({}, {"audio_bitrate_kbps": 128, "crf": 23, "preset": "veryfast"}, "copy"),
+        ({}, {"max_width": 1280}, "copy"),
+        ({}, {"max_width": 3840}, "copy"),
+        ({}, {"duration_seconds": 103}, "copy"),
+        ({}, {"max_width": 1279}, "encode"),
+        ({}, {"crf": 22}, "encode"),
+        ({}, {"preset": "slow"}, "encode"),
+        ({}, {"start_seconds": 0.5}, "encode"),
+        ({}, {"duration_seconds": 102.5}, "encode"),
+        ({"video_codec": "hevc"}, {}, "encode"),
+        ({"video_codec": "vp9", "audio_codec": "opus"}, {}, "encode"),
+        ({"pixel_format": "yuv420p10le"}, {}, "encode"),
+        ({"pixel_format": "yuv444p"}, {}, "encode"),
+        ({"pixel_format": None}, {}, "encode"),
+        ({"width": 1279}, {}, "encode"),
+        ({"height": None}, {}, "encode"),
+    ],
+)
+def test_mp4_route(info, params, route):
+    assert plan_mp4_route(h264(**info), mp4(**params)) == route
+
+
+def test_mp4_route_compares_width_as_shown():
+    portrait = h264(width=720, height=1280, rotation=90)
+    assert plan_mp4_route(portrait, mp4(max_width=720)) == "copy"
+    assert plan_mp4_route(portrait, mp4(max_width=1000)) == "copy"
+    assert plan_mp4_route(portrait, mp4(max_width=640)) == "encode"
+
+
+TAIL = ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart", "-fflags", "+bitexact", "-f", "mp4"]
+
+
+def test_mp4_copy_command():
+    config = mp4()
+    cmd = build_convert_command("in.blob", "out.tmp", config, duration=103.0, threads=2, route="copy")
+    assert cmd == [
+        *COMMON[:-1], "1", *PROGRESS, "-t", "104", "-i", "file:in.blob",
+        "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-c:v", "copy", "-c:a", "copy", *TAIL, "file:out.tmp",
+    ]  # fmt: skip
+    muted = build_convert_command("in.blob", "out.tmp", mp4(mute=True), duration=103.0, threads=2, route="copy")
+    assert muted[muted.index("-map") : muted.index("-avoid_negative_ts")] == [
+        "-map", "0:v:0", "-an", "-sn", "-dn", "-c:v", "copy",
+    ]  # fmt: skip
+
+
+def test_mp4_copy_video_command_reencodes_only_the_audio():
+    cmd = build_convert_command(
+        "in.blob", "out.tmp", mp4(audio_bitrate_kbps=96), duration=30.0, threads=2, route="copy_video"
+    )
+    assert cmd == [
+        *COMMON, *PROGRESS, "-t", "31", "-i", "file:in.blob",
+        "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-c:v", "copy", "-c:a", "aac", "-b:a", "96k",
+        "-threads", "2", *TAIL, "file:out.tmp",
+    ]  # fmt: skip
+
+
+def test_copy_routes_keep_the_limits():
+    with pytest.raises(MediaTooLongError):
+        build_convert_command("i", "o", mp4(), duration=601.0, threads=1, route="copy")
+    cmd = build_convert_command("i", "o", mp4(duration_seconds=200), duration=103.0, threads=1, route="copy")
+    assert cmd[cmd.index("-t") + 1] == "200"
+    with pytest.raises(ValueError):
+        build_convert_command("i", "o", mp4(start_seconds=1), duration=103.0, threads=1, route="copy")
+    with pytest.raises(ValueError):
+        build_convert_command(
+            "i", "o", VIDEO_CONVERT.from_params({}, target="webm"), duration=9, threads=1, route="copy"
+        )
+
+
+def test_the_reencode_route_is_the_default_command():
+    config = mp4()
+    assert build_convert_command("i", "o", config, duration=103.0, threads=2) == build_convert_command(
+        "i", "o", config, duration=103.0, threads=2, route="encode"
+    )

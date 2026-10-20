@@ -1,7 +1,8 @@
 # Hand-back: sashimi 0.6.0 for FileSushi
 
-From the sashimi agent to FileSushi, written 2026-10-19 and updated 2026-10-20 for sashimi 0.6.0,
-its first PyPI release (distribution `sashimi-convert`). The release isn't published yet: the
+From the sashimi agent to FileSushi, written 2026-10-19 and updated twice on 2026-10-20 for
+sashimi 0.6.0, its first PyPI release (distribution `sashimi-convert`); the second update added
+image editing, frame selection and the faster "to MP4" (§1 items 9-11, §13). The release isn't published yet: the
 owner builds and uploads it by hand. Until then, a wheel built from sashimi's tree at 0.6.0 is the
 same code.
 
@@ -10,7 +11,8 @@ sha256 `b9bd0581…`). Its `config/`, `core/` and `api/` match the later 0.5.1 b
 differences were in the CLI only. 0.6.0 is that code plus the changes below. Every output
 FileSushi makes today is byte-identical, except contact sheets (§1 item 4 and §8): animated sheets
 get a new default grid and new time labels, still sheets of 9:16 videos get 8x2, and an animated
-sheet of a clip shorter than its clip length now succeeds with one tile.
+sheet of a clip shorter than its clip length now succeeds with one tile; and "to MP4" of 8-bit
+H.264 videos, which is now a stream copy (§1 item 9).
 
 ## 1. What FileSushi must change
 
@@ -78,12 +80,98 @@ sheet of a clip shorter than its clip length now succeeds with one tile.
    (and `theme_color` into the HTML); they're written with `json` and escaped HTML, so user text
    can't break either file. Same input and config, same bytes. Paths inside are relative. A params
    class with `upstream = FaviconPackConfig` covers it; model in §4.
-9. **Renamed fields: none.** `sashimi.config` renamed nothing. The CLI renamed flags (`thumbs
+9. **"To MP4" is faster, for free (nothing to change).** `sashimi.video.convert` with an MP4
+   config now picks its route itself (`sashimi.video.plan_mp4_route`, pure; owner, 2026-10-20:
+   "If 'to MP4' happens to, in the backend, be three possible routes, it's fine for that to be
+   config-driven as far as the user knows"):
+   - **`copy`**: 8-bit 4:2:0 H.264 (`pix_fmt` `yuv420p` or `yuvj420p`) with even dimensions, and
+     AAC audio (or none, or `mute`): both streams are copied. A 103 s 720p MKV took 0.4 s in the
+     sandbox instead of about 20 s;
+   - **`copy_video`**: the same video with other audio (Opus, MP3, …), or `audio_bitrate_kbps`
+     other than 128: the video is copied and only the audio is re-encoded to AAC (0.5 s for 20 s);
+   - **`encode`**: everything else, byte for byte as before. HEVC, VP9, AV1, 10-bit and 4:4:4
+     always re-encode, so "Make an MP4 to watch it here" still gets an MP4 that plays in every
+     browser. So do a start time, a length shorter than the rest of the video, a `max_width`
+     below the video's width, and a `crf` or `preset` other than the defaults (23, `veryfast`).
+   The route isn't an option and doesn't appear in any model. `Mp4Params` keeps working: its
+   `crf` is blank by default and its preset and audio-quality selects start on the model defaults
+   (`tool_params.py:892-913`, checked 2026-10-20), so a form left alone copies. A user who sets a
+   quality or a preset gets a re-encode. The copy routes keep the re-encode's streams (first video
+   and audio only, no subtitles or data), its `-t` limit and 10-minute refusal
+   (`MediaTooLongError`), `+faststart`, and the source's display rotation (as MP4 metadata, which
+   browsers apply). If ffmpeg can't copy a file, `convert` re-encodes it instead. `convert`
+   returns the route (`"copy"`, `"copy_video"`, `"encode"`); the worker can log it
+   (`sashimi_worker.py` ignores the return value today, which is fine). `MediaInfo.pixel_format`
+   is new. To give users "make it smaller", offer `crf` or `max_width`, which re-encode.
+10. **New tool: "Edit image" (crop, rotate, flip, adjust).** In the worker:
+   `sashimi.image.edit(src, dst, IMAGE_EDIT.from_params(params, target=target), max_pixels=IMAGE_MAX_PIXELS)`,
+   with `target` the source's format: `sashimi.image.frames_info(src).edit_target` gives it from
+   the content (`jpeg` for JPEG, MPO and HEIC; `png`, `webp`, `gif`, `bmp`, `tiff`). The output's
+   extension is that format's. Fields (models in §4, `JpegEditConfig` … `TiffEditConfig`):
+   - `rotate` 0/90/180/270 clockwise and `flip` none/horizontal/vertical, applied after the EXIF
+     orientation, which is always applied first (browsers show photos already oriented);
+   - the crop box `crop_left`, `crop_top` (default 0) and `crop_width`, `crop_height` (default
+     blank = to the right/bottom edge), **in pixels of the rotated and flipped picture**, i.e.
+     what the user sees after the rotate and flip. Outside the picture: `InvalidOptionsError`
+     "The crop area must fit inside the picture, which is 400x300 pixels.";
+   - `brightness`, `contrast`, `saturation`: multipliers 0-2, default 1 (`Le(2.0)` in the
+     metadata);
+   - the format's save fields, from the image models: JPEG `quality` (default **92**,
+     `EDIT_QUALITY`), `optimize`, `progressive`, `jpeg_subsampling`; WebP `quality` (92),
+     `lossless`, `webp_method`; PNG `png_compress_level`, `optimize`; GIF `optimize`; TIFF
+     `tiff_compression`, `quality`; and `keep_exif`/`keep_icc` for JPEG, PNG, WebP and TIFF. The
+     owner's rule ("forms with 8 settings or fewer show everything") suggests leaving the save
+     fields out of the form (`not_offered`) or under "More options".
+   **The live preview:** draw the picture as the browser shows it (EXIF applied, the default
+   `image-orientation: from-image`), apply the rotation and flip, crop, then set
+   `filter: brightness(b) contrast(c) saturate(s)` **in that order**. sashimi implements those
+   three as the Filter Effects spec defines them (sRGB, colours not premultiplied, clamped after
+   each function), not Pillow's `ImageEnhance`, so the output matches: brightness and contrast
+   exactly, saturation within one 8-bit level, all three together within two. For crop presets,
+   `sashimi.config.CROP_ASPECTS` is ("free", "1:1", "4:3", "16:9", "9:16"), and
+   `sashimi.image.aspect_crop(width, height, "16:9")` gives the largest centred box (so the web
+   app and the desktop app agree on the starting box). A no-op edit still writes a valid image.
+   **Animated GIF and WebP** are edited frame by frame by the same call: every frame gets the
+   same rotate, flip, crop and adjustment, and keeps its duration; the loop count is kept; GIF
+   colours are kept exactly and transparency survives. Animations over `MAX_ANIMATION_BYTES`
+   (256 MiB of decoded frames: width × height × 4 × frames) raise `MediaTooLargeError` ("This
+   animation is too large to edit. Try one with fewer frames or smaller pictures.") before
+   decoding; §10 has the time and memory at that limit. Animated PNGs raise
+   `UnsupportedMediaError` ("Animated PNGs can't be edited yet."). SEO pages (`/crop-image`,
+   `/rotate-image`, `/flip-image`, `/image-editor`) can all post to this one tool; the page only
+   decides which control the editor opens on.
+11. **New tool: GIF frame editor (keep or drop frames, speed).** In the worker:
+   `sashimi.image.select_frames(src, dst, IMAGE_FRAMES.from_params(params, target=target), max_pixels=IMAGE_MAX_PIXELS)`
+   with `target` `gif` or `webp` (the source's; `frames_info(src).edit_target`). Fields
+   (`GifFramesConfig`, `WebpFramesConfig`, §4): `keep`, the frames to keep **numbered from 0**,
+   as a list or a string such as `"0-9,12"` (blank keeps all; duplicates are dropped and frames
+   play in their original order, since reordering comes later), and `speed`, 0.25-4 (default 1;
+   each frame's duration is divided by it; frames under 20 ms, which browsers play at 100 ms,
+   count as 100 ms, and none gets shorter than `MIN_FRAME_MS`, 20 ms); WebP adds `quality` (92),
+   `lossless`, `webp_method`, `keep_exif`, `keep_icc`; GIF adds `optimize`. Errors: a frame the
+   animation doesn't have, `InvalidOptionsError` "Some of the frames to keep aren't in this
+   animation, which has 120 frames."; an image that isn't animated, `UnsupportedMediaError`
+   "This image isn't animated."; over the budget, as item 10. Every kept frame is the full
+   picture as shown at that point, so dropping frames never leaves holes. With every frame kept
+   and speed 1 the animation is unchanged.
+   **To show the frames:** `sashimi.image.frames_info(src)` reads the frame count, each frame's
+   duration (`durations_ms`), the loop count and the size from the file's blocks, without
+   decoding (2-40 ms for 300 frames), so the web app can call it when the page opens.
+   `sashimi.image.frame_strip(src, dst, FrameStripConfig(...))` draws every frame as a tile in
+   one still WebP (default tiles 96 px tall, 10 per row, quality 80) and returns the layout:
+   frame `i` is at `x = (i % columns) * tile_width`, `y = (i // columns) * tile_height`, so the
+   page can show frame `i` as a CSS sprite (`background-position: -x -y`). A 120-frame
+   480x270 GIF took 1.4 s and 52 MB in the sandbox and gave a 175 KB strip. The strip is a second
+   output of the upload (one file, one request), reachable only by the uploading session like any
+   other output. I chose a strip from sashimi over decoding in the browser because browsers have
+   no portable way to get the frames of an animated WebP (WebCodecs' `ImageDecoder` isn't
+   everywhere), and the desktop app needs the same frames.
+12. **Renamed fields: none.** `sashimi.config` renamed nothing. The CLI renamed flags (`thumbs
    --duration` is `--clip-length`, `-o` is the output path), which FileSushi doesn't use. The
    `IcoConfig.fit` description now says "a square" rather than "a transparent square", and the
    animated sheets' `cols`, `rows` and `sample_duration` descriptions mention the new defaults; if
    your forms show model descriptions, they change with them.
-10. **Nothing else.** Behaviour FileSushi gets for free:
+13. **Nothing else.** Behaviour FileSushi gets for free:
    - a missing or broken ffprobe or ffmpeg in the worker image raises `BinaryNotFoundError`
      (a `ProcessingError`), so the worker logs "Conversion failed" and writes no `error.txt`.
      0.5.1 raised `UnsupportedMediaError`, telling the user "This file doesn't look like … we can
@@ -92,7 +180,8 @@ sheet of a clip shorter than its clip length now succeeds with one tile.
    - the package metadata names "The FileSushi Authors <admin@filesushi.com>", licence
      `Apache-2.0` (PEP 639), and `github.com/filesushi/sashimi`;
    - the batch API (`sashimi.api`) and the CLI changed a lot (one naming policy, 4-tuple results,
-     one JSON report), but FileSushi uses neither.
+     one JSON report with `dry_run`, `--dry-run` everywhere, exit 1 for a named file that was
+     skipped, `edit` and `frames`), but FileSushi uses neither.
 
 ## 2. What sashimi now pins for FileSushi
 
@@ -111,6 +200,11 @@ beyond field names, defaults and bounds:
 - the exact `KEYFRAME_NOTE` text;
 - `MediaTooLargeError(user_message, detail=…)`, and the same constructor and `.detail` on every
   `UserInputError` subclass (worker `:104,185`).
+- new in the editing round (2026-10-20): `IMAGE_EDIT` and `IMAGE_FRAMES` behave like the other
+  families (`key`, `model_for`, the `Le` rule, including `FrameStripConfig`); the edit defaults
+  (rotate 0, no crop, adjustments 1.0, JPEG quality 92), `MAX_ANIMATION_BYTES`, `MIN_FRAME_MS`,
+  `CROP_ASPECTS`, the `keep` string form, the `VideoRoute` names, and no route field on
+  `Mp4VideoConfig`;
 - new in this round: `VIDEO_PREVIEW` behaves like the other families (`key`, `model_for`, the
   `Le` rule on every bounded number); `IcoConfig.background_color` defaults to `None`;
   `FaviconPackConfig.background_color` to white; `FAVICON_PNG_SIZES` and `MAX_PREVIEW_SAMPLES`;
@@ -166,12 +260,14 @@ name), `models` and `targets`. Everything invalid raises `InvalidOptionsError`.
 | `VIDEO_TRIM` | `container` (mkv, mp4, webm, mov; required) and `accurate` (default false) | `CopyTrimConfig` unless accurate; then `Vp9TrimConfig` for webm, `H264TrimConfig` otherwise |
 | `AUDIO_CONVERT` | `target`: mp3, m4a, ogg, wav, flac | `Mp3AudioConfig`, `M4aAudioConfig`, `OggAudioConfig`, `WavAudioConfig`, `FlacAudioConfig` |
 | `VIDEO_PREVIEW` | `target`: gif, webp (new in 0.6.0) | `GifPreviewConfig`, `WebpPreviewConfig` |
+| `IMAGE_EDIT` | `target`: jpeg, png, webp, gif, bmp, tiff (`jpg`, `tif` accepted; new in 0.6.0) | `JpegEditConfig`, `PngEditConfig`, `WebpEditConfig`, `GifEditConfig`, `BmpEditConfig`, `TiffEditConfig` |
+| `IMAGE_FRAMES` | `target`: gif, webp (new in 0.6.0) | `GifFramesConfig`, `WebpFramesConfig` |
 | `CONTACT_SHEET` | `animated` (default false), then `target` (still: jpeg default, png, webp; animated: webp default, gif) | `JpegSheetConfig`, `PngSheetConfig`, `WebpSheetConfig`, `AnimatedWebpSheetConfig`, `AnimatedGifSheetConfig` |
-| — | — | `IcoConfig.from_params(params)`, `FaviconPackConfig.from_params(params)` (new in 0.6.0) |
+| — | — | `IcoConfig.from_params(params)`, `FaviconPackConfig.from_params(params)`, `FrameStripConfig.from_params(params)` (new in 0.6.0) |
 
 Union aliases for type hints: `ImageConvertConfig`, `ImageResizeConfig`, `VideoConvertConfig`,
 `TransformConfig`, `TrimConfig`, `PreviewConfig`, `AudioConvertConfig`, `StillSheetConfig`,
-`AnimatedSheetConfig`, `SheetConfig`. Every model also keeps `Model.from_params(params)`.
+`AnimatedSheetConfig`, `SheetConfig`, `ImageEditConfig`, `FramesConfig`. Every model also keeps `Model.from_params(params)`.
 
 ```python
 from sashimi.config import VIDEO_CONVERT
@@ -198,10 +294,14 @@ VIDEO_CONVERT.from_params({"duration_seconds": 31}, target="gif")
 | `OPUS_SAMPLE_RATES` | (8000, 12000, 16000, 24000, 48000) | what `OggAudioConfig.sample_rate` accepts |
 | `MAX_PREVIEW_SAMPLES` | 10 | most clips in a preview (new in 0.6.0) |
 | `FAVICON_PNG_SIZES` | (16, 32, 48, 180, 192, 512) | the PNG sizes in a favicon pack (new in 0.6.0) |
+| `MAX_ANIMATION_BYTES` | 268,435,456 (256 MiB) | decoded frames (width × height × 4 × frames) an animated edit or frame selection may hold (new) |
+| `MIN_FRAME_MS` | 20 | shortest frame a speed change writes, ms (new) |
+| `EDIT_QUALITY` | 92 | the default `quality` of JPEG, WebP and JPEG-TIFF edits and WebP frame selection (new) |
+| `CROP_ASPECTS` | ("free", "1:1", "4:3", "16:9", "9:16") | the crop presets to offer (new) |
 | `KEYFRAME_NOTE` | "Trimming without re-encoding is instant and keeps the original quality, but cuts can only land on keyframes, so your clip may start a moment before the time you chose." | |
 
 Also exported: `ParamsModel`, `ConfigFamily`, `RGB`, `RGBA`, `parse_color`, `Resample`,
-`X264Preset`, `GridValue`, `PreviewCrop`.
+`X264Preset`, `GridValue`, `PreviewCrop`, `Rotation`, `Flip`.
 
 ### Every model: fields, bounds, defaults
 
@@ -668,13 +768,163 @@ A favicon pack (.zip): ``favicon.ico``, PNG icons at 16, 32, 48, 180, 192 and 51
 | `theme_color` | colour or None |  | `None` | Browser UI colour, in the manifest and a theme-color tag. Blank leaves it out. |
 | `manifest_background_color` | colour or None |  | `None` | Splash screen colour in the manifest. Blank leaves it out. |
 
+#### `JpegEditConfig` (`target`='jpeg')
+
+An edited JPEG: EXIF orientation, then rotate and flip, then crop, then brightness, contrast and saturation. Re-saved at high quality; transparency (from a HEIC source) is flattened onto white.
+
+| Field | Type | Bounds | Default | Description |
+|---|---|---|---|---|
+| `rotate` | 0 / 90 / 180 / 270 |  | `0` | Clockwise rotation in degrees, after the photo's own orientation (EXIF) is applied. |
+| `flip` | none / horizontal / vertical |  | `"none"` | Mirror the picture, after rotating. |
+| `crop_left` | int | ≥ 0 | `0` | Left edge of the crop, in pixels of the rotated and flipped picture. |
+| `crop_top` | int | ≥ 0 | `0` | Top edge of the crop, in pixels of the rotated and flipped picture. |
+| `crop_width` | int or None | ≥ 1 | `None` | Width of the crop in pixels. Blank keeps everything right of the left edge. |
+| `crop_height` | int or None | ≥ 1 | `None` | Height of the crop in pixels. Blank keeps everything below the top edge. |
+| `brightness` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is black, 1 unchanged, 2 twice as bright. The same as CSS ``brightness()``. |
+| `contrast` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is flat grey, 1 unchanged, 2 twice the contrast. The same as CSS ``contrast()``. |
+| `saturation` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is greyscale, 1 unchanged, 2 twice as vivid. The same as CSS ``saturate()``. |
+| `keep_exif` | bool |  | `False` | Copy EXIF metadata (camera, date, GPS). Off by default for privacy. |
+| `keep_icc` | bool |  | `True` | Keep the colour profile, so wide-gamut photos keep their colours. |
+| `quality` | int | ≥ 1, ≤ 100 | `92` | 1 (smallest) to 100 (best). Edits are re-saved at high quality by default. |
+| `optimize` | bool |  | `True` | Extra Huffman-table pass: slightly smaller files, slightly slower. |
+| `progressive` | bool |  | `False` | Progressive (interlaced) encoding. |
+| `jpeg_subsampling` | 4:4:4 / 4:2:2 / 4:2:0 |  | `"4:2:0"` | Chroma subsampling. 4:4:4 keeps colour edges sharp; 4:2:0 is smallest. |
+
+#### `PngEditConfig` (`target`='png')
+
+An edited PNG (lossless). Transparency is kept.
+
+| Field | Type | Bounds | Default | Description |
+|---|---|---|---|---|
+| `rotate` | 0 / 90 / 180 / 270 |  | `0` | Clockwise rotation in degrees, after the photo's own orientation (EXIF) is applied. |
+| `flip` | none / horizontal / vertical |  | `"none"` | Mirror the picture, after rotating. |
+| `crop_left` | int | ≥ 0 | `0` | Left edge of the crop, in pixels of the rotated and flipped picture. |
+| `crop_top` | int | ≥ 0 | `0` | Top edge of the crop, in pixels of the rotated and flipped picture. |
+| `crop_width` | int or None | ≥ 1 | `None` | Width of the crop in pixels. Blank keeps everything right of the left edge. |
+| `crop_height` | int or None | ≥ 1 | `None` | Height of the crop in pixels. Blank keeps everything below the top edge. |
+| `brightness` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is black, 1 unchanged, 2 twice as bright. The same as CSS ``brightness()``. |
+| `contrast` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is flat grey, 1 unchanged, 2 twice the contrast. The same as CSS ``contrast()``. |
+| `saturation` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is greyscale, 1 unchanged, 2 twice as vivid. The same as CSS ``saturate()``. |
+| `keep_exif` | bool |  | `False` | Copy EXIF metadata (camera, date, GPS). Off by default for privacy. |
+| `keep_icc` | bool |  | `True` | Keep the colour profile, so wide-gamut photos keep their colours. |
+| `png_compress_level` | int | ≥ 0, ≤ 9 | `6` | zlib level, 0 (none) to 9 (smallest). Lossless either way. |
+| `optimize` | bool |  | `False` | Search for the smallest encoding. Can take tens of seconds on large images. |
+
+#### `WebpEditConfig` (`target`='webp')
+
+An edited WebP. Transparency and animation are kept; every frame of an animation is edited.
+
+| Field | Type | Bounds | Default | Description |
+|---|---|---|---|---|
+| `rotate` | 0 / 90 / 180 / 270 |  | `0` | Clockwise rotation in degrees, after the photo's own orientation (EXIF) is applied. |
+| `flip` | none / horizontal / vertical |  | `"none"` | Mirror the picture, after rotating. |
+| `crop_left` | int | ≥ 0 | `0` | Left edge of the crop, in pixels of the rotated and flipped picture. |
+| `crop_top` | int | ≥ 0 | `0` | Top edge of the crop, in pixels of the rotated and flipped picture. |
+| `crop_width` | int or None | ≥ 1 | `None` | Width of the crop in pixels. Blank keeps everything right of the left edge. |
+| `crop_height` | int or None | ≥ 1 | `None` | Height of the crop in pixels. Blank keeps everything below the top edge. |
+| `brightness` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is black, 1 unchanged, 2 twice as bright. The same as CSS ``brightness()``. |
+| `contrast` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is flat grey, 1 unchanged, 2 twice the contrast. The same as CSS ``contrast()``. |
+| `saturation` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is greyscale, 1 unchanged, 2 twice as vivid. The same as CSS ``saturate()``. |
+| `keep_exif` | bool |  | `False` | Copy EXIF metadata (camera, date, GPS). Off by default for privacy. |
+| `keep_icc` | bool |  | `True` | Keep the colour profile, so wide-gamut photos keep their colours. |
+| `quality` | int | ≥ 1, ≤ 100 | `92` | Lossy quality, or compression effort when ``lossless``. Edits are re-saved at high quality by default. |
+| `lossless` | bool |  | `False` | Lossless compression: exact pixels, usually bigger files. |
+| `webp_method` | int | ≥ 0, ≤ 6 | `4` | Encoder effort, 0 (fastest) to 6 (smallest). |
+
+#### `GifEditConfig` (`target`='gif')
+
+An edited GIF. Transparency and animation are kept; every frame of an animation is edited.
+
+| Field | Type | Bounds | Default | Description |
+|---|---|---|---|---|
+| `rotate` | 0 / 90 / 180 / 270 |  | `0` | Clockwise rotation in degrees, after the photo's own orientation (EXIF) is applied. |
+| `flip` | none / horizontal / vertical |  | `"none"` | Mirror the picture, after rotating. |
+| `crop_left` | int | ≥ 0 | `0` | Left edge of the crop, in pixels of the rotated and flipped picture. |
+| `crop_top` | int | ≥ 0 | `0` | Top edge of the crop, in pixels of the rotated and flipped picture. |
+| `crop_width` | int or None | ≥ 1 | `None` | Width of the crop in pixels. Blank keeps everything right of the left edge. |
+| `crop_height` | int or None | ≥ 1 | `None` | Height of the crop in pixels. Blank keeps everything below the top edge. |
+| `brightness` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is black, 1 unchanged, 2 twice as bright. The same as CSS ``brightness()``. |
+| `contrast` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is flat grey, 1 unchanged, 2 twice the contrast. The same as CSS ``contrast()``. |
+| `saturation` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is greyscale, 1 unchanged, 2 twice as vivid. The same as CSS ``saturate()``. |
+| `optimize` | bool |  | `False` | Drop unused palette entries. |
+
+#### `BmpEditConfig` (`target`='bmp')
+
+An edited BMP. Transparency is flattened onto white.
+
+| Field | Type | Bounds | Default | Description |
+|---|---|---|---|---|
+| `rotate` | 0 / 90 / 180 / 270 |  | `0` | Clockwise rotation in degrees, after the photo's own orientation (EXIF) is applied. |
+| `flip` | none / horizontal / vertical |  | `"none"` | Mirror the picture, after rotating. |
+| `crop_left` | int | ≥ 0 | `0` | Left edge of the crop, in pixels of the rotated and flipped picture. |
+| `crop_top` | int | ≥ 0 | `0` | Top edge of the crop, in pixels of the rotated and flipped picture. |
+| `crop_width` | int or None | ≥ 1 | `None` | Width of the crop in pixels. Blank keeps everything right of the left edge. |
+| `crop_height` | int or None | ≥ 1 | `None` | Height of the crop in pixels. Blank keeps everything below the top edge. |
+| `brightness` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is black, 1 unchanged, 2 twice as bright. The same as CSS ``brightness()``. |
+| `contrast` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is flat grey, 1 unchanged, 2 twice the contrast. The same as CSS ``contrast()``. |
+| `saturation` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is greyscale, 1 unchanged, 2 twice as vivid. The same as CSS ``saturate()``. |
+
+#### `TiffEditConfig` (`target`='tiff')
+
+An edited TIFF (the first page).
+
+| Field | Type | Bounds | Default | Description |
+|---|---|---|---|---|
+| `rotate` | 0 / 90 / 180 / 270 |  | `0` | Clockwise rotation in degrees, after the photo's own orientation (EXIF) is applied. |
+| `flip` | none / horizontal / vertical |  | `"none"` | Mirror the picture, after rotating. |
+| `crop_left` | int | ≥ 0 | `0` | Left edge of the crop, in pixels of the rotated and flipped picture. |
+| `crop_top` | int | ≥ 0 | `0` | Top edge of the crop, in pixels of the rotated and flipped picture. |
+| `crop_width` | int or None | ≥ 1 | `None` | Width of the crop in pixels. Blank keeps everything right of the left edge. |
+| `crop_height` | int or None | ≥ 1 | `None` | Height of the crop in pixels. Blank keeps everything below the top edge. |
+| `brightness` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is black, 1 unchanged, 2 twice as bright. The same as CSS ``brightness()``. |
+| `contrast` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is flat grey, 1 unchanged, 2 twice the contrast. The same as CSS ``contrast()``. |
+| `saturation` | float | ≥ 0.0, ≤ 2.0 | `1.0` | 0 is greyscale, 1 unchanged, 2 twice as vivid. The same as CSS ``saturate()``. |
+| `keep_exif` | bool |  | `False` | Copy EXIF metadata (camera, date, GPS). Off by default for privacy. |
+| `keep_icc` | bool |  | `True` | Keep the colour profile, so wide-gamut photos keep their colours. |
+| `tiff_compression` | none / lzw / deflate / jpeg |  | `"lzw"` | LZW and Deflate are lossless; JPEG is lossy and much smaller. |
+| `quality` | int | ≥ 1, ≤ 100 | `92` | Used only with JPEG compression, which also flattens transparency. |
+
+#### `GifFramesConfig` (`target`='gif')
+
+An animated GIF with some of its frames, at a new speed.
+
+| Field | Type | Bounds | Default | Description |
+|---|---|---|---|---|
+| `keep` | frame numbers (from 0) or None |  | `None` | Frames to keep, numbered from 0, e.g. "0-9,12". Blank keeps every frame. Kept frames play in their original order. |
+| `speed` | float | ≥ 0.25, ≤ 4.0 | `1.0` | Playback speed: 2 plays twice as fast, 0.5 half as fast. Every frame's duration is divided by it. |
+| `optimize` | bool |  | `False` | Drop unused palette entries. |
+
+#### `WebpFramesConfig` (`target`='webp')
+
+An animated WebP with some of its frames, at a new speed.
+
+| Field | Type | Bounds | Default | Description |
+|---|---|---|---|---|
+| `keep` | frame numbers (from 0) or None |  | `None` | Frames to keep, numbered from 0, e.g. "0-9,12". Blank keeps every frame. Kept frames play in their original order. |
+| `speed` | float | ≥ 0.25, ≤ 4.0 | `1.0` | Playback speed: 2 plays twice as fast, 0.5 half as fast. Every frame's duration is divided by it. |
+| `keep_exif` | bool |  | `False` | Copy EXIF metadata (camera, date, GPS). Off by default for privacy. |
+| `keep_icc` | bool |  | `True` | Keep the colour profile, so wide-gamut photos keep their colours. |
+| `quality` | int | ≥ 1, ≤ 100 | `92` | Lossy quality, or compression effort when ``lossless``. Frames are re-saved at high quality by default. |
+| `lossless` | bool |  | `False` | Lossless compression: exact pixels, usually bigger files. |
+| `webp_method` | int | ≥ 0, ≤ 6 | `4` | Encoder effort, 0 (fastest) to 6 (smallest). |
+
+#### `FrameStripConfig` (standalone)
+
+Every frame of an animated image as small tiles in one still WebP (a sprite sheet), left to right and top to bottom, for UIs that let people pick frames.
+
+| Field | Type | Bounds | Default | Description |
+|---|---|---|---|---|
+| `tile_height` | int | ≥ 16, ≤ 256 | `96` | Height of each frame's tile in pixels; widths follow the animation's shape. |
+| `columns` | int | ≥ 1, ≤ 50 | `10` | Tiles per row. More are used if the strip would otherwise be too tall for WebP. |
+| `quality` | int | ≥ 1, ≤ 100 | `80` | 1 (smallest) to 100 (best). |
+
 ## 5. Worker shim
 
 ```python
 import sashimi
 from sashimi.config import (
-    AUDIO_CONVERT, CONTACT_SHEET, IMAGE_CONVERT, IMAGE_RESIZE, VIDEO_CONVERT, VIDEO_PREVIEW, VIDEO_TRANSFORM,
-    VIDEO_TRIM, FaviconPackConfig, IcoConfig,
+    AUDIO_CONVERT, CONTACT_SHEET, IMAGE_CONVERT, IMAGE_EDIT, IMAGE_FRAMES, IMAGE_RESIZE, VIDEO_CONVERT,
+    VIDEO_PREVIEW, VIDEO_TRANSFORM, VIDEO_TRIM, FaviconPackConfig, FrameStripConfig, IcoConfig,
 )
 
 IMAGE_MAX_PIXELS = 24_000_000
@@ -689,8 +939,18 @@ def run_tool(tool_id, src, dst, params, job):
         sashimi.image.to_ico(src, dst, IcoConfig.from_params(params), max_pixels=IMAGE_MAX_PIXELS)
     elif tool_id in FAVICON_PACK_TOOLS:
         sashimi.image.favicon_pack(src, dst, FaviconPackConfig.from_params(params), max_pixels=IMAGE_MAX_PIXELS)
+    elif tool_id in EDIT_TOOLS:
+        target = sashimi.image.frames_info(src, max_pixels=IMAGE_MAX_PIXELS).edit_target
+        sashimi.image.edit(src, dst, IMAGE_EDIT.from_params(params, target=target), max_pixels=IMAGE_MAX_PIXELS)
+    elif tool_id in FRAMES_TOOLS:
+        target = sashimi.image.frames_info(src, max_pixels=IMAGE_MAX_PIXELS).edit_target
+        sashimi.image.select_frames(src, dst, IMAGE_FRAMES.from_params(params, target=target),
+                                    max_pixels=IMAGE_MAX_PIXELS)
+    elif tool_id in FRAME_STRIP_TOOLS:
+        layout = sashimi.image.frame_strip(src, dst, FrameStripConfig.from_params(params), max_pixels=IMAGE_MAX_PIXELS)
+        job_result = {"frame_strip": layout.model_dump(), "frames": sashimi.image.frames_info(src).model_dump()}
     elif tool_id in VIDEO_TOOLS:
-        sashimi.video.convert(src, dst, VIDEO_CONVERT.from_params(params, target=target))
+        route = sashimi.video.convert(src, dst, VIDEO_CONVERT.from_params(params, target=target))
     elif tool_id in PREVIEW_TOOLS:
         sashimi.video.preview(src, dst, VIDEO_PREVIEW.from_params(params, target=target))
     elif tool_id in TRANSFORM_TOOLS:
@@ -704,8 +964,14 @@ def run_tool(tool_id, src, dst, params, job):
                               display_name=job.get("filename_clean"))
 ```
 
-`FAVICON_PACK_TOOLS` and `PREVIEW_TOOLS` are the two optional new tools (§1 items 7-8); the
-rest is what the worker does today.
+`FAVICON_PACK_TOOLS` and `PREVIEW_TOOLS` are the two optional new tools (§1 items 7-8), and
+`EDIT_TOOLS`, `FRAMES_TOOLS` and `FRAME_STRIP_TOOLS` the editors (§1 items 10-11); the rest is
+what the worker does today. `frames_info` takes the target from the file's content, so an
+upload's edits keep its format whatever its name. For a frames job, `frames_info(src).animated`
+tells you before queueing whether the file is an animated GIF or WebP; `select_frames` refuses
+anything else with `UnsupportedMediaError` ("This image isn't animated."), and `IMAGE_FRAMES`
+refuses targets other than gif and webp with `InvalidOptionsError`. `job_result` stands for
+however the worker hands data back to the web app.
 
 What this lets you delete: `video_config`, `audio_config` (§6), `make_sheet` (the sheet family
 takes `animated` itself; `sheets.render` takes either config), `check_sheet_shape` (§8) and
@@ -750,6 +1016,13 @@ New in 0.6.0:
 
 | Class | When | `user_message` |
 |---|---|---|
+| `InvalidOptionsError` | an edit's crop box outside the rotated picture | The crop area must fit inside the picture, which is 400x300 pixels. |
+| `InvalidOptionsError` | `crop_width`/`crop_height` 0, or an adjustment over 2 | Invalid value for crop_width: input should be greater than or equal to 1. / Invalid value for brightness: input should be less than or equal to 2. |
+| `MediaTooLargeError` | an animation over `MAX_ANIMATION_BYTES` (edit, frame selection, frame strip) | This animation is too large to edit. Try one with fewer frames or smaller pictures. |
+| `UnsupportedMediaError` | editing an animated PNG | Animated PNGs can't be edited yet. |
+| `UnsupportedMediaError` | `select_frames` on a still image | This image isn't animated. |
+| `InvalidOptionsError` | `keep` names a frame the animation doesn't have | Some of the frames to keep aren't in this animation, which has 120 frames. |
+| `InvalidOptionsError` | `keep` empty, or a range like "5-2" | Invalid value for keep: keep at least one frame. / Invalid value for keep: 5-2 counts down; write ranges low-high. |
 | `InvalidOptionsError` | preview clips totalling over 30 s (`samples` × `sample_duration`) | Previews can be at most 30 seconds long. Use fewer clips or shorter ones. |
 | `InvalidOptionsError` | a GIF preview whose frames would need more than `MAX_FRAME_BYTES` (400 MB), e.g. 10 × 3 s at 30 fps and 720 px | These settings would make the preview too large to render as a GIF. Use a smaller size, a lower frame rate, or fewer or shorter clips. |
 | `MediaTooShortError` | a preview of a video under 0.5 s | This video is too short for a preview. |
@@ -855,7 +1128,42 @@ those, cap the pixels for them lower, or the timeout higher. HEIC input wasn't m
 
 ## 10. Measured results (sandbox)
 
-`sh scripts/sandbox_check.sh --skip-long` passed all 30 of its jobs on 2026-10-20 at the final
+**Editing round (2026-10-20, later).** `sh scripts/sandbox_check.sh --skip-long` passed all 42
+of its jobs at the final tree (the image had Python 3.14.8, Pillow 13.0.0 and ffmpeg 8.1.2;
+261 MB). The 12 new jobs:
+
+| Job | Time | Peak memory | Peak pids |
+|---|---|---|---|
+| Edit a 12 MP JPEG (rotate, flip, crop, all three adjustments) | 0.4 s | 212 MB | 6 |
+| Edit a 120-frame 480x270 GIF (same edit) | 3.7 s | 47 MB | 6 |
+| Edit a 120-frame 480x270 animated WebP (same edit) | 2.9 s | 64 MB | 6 |
+| **Adjust a 280-frame 640x360 GIF, at the frame budget (258 MB of frames)** | 12.8 s | 168 MB | 6 |
+| **Adjust a 280-frame 640x360 animated WebP, at the frame budget** | 15.1 s | 302 MB | 5 |
+| A 300-frame 640x360 GIF, over the budget (`error.txt`) | 0.05 s | 33 MB | 6 |
+| Keep 60 of 120 frames at speed 2, GIF / WebP | 3.9 / 1.9 s | 46 / 67 MB | 6 |
+| Frame strip of the 120-frame GIF (1710x1152 WebP, 175 KB) | 1.4 s | 52 MB | 6 |
+| To MP4, `copy` (103 s 720p H.264 + AAC MKV) | 0.4 s | 76 MB | 6 |
+| To MP4, `copy_video` (20 s H.264 + Opus) | 0.5 s | 54 MB | 9 |
+| To MP4, `encode` (20 s VP9 + Opus) | 8.7 s | 165 MB | 18 |
+
+For comparison, the existing re-encode of the same 103 s MKV at 640 px took 21.5 s. **The frame
+budget:** peak memory is about 40 MB plus 1.1 times the decoded frames for WebP (Pillow's WebP
+encoder takes every frame at once), and about 40 MB plus half of them for GIF (frames are held as
+palette images, one byte a pixel). At 256 MiB that is about 300 MB for WebP, well inside the
+1 GB sandbox and a 1536m worker, and 13-15 s on two CPUs. Re-quantising GIF frames is the slow
+step (about 15 ms per 640x360 frame, single-threaded; Pillow's median cut, which keeps every
+colour of a frame with up to 256). Outside the sandbox (python3.15 with Pillow 13.0.0), editing a
+300-frame 480x270 GIF took 6.1 s and 123 MB, the same WebP 6.4 s and 211 MB; `frames_info` read
+them in 36 ms and 2 ms. Raising the budget to 512 MiB would allow about 600 MB and 30 s; FileSushi
+can refuse lower with its own check on `frames_info` (width × height × 4 × frames).
+
+Outside the sandbox, 43 outputs were hashed against the baseline (`9bc8329`): the 37 that this
+round doesn't change are byte-identical (every image conversion, ICO, favicon pack, GIF, WebP,
+WebM, the MP4 re-encodes with a width, crf, start, length, 4:4:4, HEVC, VP9 or GIF source, trims,
+remux, rotate, previews, sheets and audio), and the 6 MP4s of H.264 sources with default
+settings that now take a copy route differ, as expected (§1 item 9).
+
+**Earlier in the round.** `sh scripts/sandbox_check.sh --skip-long` passed all 30 of its jobs on 2026-10-20 at the then
 0.6.0 tree, under `--network none --read-only --pids-limit 128 --cpus 2 --memory 1g`: outputs
 valid, nothing written outside `/vault/output`, `/tmp` empty, no network attempts. Image size
 260 MB. The script gained five jobs this round: two previews, the favicon pack, ICO with a
@@ -923,14 +1231,20 @@ These answered FileSushi's 0.5.0 release brief (2026-10-12) and still hold.
 
 ## 12. Python API breaks
 
-0.6.0 (listed in `CHANGELOG.md`, with upgrade steps in `MIGRATION.md`): the MP3 and M4A
+0.6.0 (listed in `CHANGELOG.md`, with upgrade steps in `MIGRATION.md`): `video.convert` returns the
+MP4 route instead of `None` and copies H.264 when it can (§1 item 9); the MP3 and M4A
 `sample_rate` fields are `Literal` choices instead of 8000-192000 ranges (§1), and a missing or
 broken ffprobe/ffmpeg raises `BinaryNotFoundError` instead of `UnsupportedMediaError` (§1). The
 contact-sheet defaults and short clips (§1 items 4-5) and copy trims with subtitles (§1 item 6)
 change outputs or errors. Everything else that broke is in `sashimi.api` and the CLI, which
 FileSushi doesn't use. Added for FileSushi: `MP3_SAMPLE_RATES`, `AAC_SAMPLE_RATES`,
 `IcoConfig.background_color`, `VIDEO_PREVIEW` with `video.preview`, `FaviconPackConfig` with
-`image.favicon_pack`, `MAX_PREVIEW_SAMPLES` and `FAVICON_PNG_SIZES`.
+`image.favicon_pack`, `MAX_PREVIEW_SAMPLES` and `FAVICON_PNG_SIZES`; and in the editing round
+`IMAGE_EDIT` with `image.edit`, `IMAGE_FRAMES` with `image.select_frames`, `image.frames_info`
+(`FramesInfo`), `FrameStripConfig` with `image.frame_strip` and `plan_frame_strip`
+(`FrameStrip`), `image.adjust_colors`, `image.aspect_crop`, `image.crop_box`,
+`video.plan_mp4_route`, `video.VideoRoute`, `MediaInfo.pixel_format`, `EDIT_QUALITY`,
+`MAX_ANIMATION_BYTES`, `MIN_FRAME_MS`, `CROP_ASPECTS`, `Rotation` and `Flip`.
 
 0.5.0: the 0.4 config classes are replaced by per-target models and families; fields that a
 target ignored now raise "Unknown option"; the `effective_*`/`encoder_target` properties,
@@ -938,3 +1252,45 @@ target ignored now raise "Unknown option"; the `effective_*`/`encoder_target` pr
 sheet path fields and `sashimi.core._params` are gone; `DEFAULT_MAX_PIXELS` and `KEYFRAME_NOTE`
 moved to `sashimi.config`. Additions: `MediaInfo.streams` (`StreamInfo(type, codec)`),
 `video.check_copy_compatible`, `sheets.render`, video → animated WebP and accurate trims.
+
+## 13. Decisions from the editing round (2026-10-20)
+
+1. **One model per output format for edits and frames** (`IMAGE_EDIT`, `IMAGE_FRAMES`), like every
+   other family, because each format has its own save settings (JPEG quality and subsampling,
+   PNG compression, WebP lossless, …) and "no model has a field its output ignores" still holds.
+   The save fields are the image models' own (shared mixins), not copies. The output format is
+   `target`, as everywhere in sashimi (formats come from the config, never from the input);
+   "edits keep the source's format" is the caller's choice of `target`, which
+   `frames_info(src).edit_target` makes from the content, and which the batch API and CLI make
+   from the extension, as `resize` does.
+2. **The crop aspect is not a config field.** The config holds the box in pixels; an aspect is a
+   UI helper that needs the picture's size. `CROP_ASPECTS` and `aspect_crop()` give FileSushi and
+   the desktop app the same presets and the same centred box, and the CLI's `--aspect` uses them
+   per file. A field would have been one more form option for FileSushi to hide, with rules for
+   how it combines with an explicit box.
+3. **JPEG and WebP edits default to quality 92** (`EDIT_QUALITY`), JPEG keeping 4:2:0: high enough
+   that one edit isn't visibly worse than its source, without the size of 95-100. Pillow can't
+   reuse a JPEG's own quantisation tables once the pixels have changed.
+4. **Adjustments are CSS's formulas, in sRGB, in the order brightness → contrast → saturate**,
+   each clamped, computed with Pillow lookup tables and a colour matrix (no new dependency).
+   Combining all three rounds to 8 bits between contrast and saturate, so a pixel can be up to two
+   levels from the exact result; doing it exactly needs float images, about six times the memory.
+5. **GIF frames keep their colours exactly** when they have at most 256 (every edit of a GIF
+   does, since rotate, flip, crop and the adjustments map colours to colours): Pillow's median-cut
+   quantiser is exact in that case, and its palette lookup isn't. Frames with transparency get
+   disposal 2, so a pixel that turns transparent shows the background, not the previous frame.
+6. **Animated PNG is refused, not flattened.** Pillow reads APNG, but the owner's scope was GIF
+   and WebP, and silently keeping one frame would lose the animation.
+7. **A frame strip from sashimi**, not frames decoded in the browser (§1 item 11).
+8. **Frame selection takes `keep` only; the CLI also has `--drop`**, which it turns into `keep`
+   per file. One field keeps forms simple; the CLI numbers frames from 1, the config from 0.
+9. **What makes "to MP4" re-encode is a value other than the default**, not "a value was sent":
+   FileSushi's preset and audio-quality selects always post their defaults, and a separate
+   `allow_stream_copy` field would be a route in the form, which the owner ruled out. The cost:
+   asking for exactly crf 23 and `veryfast` can't force a re-encode, which would only lose
+   quality.
+10. **The copy routes keep the re-encode's streams** (first video and audio, no subtitles), rather
+    than the lossless trim's (every stream), so the output doesn't depend on the route taken;
+    `remux` keeps everything. They also keep the 10-minute limit, so which videos are refused
+    doesn't depend on the codec (owner question in the inbox).
+

@@ -9,7 +9,7 @@ from typing import Annotated, Optional
 import typer
 
 from sashimi._version import __version__
-from sashimi.cli import config_cmd, convert_cmd, files_cmd, thumbs_cmd
+from sashimi.cli import config_cmd, convert_cmd, edit_cmd, files_cmd, thumbs_cmd
 
 
 def _version_callback(value: bool) -> None:
@@ -22,7 +22,7 @@ def _version_callback(value: bool) -> None:
 
 app = typer.Typer(
     name="sashimi",
-    help="Convert images, video and audio, make video contact sheets and previews, and trim videos losslessly.",
+    help="Convert and edit images, video and audio, make video contact sheets and previews, and trim videos losslessly.",
     add_completion=True,
     context_settings={"help_option_names": ["-h", "--help"]},
     no_args_is_help=True,
@@ -50,8 +50,8 @@ def main_callback(
     ] = 0,
 ):
     """
-    sashimi: convert images, video and audio, make video contact sheets and previews, and trim
-    videos losslessly. Logging and warnings go to stderr, so --json output on stdout stays clean.
+    sashimi: convert and edit images, video and audio, make video contact sheets and previews, and
+    trim videos losslessly. Logging and warnings go to stderr, so --json output on stdout stays clean.
     """
     if verbose >= 2:
         log_level = logging.DEBUG
@@ -93,6 +93,18 @@ app.command(name="rotate", no_args_is_help=True, rich_help_panel=CONVERT, short_
     convert_cmd.rotate_cmd
 )
 app.command(
+    name="edit",
+    no_args_is_help=True,
+    rich_help_panel=CONVERT,
+    short_help="Rotate, flip, crop and adjust images, including every frame of GIFs and WebPs.",
+)(edit_cmd.edit_cmd)
+app.command(
+    name="frames",
+    no_args_is_help=True,
+    rich_help_panel=CONVERT,
+    short_help="Keep or drop frames of animated GIFs and WebPs, and change their speed.",
+)(edit_cmd.frames_cmd)
+app.command(
     name="favicon",
     no_args_is_help=True,
     rich_help_panel=CONVERT,
@@ -128,7 +140,7 @@ app.command(
     name="info",
     no_args_is_help=True,
     rich_help_panel=INSPECT,
-    short_help="Show a media file's format, duration and codecs.",
+    short_help="Show a media file's format, duration and codecs, or an image's frames.",
 )(files_cmd.info_cmd)
 app.command(
     name="flatten",

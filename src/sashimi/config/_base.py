@@ -3,7 +3,7 @@
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Annotated, Any, ClassVar, Generic, Self, TypeVar, cast
+from typing import Annotated, Any, ClassVar, Generic, Literal, Self, TypeVar, cast
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, model_validator
 from pydantic_core import PydanticCustomError
@@ -109,6 +109,11 @@ FormInt = BeforeValidator(_parse_int)
 FormBool = BeforeValidator(parse_bool)
 """Lets a boolean ``Literal`` field accept the string a web form posts ("true" for True)."""
 TargetName = BeforeValidator(normalize_target)
+
+Rotation = Annotated[Literal[0, 90, 180, 270], FormInt]
+"""A clockwise rotation in degrees: 0, 90, 180 or 270 (form strings such as "90" are accepted)."""
+Flip = Literal["none", "horizontal", "vertical"]
+"""A mirror: none, horizontal (left to right) or vertical (top to bottom)."""
 
 
 def parse_color(value: Any) -> Any:

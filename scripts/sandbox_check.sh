@@ -35,6 +35,16 @@ import pillow_heif
 img = Image.new('RGBA', (64, 64), (255, 0, 0, 0)); img.paste((0, 0, 255, 255), (0, 0, 32, 64)); img.save('/f/rgba.png')
 pillow_heif.from_pillow(Image.open('/f/photo.jpg').convert('RGB')).save('/f/photo.heic', quality=80)
 "
+gen ffmpeg -loglevel error -f lavfi -i testsrc2=s=1280x720:r=25:d=20 -f lavfi -i sine=f=330:d=20 \
+    -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -c:a libopus -b:a 96k -f matroska /f/ref-opus.mkv
+gen ffmpeg -loglevel error -f lavfi -i testsrc2=s=1280x720:r=25:d=20 -f lavfi -i sine=f=330:d=20 \
+    -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -c:a libopus -f webm /f/ref-vp9.webm
+gen ffmpeg -loglevel error -f lavfi -i testsrc2=s=640x360:r=14:d=20 \
+    -vf "split[a][b];[a]palettegen[p];[b][p]paletteuse" -f gif /f/budget.gif
+gen ffmpeg -loglevel error -f lavfi -i testsrc2=s=640x360:r=14:d=20 -c:v libwebp_anim -quality 75 -loop 0 \
+    -f webp /f/budget.webp
+gen ffmpeg -loglevel error -f lavfi -i testsrc2=s=640x360:r=15:d=20 \
+    -vf "split[a][b];[a]palettegen[p];[b][p]paletteuse" -f gif /f/over-budget.gif
 head -c 200000 /dev/urandom > "$F/junk.bin"
 if [ "$SKIP_LONG" = 0 ]; then
     gen ffmpeg -loglevel error -f lavfi -i testsrc2=s=1920x1080:r=25:d=600 -f lavfi -i sine=d=600 \
@@ -94,6 +104,18 @@ run audio-to-ogg "$F/audio.mp3"
 run audio-to-flac "$F/audio.mp3"
 run junk-to-mp4 "$F/junk.bin"
 run probe "$F/ref.mkv"
+run image-edit-photo "$F/photo.jpg"
+run image-edit-gif "$WORK/out/video-to-gif/result.gif"
+run image-edit-webp "$WORK/out/video-to-webp/result.webp"
+run image-edit-gif-budget "$F/budget.gif"
+run image-edit-webp-budget "$F/budget.webp"
+run image-edit-over-budget "$F/over-budget.gif"
+run image-frames-gif "$WORK/out/video-to-gif/result.gif"
+run image-frames-webp "$WORK/out/video-to-webp/result.webp"
+run image-frame-strip "$WORK/out/video-to-gif/result.gif"
+run video-to-mp4-copy "$F/ref.mkv"
+run video-to-mp4-copy-video "$F/ref-opus.mkv"
+run video-to-mp4-encode "$F/ref-vp9.webm"
 
 if [ -n "$FAILED" ]; then
     echo "--- FAILED:$FAILED ---"

@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import pathlib
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import typer
@@ -29,6 +29,7 @@ STATUS_STYLES = {
     "skipped": "[bold bright_black]Skipped[/bold bright_black]",
     "error": "[bold red]Error[/bold red]",
 }
+DRY_RUN_STYLES = {**STATUS_STYLES, "success": "[bold cyan]Plan[/bold cyan]"}
 STATUS_PRIORITY = {"error": 0, "skipped": 1, "exists": 2, "success": 3}
 
 
@@ -95,15 +96,20 @@ class BatchRunner:
     """
     Consumes a batch generator and renders a Rich progress bar (with per-file progress for long
     conversions), then one line for a single file or a summary and table for several, or the
-    JSON report (:func:`sashimi.api.build_report`). Exits 1 if any file failed, and 2 if the
-    options were refused before any file was processed.
+    JSON report (:func:`sashimi.api.build_report`). With `dry_run` the results are the plan.
+
+    Exit codes: 0 when every file succeeded or already existed, and when a directory search
+    skipped files it can't use; 1 when any file failed, or a file named on the command line was
+    skipped (unsupported, too short, not animated, …); 2 when the options were refused before any
+    file was processed.
     """
 
-    def __init__(self, command: str, title: str, json_output: bool, limit_output: int = 50):
+    def __init__(self, command: str, title: str, json_output: bool, limit_output: int = 50, *, dry_run: bool = False):
         self.command = command
-        self.title = title
+        self.title = f"{title} (dry run)" if dry_run else title
         self.json_output = json_output
         self.limit_output = limit_output
+        self.dry_run = dry_run
         self._progress: Any = None
         self._task: Any = None
         self._current = ""
@@ -113,7 +119,8 @@ class BatchRunner:
         if self._progress is not None and self._task is not None and stage != "done":
             self._progress.update(self._task, description=f"{stage.capitalize()} {self._current}: {fraction:.0%}")
 
-    def run(self, generator: Iterator[YieldType]) -> None:
+    def run(self, generator: Iterator[YieldType], inputs: Iterable[pathlib.Path] = ()) -> None:
+        """Runs the batch. `inputs` are the paths given on the command line, for the exit code."""
         from sashimi.api._consume import build_report
         from sashimi.errors import UserInputError
 
@@ -139,7 +146,7 @@ class BatchRunner:
             results.append(item)
             return file_path in started
 
-        quiet = self.json_output or total_files <= 0 or (total_files == 1 and not console.is_terminal)
+        quiet = self.json_output or self.dry_run or total_files <= 0 or (total_files == 1 and not console.is_terminal)
         if quiet:
             for item in generator:
                 record(item)
@@ -177,23 +184,35 @@ class BatchRunner:
                 self._progress = None
 
         elapsed = time.perf_counter() - start_time
-        report = build_report(self.command, total_files, results, elapsed)
-        errors = report["summary"]["errors"]
+        report = build_report(self.command, total_files, results, elapsed, dry_run=self.dry_run)
+        named = {path for path in inputs if not path.is_dir()}
+        failed = report["summary"]["errors"] > 0 or any(
+            status == "skipped" and path in named for path, status, _, _ in results
+        )
         if self.json_output:
             print_json(report)
-            raise typer.Exit(code=0 if errors == 0 else 1)
+            raise typer.Exit(code=1 if failed else 0)
 
+        styles = DRY_RUN_STYLES if self.dry_run else STATUS_STYLES
         if not results:
             console.print("[yellow]No matching files found to process.[/yellow]")
         elif len(results) == 1:
             path, status, message, _ = results[0]
-            style = STATUS_STYLES.get(status, status)
-            console.print(
-                f"{style}: [cyan]{escape(display_path(path))}[/cyan]: {escape(message)} [dim]({elapsed:.1f}s)[/dim]"
-            )
+            style = styles.get(status, status)
+            timing = "" if self.dry_run else f" [dim]({elapsed:.1f}s)[/dim]"
+            console.print(f"{style}: [cyan]{escape(display_path(path))}[/cyan]: {escape(message)}{timing}")
+        elif self.dry_run:
+            for path, status, message, _ in sorted(results, key=lambda r: r[0])[: self.limit_output]:
+                console.print(
+                    f"{styles.get(status, status)}: [cyan]{escape(display_path(path))}[/cyan]: {escape(message)}"
+                )
+            if len(results) > self.limit_output:
+                console.print(
+                    f"[dim]Showing the first {self.limit_output} of {len(results)}. Use --limit-output to show more.[/dim]"
+                )
         else:
             self._print_summary(results, report["summary"])
-        if errors:
+        if failed:
             raise typer.Exit(code=1)
 
     def _print_summary(self, results: list, summary: dict[str, Any]) -> None:

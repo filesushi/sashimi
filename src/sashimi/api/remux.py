@@ -31,6 +31,7 @@ def remux_files_generator(
     on_file_progress: FileProgress | None = None,
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
+    dry_run: bool = False,
 ) -> Iterator[YieldType]:
     """
     Copies every video found into `container` without re-encoding (a whole-file
@@ -59,6 +60,7 @@ def remux_files_generator(
         reject_reason=reject_reason,
         output=output,
         output_dir=output_dir,
+        dry_run=dry_run,
     )
 
 
@@ -71,4 +73,6 @@ def remux_files(
 ) -> dict[str, Any]:
     """Like :func:`remux_files_generator`, but runs to completion and returns a summary."""
     gen = remux_files_generator(paths, container, **kwargs)
-    return consume_generator(gen, show_progress, f"Remuxing to {container.upper()}", "remux")
+    return consume_generator(
+        gen, show_progress, f"Remuxing to {container.upper()}", "remux", dry_run=kwargs.get("dry_run", False)
+    )

@@ -55,7 +55,10 @@ def test_rejected_inputs_are_reported_but_do_not_advance_progress(monkeypatch):
 
 def test_report_shape():
     report = build_report("convert", 1, [(pathlib.Path("a.png"), "success", "ok", pathlib.Path("a.webp"))], 2.0)
-    assert list(report) == ["schema", "command", "summary", "results"]
+    assert list(report) == ["schema", "command", "dry_run", "summary", "results"]
+    assert report["dry_run"] is False
+    planned = build_report("convert", 0, [], 0.0, dry_run=True, renamed=[])
+    assert list(planned) == ["schema", "command", "dry_run", "renamed", "summary", "results"] and planned["dry_run"]
     assert list(report["summary"]) == [
         "total_found", "success", "exists", "skipped", "errors", "time_taken_seconds", "avg_time_seconds",
     ]  # fmt: skip

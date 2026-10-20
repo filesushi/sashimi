@@ -23,6 +23,7 @@ def make_previews_generator(
     on_file_progress: FileProgress | None = None,
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
+    dry_run: bool = False,
 ) -> Iterator[YieldType]:
     """
     A preview (see :func:`sashimi.video.preview`) of every video found, an animated WebP by
@@ -41,6 +42,7 @@ def make_previews_generator(
         on_file_progress=on_file_progress,
         output=output,
         output_dir=output_dir,
+        dry_run=dry_run,
     )
 
 
@@ -52,4 +54,10 @@ def make_previews(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Like :func:`make_previews_generator`, but runs to completion and returns a summary."""
-    return consume_generator(make_previews_generator(paths, config, **kwargs), show_progress, "Previews", "preview")
+    return consume_generator(
+        make_previews_generator(paths, config, **kwargs),
+        show_progress,
+        "Previews",
+        "preview",
+        dry_run=kwargs.get("dry_run", False),
+    )

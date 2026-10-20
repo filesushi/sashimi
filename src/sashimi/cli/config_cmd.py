@@ -28,6 +28,8 @@ class Operation(str, Enum):
     resize = "resize"
     rotate = "rotate"
     favicon = "favicon"
+    edit = "edit"
+    frames = "frames"
     extract = "extract"
     thumbs = "thumbs"
     preview = "preview"

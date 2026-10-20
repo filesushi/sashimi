@@ -31,6 +31,19 @@ MIN_TILE_SIZE = 16
 MAX_PREVIEW_SAMPLES = 10
 """Most clips a preview stitches together."""
 
+MAX_ANIMATION_BYTES = 256 * 1024 * 1024
+"""
+Largest animated image (GIF or WebP) that is edited or has frames selected, as decoded RGBA
+bytes: width x height x 4 x frames. Larger ones are refused before any frame is decoded.
+"""
+MIN_FRAME_MS = 20
+"""
+Shortest frame duration written when an animation's speed changes, in milliseconds. Browsers play
+frames shorter than this at 100 ms, so a faster setting would play slower.
+"""
+CROP_ASPECTS = ("free", "1:1", "4:3", "16:9", "9:16")
+"""The crop shapes UIs offer: free, or a width:height ratio (see ``sashimi.image.aspect_crop``)."""
+
 MP3_SAMPLE_RATES = (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000)
 """The sample rates the MP3 encoder (LAME) accepts, in Hz."""
 AAC_SAMPLE_RATES = (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200, 96000)

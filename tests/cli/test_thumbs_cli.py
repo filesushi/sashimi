@@ -45,10 +45,12 @@ def test_non_video_file_is_reported(tmp_path):
     result = runner.invoke(app, ["thumbs", "notes.txt", "--json"])
 
     payload = json.loads(result.stdout)
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     assert payload["results"] == [
         {"file": "notes.txt", "status": "skipped", "message": "Unsupported file type", "output": None}
     ]
+    scanned = runner.invoke(app, ["thumbs", ".", "--json"])
+    assert scanned.exit_code == 0 and json.loads(scanned.stdout)["results"] == []
 
 
 @pytest.mark.parametrize(

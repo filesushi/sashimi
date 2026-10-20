@@ -54,6 +54,12 @@ IMAGE_TARGETS = frozenset(IMAGE_CONVERT.targets) | {"ico"}
 VIDEO_TARGETS = frozenset(VIDEO_CONVERT.targets)
 AUDIO_TARGETS = frozenset(AUDIO_CONVERT.targets)
 
+ROUTE_MESSAGES = {
+    "copy": "Converted to {name} (video and audio copied, not re-encoded)",
+    "copy_video": "Converted to {name} (video copied, audio re-encoded)",
+}
+"""Success messages for the MP4 routes that skip a re-encode (see :func:`sashimi.video.plan_mp4_route`)."""
+
 Processor = Callable[[pathlib.Path, pathlib.Path, Callable[[float, str], None] | None], None]
 
 
@@ -95,6 +101,7 @@ def convert_files_generator(
     on_file_progress: FileProgress | None = None,
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
+    dry_run: bool = False,
 ) -> Iterator[YieldType]:
     """
     Converts every file found to `target`, writing ``<stem>.<ext>`` next to each input (``.jpg``
@@ -118,7 +125,7 @@ def convert_files_generator(
     video_cfg = video_config or (VIDEO_CONVERT.from_params(target=target) if target in VIDEO_TARGETS else None)
     audio_cfg = audio_config or (AUDIO_CONVERT.from_params(target=target) if target in AUDIO_TARGETS else None)
 
-    def process(src: pathlib.Path, dst: pathlib.Path, progress: Callable[[float, str], None] | None) -> None:
+    def process(src: pathlib.Path, dst: pathlib.Path, progress: Callable[[float, str], None] | None) -> str | None:
         kind = _kind(src)
         if target in AUDIO_TARGETS and kind in ("video", "audio") and audio_cfg:
             audio.convert(src, dst, audio_cfg, max_workers=max_workers, on_progress=progress)
@@ -127,13 +134,15 @@ def convert_files_generator(
             and (kind == "video" or (kind == "image" and target in ("webm", "mp4")))
             and video_cfg
         ):
-            video.convert(src, dst, video_cfg, max_workers=max_workers, on_progress=progress)
+            route = video.convert(src, dst, video_cfg, max_workers=max_workers, on_progress=progress)
+            return ROUTE_MESSAGES.get(route)
         elif target == "ico" and kind == "image":
             image.to_ico(src, dst, ico_config, on_progress=progress)
         elif kind == "image" and image_cfg:
             image.convert(src, dst, image_cfg, on_progress=progress)
         else:
             raise UnsupportedMediaError(f"Can't convert {src.suffix or 'this file'} to {target.upper()}.")
+        return None
 
     suffix = TARGET_SUFFIX[target]
     own_format = _SAME_FORMAT.get(target, {suffix})
@@ -155,6 +164,7 @@ def convert_files_generator(
         reject_reason=reject_reason,
         output=output,
         output_dir=output_dir,
+        dry_run=dry_run,
     )
 
 
@@ -167,7 +177,11 @@ def convert_files(
 ) -> dict[str, Any]:
     """Like :func:`convert_files_generator`, but runs to completion and returns a summary."""
     return consume_generator(
-        convert_files_generator(paths, target, **kwargs), show_progress, f"Converting to {target.upper()}", "convert"
+        convert_files_generator(paths, target, **kwargs),
+        show_progress,
+        f"Converting to {target.upper()}",
+        "convert",
+        dry_run=kwargs.get("dry_run", False),
     )
 
 
@@ -179,6 +193,7 @@ def convert_images_generator(
     force: bool = False,
     extensions: Iterable[str] | None = None,
     output_dir: PathInput | None = None,
+    dry_run: bool = False,
 ) -> Iterator[YieldType]:
     """Image-only conversion: every image found is converted to `config.target`."""
     if extensions is None:
@@ -192,6 +207,7 @@ def convert_images_generator(
         force=force,
         extensions=extensions,
         output_dir=output_dir,
+        dry_run=dry_run,
     )
 
 
@@ -204,12 +220,13 @@ def convert_images(
     show_progress: bool = True,
     extensions: Iterable[str] | None = None,
     output_dir: PathInput | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Like :func:`convert_images_generator`, but runs to completion and returns a summary."""
     gen = convert_images_generator(
-        paths, config, recursive=recursive, force=force, extensions=extensions, output_dir=output_dir
+        paths, config, recursive=recursive, force=force, extensions=extensions, output_dir=output_dir, dry_run=dry_run
     )
-    return consume_generator(gen, show_progress, f"Converting to {config.target.upper()}", "convert")
+    return consume_generator(gen, show_progress, f"Converting to {config.target.upper()}", "convert", dry_run=dry_run)
 
 
 def to_jpeg(

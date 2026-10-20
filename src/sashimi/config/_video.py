@@ -7,7 +7,16 @@ from typing import Annotated, Any, ClassVar, Literal, Self
 
 from pydantic import Field, model_validator
 
-from sashimi.config._base import ConfigFamily, FormBool, FormInt, ParamsModel, TargetName, parse_flag, sentence
+from sashimi.config._base import (
+    ConfigFamily,
+    Flip,
+    FormBool,
+    ParamsModel,
+    Rotation,
+    TargetName,
+    parse_flag,
+    sentence,
+)
 from sashimi.config._limits import (
     DEFAULT_GIF_SECONDS,
     GIF_TOO_LONG,
@@ -114,13 +123,10 @@ class Mp4VideoConfig(_H264Options, _Transcode):
     """The output format."""
 
 
-Rotation = Annotated[Literal[0, 90, 180, 270], FormInt]
-
-
 class _Transform(ParamsModel):
     rotate: Rotation = 0
     """Clockwise rotation in degrees."""
-    flip: Literal["none", "horizontal", "vertical"] = "none"
+    flip: Flip = "none"
     """Mirror the picture."""
 
     @model_validator(mode="after")

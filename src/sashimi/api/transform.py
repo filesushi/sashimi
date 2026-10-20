@@ -23,6 +23,7 @@ def transform_videos_generator(
     on_file_progress: FileProgress | None = None,
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
+    dry_run: bool = False,
 ) -> Iterator[YieldType]:
     """
     Rotates/flips every video found, writing ``<stem>.rotated.<target>`` next to it, under
@@ -39,6 +40,7 @@ def transform_videos_generator(
         on_file_progress=on_file_progress,
         output=output,
         output_dir=output_dir,
+        dry_run=dry_run,
     )
 
 
@@ -50,4 +52,10 @@ def transform_videos(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Like :func:`transform_videos_generator`, but runs to completion and returns a summary."""
-    return consume_generator(transform_videos_generator(paths, config, **kwargs), show_progress, "Rotating", "rotate")
+    return consume_generator(
+        transform_videos_generator(paths, config, **kwargs),
+        show_progress,
+        "Rotating",
+        "rotate",
+        dry_run=kwargs.get("dry_run", False),
+    )

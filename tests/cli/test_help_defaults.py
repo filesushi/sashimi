@@ -147,6 +147,34 @@ EXPECTED["favicon"] = {
     "--theme-color": "none",
     "--manifest-background": "none",
 }
+E = C.JpegEditConfig
+EXPECTED["edit"] = {
+    "--rotate": d(E, "rotate"),
+    "--flip": d(E, "flip"),
+    "--crop": "no crop",
+    "--aspect": "free",
+    "--brightness": d(E, "brightness"),
+    "--contrast": d(E, "contrast"),
+    "--saturation": d(E, "saturation"),
+    "--format": "same as input",
+    "--output": "<name>.edited.<ext> next to the input",
+    "--quality": f"{d(E, 'quality')}, high, since the image is re-encoded",
+    "--webp-method": d(C.WebpEditConfig, "webp_method"),
+    "--compress-level": d(C.PngEditConfig, "png_compress_level"),
+    "--optimize": f"{on(E, 'optimize')} for JPEG, {on(C.PngEditConfig, 'optimize')} for PNG/GIF",
+    "--subsampling": d(E, "jpeg_subsampling"),
+    "--tiff-compression": d(C.TiffEditConfig, "tiff_compression"),
+}
+EXPECTED["frames"] = {
+    "--keep": "all",
+    "--drop": "none",
+    "--speed": d(C.GifFramesConfig, "speed"),
+    "--format": "same as input",
+    "--output": "<name>.edited.<ext> next to the input",
+    "--quality": f"{d(C.WebpFramesConfig, 'quality')}, high, since the frames are re-encoded",
+    "--webp-method": d(C.WebpFramesConfig, "webp_method"),
+    "--optimize": on(C.GifFramesConfig, "optimize"),
+}
 EXPECTED["remux"] = {"--format": "mkv, or from -o", "--output": "<name>.mkv next to the input"}
 for notes in EXPECTED.values():
     notes["--output-dir"] = "next to each input"
@@ -164,6 +192,8 @@ MODELS = {
     "thumbs": list(C.CONTACT_SHEET.models),
     "preview": list(C.VIDEO_PREVIEW.models),
     "favicon": [C.FaviconPackConfig],
+    "edit": list(C.IMAGE_EDIT.models),
+    "frames": list(C.IMAGE_FRAMES.models),
     "remux": [],
 }
 
@@ -205,7 +235,7 @@ def test_every_model_default_appears_in_the_help(command):
                 continue
             if isinstance(info.default, bool) or field in DISCRIMINATORS:
                 continue
-            if flag in NO_DEFAULT:
+            if flag in NO_DEFAULT or (command == "edit" and field.startswith("crop_")):
                 continue
             param = options[flag.split("/")[0]]
             note = _note(param) or str(getattr(param.default, "value", param.default))
@@ -263,7 +293,9 @@ def test_config_defaults_unknown_format():
     assert result.exit_code == 2 and "mp4, webm" in result.stderr
 
 
-@pytest.mark.parametrize("operation", ["convert", "resize", "rotate", "favicon", "extract", "thumbs", "preview"])
+@pytest.mark.parametrize(
+    "operation", ["convert", "resize", "rotate", "favicon", "edit", "frames", "extract", "thumbs", "preview"]
+)
 def test_config_defaults_renders_every_command(operation):
     result = runner.invoke(app, ["config", "defaults", operation], env={"COLUMNS": "200"})
     assert result.exit_code == 0, result.output

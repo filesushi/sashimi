@@ -14,16 +14,23 @@ STATUSES = ("success", "error", "exists", "skipped")
 
 
 def build_report(
-    command: str, total_found: int, results: Iterable[ResultTuple], seconds: float, **extra: Any
+    command: str,
+    total_found: int,
+    results: Iterable[ResultTuple],
+    seconds: float,
+    *,
+    dry_run: bool = False,
+    **extra: Any,
 ) -> dict[str, Any]:
     """
     The report every batch operation returns, and the CLI prints with ``--json``::
 
-        {"schema": 1, "command": "convert",
+        {"schema": 1, "command": "convert", "dry_run": false,
          "summary": {"total_found", "success", "exists", "skipped", "errors", "time_taken_seconds", "avg_time_seconds"},
          "results": [{"file", "status", "message", "output"}, ...]}
 
-    `extra` keys are added at the top level (``flatten`` adds ``dry_run``).
+    ``dry_run`` is true when nothing was written and the results say what would have been.
+    `extra` keys are added at the top level (``flatten`` adds ``renamed`` and ``removed_dirs``).
     """
     rows = list(results)
     counts = {status: 0 for status in STATUSES}
@@ -33,6 +40,7 @@ def build_report(
     return {
         "schema": REPORT_SCHEMA,
         "command": command,
+        "dry_run": dry_run,
         **extra,
         "summary": {
             "total_found": total_found,
@@ -50,7 +58,9 @@ def build_report(
     }
 
 
-def consume_generator(gen: Iterator[YieldType], show_progress: bool, desc: str, command: str = "") -> dict[str, Any]:
+def consume_generator(
+    gen: Iterator[YieldType], show_progress: bool, desc: str, command: str = "", *, dry_run: bool = False
+) -> dict[str, Any]:
     """Consumes a batch-operation generator, showing an optional tqdm bar, and returns :func:`build_report`'s payload."""
     start_time = time.perf_counter()
     try:
@@ -88,4 +98,4 @@ def consume_generator(gen: Iterator[YieldType], show_progress: bool, desc: str, 
         if pbar:
             pbar.close()
 
-    return build_report(command or desc, total_files, results, time.perf_counter() - start_time)
+    return build_report(command or desc, total_files, results, time.perf_counter() - start_time, dry_run=dry_run)
