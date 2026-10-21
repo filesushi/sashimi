@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: 2026 The FileSushi Authors
 # SPDX-License-Identifier: Apache-2.0
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any
 
-from sashimi.api._batch import VIDEO_EXTENSIONS, FileProgress, PathInput, YieldType, output_name, run_batch
+from sashimi.api._batch import VIDEO_EXTENSIONS, Batch, FileProgress, PathInput, run_batch
+from sashimi.api._naming import NameTemplate, naming, output_format
 from sashimi.api._consume import consume_generator
 from sashimi.config import Limits, PreviewConfig, WebpPreviewConfig
 from sashimi.core.preview import preview
@@ -25,19 +26,25 @@ def make_previews_generator(
     output_dir: PathInput | None = None,
     dry_run: bool = False,
     limits: Limits | None = None,
-) -> Iterator[YieldType]:
+    output_name: str | NameTemplate | None = None,
+) -> Batch:
     """
     A preview (see :func:`sashimi.video.preview`) of every video found, an animated WebP by
-    default, written as ``<stem>.preview.<ext>`` next to each video, under `output_dir`, or to
-    `output` for a single video.
+    default, written as ``{input_name}.preview.{output_ext}`` (``clip.mp4.preview.webp``) next
+    to each video, under `output_dir`, or to `output` for a single video. `output_name` sets the
+    pattern, as for every batch function (see :mod:`sashimi.api`).
     """
     chosen = config or WebpPreviewConfig()
+    fmt = output_format(chosen.target)
+    names = naming("preview", lambda _: fmt, output_name, fixed=fmt)
     return run_batch(
         paths,
+        names=names,
         extensions=extensions,
         recursive=recursive,
         force=force,
-        name_for=lambda _, stem: output_name(stem, chosen.target, "preview"),
+        accepts="videos",
+        route=lambda _: "preview",
         process=lambda src, dst, progress: preview(
             src, dst, chosen, max_workers=max_workers, limits=limits, on_progress=progress
         ),

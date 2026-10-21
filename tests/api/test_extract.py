@@ -32,7 +32,7 @@ def test_missing_and_unsupported_paths_are_results(tmp_path):
     report = extract([tmp_path / "missing.mkv", tmp_path / "notes.txt"], 1, show_progress=False)
     assert [(r["status"], r["message"]) for r in report["results"]] == [
         ("error", "Path does not exist"),
-        ("skipped", "Unsupported file type"),
+        ("skipped", "extract works on videos, not .txt files."),
     ]
     assert report["command"] == "extract"
 
@@ -41,8 +41,8 @@ def test_missing_and_unsupported_paths_are_results(tmp_path):
 def test_cut_to_the_end_and_by_length(video_blob, tmp_path):
     (tmp_path / "clip.mkv").write_bytes(video_blob.read_bytes())
     tail = extract(tmp_path / "clip.mkv", 4, show_progress=False)["results"][0]
-    assert tail["status"] == "success" and tail["output"] == str(tmp_path / "clip.extracted.mkv")
-    assert probe(tmp_path / "clip.extracted.mkv").duration == pytest.approx(2.0, abs=0.1)
+    assert tail["status"] == "success" and tail["output"] == str(tmp_path / "clip.mkv.extracted.mkv")
+    assert probe(tmp_path / "clip.mkv.extracted.mkv").duration == pytest.approx(2.0, abs=0.1)
     exact = extract(
         tmp_path / "clip.mkv", duration="1.5s", accurate=True, output=tmp_path / "exact.mp4", show_progress=False
     )
@@ -54,4 +54,4 @@ def test_cut_to_the_end_and_by_length(video_blob, tmp_path):
 def test_a_late_keyframe_is_explained(video_blob, tmp_path):
     (tmp_path / "clip.mkv").write_bytes(video_blob.read_bytes())
     message = extract(tmp_path / "clip.mkv", 4.6, show_progress=False)["results"][0]["message"]
-    assert message.startswith("Extracted 2.0s to clip.extracted.mkv (1.4s requested).")
+    assert message.startswith("Extracted 2.0s to clip.mkv.extracted.mkv (1.4s requested).")

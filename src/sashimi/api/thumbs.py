@@ -2,23 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any
 
-from sashimi.api._batch import VIDEO_EXTENSIONS, FileProgress, PathInput, YieldType, output_name, run_batch
+from sashimi.api._batch import VIDEO_EXTENSIONS, Batch, FileProgress, PathInput, run_batch
+from sashimi.api._naming import NameTemplate, check_output_ext, naming, output_format
 from sashimi.api._consume import consume_generator
 from sashimi.config import JpegSheetConfig, Limits, SheetConfig
 from sashimi.core.sheets import render
 
-__all__ = ["make_thumbs", "make_thumbs_generator", "sheet_name"]
+__all__ = ["make_thumbs", "make_thumbs_generator"]
 
 PathLike = str | os.PathLike[str]
-_EXTENSION = {"jpeg": "jpg", "png": "png", "webp": "webp", "gif": "gif"}
-
-
-def sheet_name(stem: str, config: SheetConfig) -> str:
-    """``<stem>.sheet.<ext>`` for a still sheet, ``<stem>.animated-sheet.<ext>`` for an animated one."""
-    return output_name(stem, _EXTENSION[config.target], "animated-sheet" if config.animated else "sheet")
 
 
 def make_thumbs_generator(
@@ -37,20 +32,29 @@ def make_thumbs_generator(
     output_dir: PathInput | None = None,
     dry_run: bool = False,
     limits: Limits | None = None,
-) -> Iterator[YieldType]:
+    output_name: str | NameTemplate | None = None,
+    output_ext: str | None = None,
+) -> Batch:
     """
     A contact sheet for every video found, still or animated as `config` says (a JPEG sheet by
-    default), written as ``<stem>.sheet.<ext>`` (``<stem>.animated-sheet.<ext>`` when animated)
-    next to each video, under `output_dir`, or to `output` for a single video. The font and emoji
-    arguments are passed to :func:`sashimi.sheets.render`.
+    default), written as ``{input_name}.sheet.{output_ext}`` (``clip.mp4.sheet.jpg``;
+    ``clip.mp4.animated-sheet.webp`` when animated) next to each video, under `output_dir`, or
+    to `output` for a single video. `output_ext` spells the extension (``jpeg`` or ``jpg``),
+    `output_name` sets the pattern, for example ``"{input_name}.jpeg"`` for ``clip.mp4.jpeg``,
+    as for every batch function (see :mod:`sashimi.api`). The font and emoji arguments are passed to :func:`sashimi.sheets.render`.
     """
     sheet = config or JpegSheetConfig()
+    check_output_ext(output_ext, (sheet.target,))
+    fmt = output_format(sheet.target, typed=output_ext)
+    names = naming("animated_thumbs" if sheet.animated else "thumbs", lambda _: fmt, output_name, fixed=fmt)
     return run_batch(
         paths,
+        names=names,
         extensions=extensions,
         recursive=recursive,
         force=force,
-        name_for=lambda _, stem: sheet_name(stem, sheet),
+        accepts="videos",
+        route=lambda _: "sheet",
         process=lambda src, dst, progress: render(
             src,
             dst,

@@ -19,7 +19,7 @@ runner = CliRunner()
 
 @pytest.fixture(autouse=True)
 def isolated_config(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "GLOBAL_CONFIG_DIR", tmp_path / "home")
+    monkeypatch.setattr(settings, "USER_CONFIG_DIR", tmp_path / "home")
     monkeypatch.chdir(tmp_path)
     settings.load_raw_config.cache_clear()
     yield
@@ -123,7 +123,7 @@ def test_animation_memory_flag(tmp_path):
 def test_config_set_and_defaults_for_limits(tmp_path):
     assert runner.invoke(app, ["config", "set", "limits.max_pixels", "200M"]).exit_code == 0
     assert runner.invoke(app, ["config", "set", "limits.max_video_seconds", "none"]).exit_code == 0
-    assert 'max_pixels = "200M"' in (tmp_path / "sashimi.toml").read_text()
+    assert 'max_pixels = "200M"' in (tmp_path / "home" / "sashimi.toml").read_text()
     bad = runner.invoke(app, ["config", "set", "limits.max_pixels", "0"])
     assert bad.exit_code == 2 and "limits.max_pixels: must be more than 0" in bad.stderr
     unknown = runner.invoke(app, ["config", "set", "limits.max_seconds", "5"])

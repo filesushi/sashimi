@@ -18,7 +18,7 @@ runner = CliRunner()
 
 @pytest.fixture(autouse=True)
 def isolated_config(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "GLOBAL_CONFIG_DIR", tmp_path / "home")
+    monkeypatch.setattr(settings, "USER_CONFIG_DIR", tmp_path / "home")
     monkeypatch.chdir(tmp_path)
     settings.load_raw_config.cache_clear()
     yield
@@ -30,17 +30,36 @@ def test_parse_quality(text, value):
     assert _parse_quality(text) == value
 
 
-def test_toml_uses_legacy_key_names(tmp_path):
+def test_toml_sheet_settings(tmp_path):
     (tmp_path / "sashimi.toml").write_text(
-        "[thumbs]\nstatic_width = 1000\njpeg_quality = 60\nanimated_width = 640\noutput_format = 'gif'\n"
-        "output_fps = 8\ncols = 3\nvideo_extensions = ['.MP4', '.foo']\n[animated_thumbs]\ncols = 4\n"
+        "[thumbs]\nwidth = 1000\nquality = 60\ncols = 3\ntarget = 'png'\nvideo_extensions = ['.MP4', '.foo']\n"
+        "[animated_thumbs]\nwidth = 640\ntarget = 'gif'\nfps = 8\ncols = 4\n"
     )
     static, _, _ = settings.resolve_sheet(False, {"gap": 2})
     animated, _, unused = settings.resolve_sheet(True, {"rows": 1, "quality": 50})
-    assert (static.width, static.quality, static.cols, static.gap) == (1000, 60, 3, 2)
+    assert (static.width, static.target, static.cols, static.gap) == (1000, "png", 3, 2)
     assert (animated.width, animated.target, animated.fps, animated.cols, animated.rows) == (640, "gif", 8, 4, 1)
     assert unused == ["quality"]
     assert settings.video_extensions() == [".mp4", ".foo"]
+
+
+def test_toml_old_key_names_are_not_translated(tmp_path):
+    (tmp_path / "sashimi.toml").write_text(
+        "[thumbs]\nstatic_width = 1000\njpeg_quality = 60\noutput_format = 'gif'\n"
+        "[animated_thumbs]\nanimated_width = 640\noutput_fps = 8\n"
+    )
+    static, _, _ = settings.resolve_sheet(False)
+    animated, _, _ = settings.resolve_sheet(True)
+    assert (static.width, static.quality) == (2560, 85)
+    assert (animated.width, animated.target, animated.fps) == (1280, "webp", 12)
+    raw, _ = settings.read_config()
+    assert settings.unknown_keys(raw) == [
+        "thumbs.static_width",
+        "thumbs.jpeg_quality",
+        "thumbs.output_format",
+        "animated_thumbs.animated_width",
+        "animated_thumbs.output_fps",
+    ]
 
 
 def test_toml_font_paths_become_render_arguments(tmp_path):
@@ -55,9 +74,9 @@ def test_convert_command(tmp_path):
     result = runner.invoke(app, ["convert", "a.png", "webp", "--width", "50", "-q", "70%", "--json"])
     assert result.exit_code == 0, result.output
     report = json.loads(result.stdout)
-    assert (report["command"], report["results"][0]["message"]) == ("convert", "Converted to a.webp")
-    assert report["results"][0]["output"] == "a.webp"
-    with Image.open(tmp_path / "a.webp") as img:
+    assert (report["command"], report["results"][0]["message"]) == ("convert", "Converted to a.png.webp")
+    assert report["results"][0]["output"] == "a.png.webp"
+    with Image.open(tmp_path / "a.png.webp") as img:
         assert img.size == (50, 25) and img.mode == "RGBA"
 
 
@@ -65,10 +84,10 @@ def test_convert_command(tmp_path):
 def test_convert_video_to_animated_webp(video_blob, tmp_path):
     (tmp_path / "clip.mkv").write_bytes(video_blob.read_bytes())
     Image.new("RGB", (200, 100)).save(tmp_path / "a.png")
-    result = runner.invoke(app, ["convert", ".", "webp", "-d", "1", "--fps", "5", "-q", "60", "--json"])
+    result = runner.invoke(app, ["convert", ".", "webp", "-d", "1", "--fps", "5", "-q", "60", "--json", "-y"])
     assert result.exit_code == 0, result.output
     assert len(json.loads(result.stdout)["results"]) == 2
-    with Image.open(tmp_path / "clip.webp") as img:
+    with Image.open(tmp_path / "clip.mkv.webp") as img:
         assert img.n_frames == 5 and img.size == (320, 180)
 
 
@@ -93,7 +112,7 @@ def test_extract_command(video_blob, tmp_path):
     clip.write_bytes(video_blob.read_bytes())
     result = runner.invoke(app, ["extract", "clip.mkv", "1s", "00:03"])
     assert result.exit_code == 0, result.output
-    assert (tmp_path / "clip.extracted.mkv").exists()
+    assert (tmp_path / "clip.mkv.extracted.mkv").exists()
     again = runner.invoke(app, ["extract", "clip.mkv", "1s", "3s"])
     assert "already exists" in again.stdout and again.exit_code == 0
 
@@ -130,7 +149,7 @@ def test_thumbs_command_with_symlinked_input(video_blob, tmp_path):
     (tmp_path / "holiday.mkv").symlink_to(video_blob)
     result = runner.invoke(app, ["thumbs", "holiday.mkv", "--width", "400", "--cols", "2", "--rows", "1", "--json"])
     assert result.exit_code == 0, result.output
-    assert (tmp_path / "holiday.sheet.jpg").exists()
+    assert (tmp_path / "holiday.mkv.sheet.jpg").exists()
     assert not (tmp_path / "home").exists() and not (tmp_path / "sashimi.toml").exists()
 
 

@@ -16,7 +16,7 @@ runner = CliRunner()
 @pytest.fixture(autouse=True)
 def isolated_config(tmp_path, monkeypatch):
     """Keep the CLI away from the real ~/.sashimi and any project sashimi.toml."""
-    monkeypatch.setattr(manager, "GLOBAL_CONFIG_DIR", tmp_path / "home")
+    monkeypatch.setattr(manager, "USER_CONFIG_DIR", tmp_path / "home")
     monkeypatch.chdir(tmp_path)
     manager.load_raw_config.cache_clear()
     yield
@@ -47,7 +47,7 @@ def test_non_video_file_is_reported(tmp_path):
     payload = json.loads(result.stdout)
     assert result.exit_code == 1
     assert payload["results"] == [
-        {"file": "notes.txt", "status": "skipped", "message": "Unsupported file type", "output": None}
+        {"file": "notes.txt", "status": "skipped", "message": "thumbs works on videos, not .txt files.", "output": None}
     ]
     scanned = runner.invoke(app, ["thumbs", ".", "--json"])
     assert scanned.exit_code == 0 and json.loads(scanned.stdout)["results"] == []
@@ -80,8 +80,8 @@ def test_static_only_warns_about_animated_options(tmp_path):
 @pytest.mark.parametrize(
     "args, message",
     [
-        (["-a", "--format", "jpeg"], "Animated contact sheets can be WebP or GIF."),
-        (["--format", "gif"], "GIF sheets must be animated."),
+        (["-a", "--output-format", "jpeg"], "Animated contact sheets can be WebP or GIF."),
+        (["--output-format", "gif"], "GIF sheets must be animated."),
     ],
 )
 def test_format_must_suit_the_mode(tmp_path, args, message):

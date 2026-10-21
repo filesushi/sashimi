@@ -97,7 +97,7 @@ On the command line, the limits a desktop user can meet have flags: `--max-pixel
 one off. Every limit, lengths included, can be set in `sashimi.toml`:
 
 ```sh
-sashimi config set limits.max_pixels 200M            # project sashimi.toml; -g for ~/.sashimi
+sashimi config set limits.max_pixels 200M            # ~/.sashimi/sashimi.toml; --project for ./sashimi.toml
 sashimi config set limits.max_video_seconds 10m      # 0.5's 10-minute limit, back on
 sashimi config defaults limits                       # every limit, its flag, default and setting
 ```
@@ -168,18 +168,35 @@ showed that error as advice, there's nothing to show any more for these files.
 ## Batch API (`sashimi.api`)
 
 **Output names.** Every batch function follows one policy (`sashimi.api` docstring, README):
+`{input_name}.{role}.{output_ext}`, or `{input_name}.{output_ext}` for conversions.
 
 | Function | 0.5 output | 0.6 output |
 |---|---|---|
-| `make_thumbs` (still) | `clip.mp4.jpeg` | `clip.sheet.jpg` |
-| `make_thumbs` (animated) | `clip.mp4.webp` | `clip.animated-sheet.webp` |
-| `resize_images` | `photo_resized.jpg` (`suffix=`) | `photo.resized.jpg` |
-| `transform_videos` | `clip_rotated.mp4` (`suffix=`) | `clip.rotated.mp4` |
-| `extract` | `clip_extracted.mkv` | `clip.extracted.mkv` |
-| `convert_files` | `photo.webp` | unchanged; but `a.png` and `a.jpeg` together give `a.png.webp` and `a.jpeg.webp` |
+| `make_thumbs` (still) | `clip.mp4.jpeg` | `clip.mp4.sheet.jpg` |
+| `make_thumbs` (animated) | `clip.mp4.webp` | `clip.mp4.animated-sheet.webp` |
+| `resize_images` | `photo_resized.jpg` (`suffix=`) | `photo.jpg.resized.jpg` |
+| `transform_videos` | `clip_rotated.mp4` (`suffix=`) | `clip.mp4.rotated.mp4` (`clip.mov.rotated.mp4` from MOV) |
+| `extract` | `clip_extracted.mkv` | `clip.mkv.extracted.mkv` |
+| `convert_files` | `photo.webp` | `photo.png.webp`; `convert_files(paths, "jpeg")` writes `.jpeg`, `"jpg"` writes `.jpg` |
 
-The `suffix` argument is gone. Every batch function takes `output` (the path for a single input)
-and `output_dir`.
+A name now depends only on its own input, never on the other files in the batch. Two inputs
+that would share an output are both skipped, never renamed. To keep 0.5's names, pass a pattern:
+`make_thumbs(paths, output_name="{input_name}.jpeg")` for `clip.mp4.jpeg`, so sheets 0.5 made
+count as existing, `convert_files(paths, "webp", output_name="{input_stem}.{output_ext}")` for
+`photo.webp`, or `output_name="{input_stem}_resized.{output_ext}"` for 0.5's resized names; the
+`suffix` argument is gone. Every batch function takes `output` (the path for a single input),
+`output_dir` and `output_name`. A pattern may start with folders, made inside each input's folder
+(`output_name="sheets/{input_name}.jpeg"`); `output_dir` is one folder, relative to the current
+folder unless absolute; `output` must end in an extension of the output's format, or that file
+gets an `error`. A directory search leaves out only the function's own earlier
+outputs (what it would make, with the same settings, from another file found); other commands'
+outputs are processed like any file.
+
+**Generators return a `Batch`.** Iterating it works as before. Call `batch.plan()` first to see
+what it will do (each file's output, action, kind and route, and `plan.mixed` when a folder holds
+files the command handles differently), for example to ask the user before rotating a folder of
+photos and videos. `rotate_files(paths, 90)` rotates images and videos; `transform_videos` still
+rotates videos only.
 
 **Results.** Generators yield 4-tuples `(path, status, message, output)` instead of 3-tuples:
 
@@ -226,9 +243,10 @@ is the number moved. It raises `InvalidOptionsError` instead of `FileNotFoundErr
 
 | 0.5 | 0.6 |
 |---|---|
-| `sashimi thumbs clip.mp4 -o png` | `sashimi thumbs clip.mp4 --format png` |
-| `sashimi resize photos/ -w 800 -o webp` | `sashimi resize photos/ -w 800 --format webp` |
-| `sashimi rotate clip.mp4 90 -o webm` | `sashimi rotate clip.mp4 90 --format webm` |
+| `sashimi thumbs clip.mp4 -o png` | `sashimi thumbs clip.mp4 --output-format png` |
+| `sashimi resize photos/ -w 800 -o webp` | `sashimi resize photos/ -w 800 --output-format webp` |
+| `sashimi rotate clip.mp4 90 -o webm` | `sashimi rotate clip.mp4 90 --output-format webm` |
+| `sashimi rotate holiday/ 90` (videos only) | the same, now photos and GIFs too; add `-y` in scripts if the folder has both |
 | `sashimi thumbs clip.mp4 -a --duration 3` | `sashimi thumbs clip.mp4 -a --clip-length 3` |
 | `sashimi convert photo.png jpeg -h 600` | `sashimi convert photo.png jpeg -H 600` (`-h` is help) |
 | `--suffix _small` (resize, rotate) | gone; use `-o` or `--output-dir` |
@@ -240,6 +258,37 @@ outputs in a folder. `--json` prints the same report from every command that pro
 `message`, and `summary.avg_time_seconds` where you read `avg_processing_time_seconds`. Delete the
 `[global]` section from your `sashimi.toml` files by hand (sashimi warns about it now); it never
 did anything.
+
+`sashimi config set` and `config unset` change your own settings (`~/.sashimi/sashimi.toml`)
+unless you pass `--project`; they used to change the project `sashimi.toml` unless you passed
+`-g`, which is gone. A pattern or limit you set before in a project file still applies when you
+run sashimi in that folder; move it with `sashimi config set <key> <value>` and `sashimi config
+unset --project <key>` if you want it everywhere. `sashimi frames` now needs something to change
+(`--keep`, `--drop`, `--speed` or `--output-format`). `resize`, `convert` and `rotate` take
+several paths, with `convert`'s format and `rotate`'s angle last, so commands written for 0.5
+work unchanged.
+
+Output names: see the batch API above. On the command line, `--output-name`, or `output_name` in
+the command's section of `sashimi.toml`, sets the pattern:
+
+```sh
+sashimi config set thumbs.output_name '{input_name}.jpeg'      # 0.5's contact sheet names
+sashimi config set animated_thumbs.output_name '{input_name}.webp'
+sashimi config set convert.output_name '{input_stem}.{output_ext}'   # photo.webp, as in 0.5
+```
+
+If you set a pattern with an unreleased 0.6 build, rename its fields: `{name}` is `{input_name}`,
+`{stem}` `{input_stem}`, `{ext}` `{input_ext}` and `{format}` `{output_ext}`; sashimi refuses the
+old ones and suggests the new. `--keep-extension` is gone: `--output-name
+'{input_stem}.{output_ext}'` replaces `--no-keep-extension`.
+
+Running a command on a folder that holds files it handles differently (photos and videos for
+`rotate`) asks first; pass `-y` (or `-f`) in scripts, which otherwise stop with exit code 2.
+
+`sashimi.toml` takes current key names only: rename `static_width` and `animated_width` to
+`width` (in `[animated_thumbs]` for animated sheets), `jpeg_quality` to `quality`, `output_fps`
+to `fps`, and `output_format` to `target` in `[animated_thumbs]`. The old names get the
+unknown-settings warning.
 
 ## MP3 and M4A sample rates
 

@@ -17,7 +17,16 @@ from sashimi.cli import _limits, convert_cmd, edit_cmd, thumbs_cmd
 if TYPE_CHECKING:
     from pydantic import BaseModel
 
-OPERATIONS = ("convert", "resize", "rotate", "favicon", "edit", "frames", "extract", "thumbs", "preview", "limits")
+OPERATIONS: tuple[str, ...] = (
+    "convert", "remux", "resize", "rotate", "favicon", "edit", "frames", "extract", "strip", "thumbs", "preview",
+    "limits",
+)  # fmt: skip
+NAMES_DOC = (
+    "How each output is named and where it goes: --output-name and --output-dir for one run, or output_name "
+    "and output_dir in the command's section of sashimi.toml (sashimi config set <command>.output_name "
+    "'<pattern>', sashimi config set <command>.output_dir <folder>)."
+)
+NAMES_TITLE = "Output names and folder"
 DISCRIMINATORS = frozenset({"target", "container", "accurate", "animated"})
 NONE_MEANS = {
     "max_width": "source width",
@@ -32,6 +41,7 @@ NONE_MEANS = {
     "crop_width": "to the right edge",
     "crop_height": "to the bottom edge",
     "keep": "every frame",
+    "output_dir": "next to each input",
 }
 EXTRACT_FLAGS = {
     "start_seconds": "--start",
@@ -192,6 +202,66 @@ def models_for(operation: str, fmt: str | None = None) -> list[tuple[str, type[B
     return found
 
 
+def name_rows(operation: str, raw: dict[str, Any]) -> list[dict[str, Any]]:
+    """The output-name rows for one command: its pattern (two for thumbs), with an example and any sashimi.toml value."""
+    from sashimi.api._naming import FIELD_HELP, ROLES, default_output_name
+    from sashimi.cli import settings
+
+    examples = {
+        "convert": "photo.png → photo.png.webp",
+        "remux": "clip.mp4 → clip.mp4.mkv",
+        "resize": "photo.jpg → photo.jpg.resized.jpg",
+        "rotate": "photo.jpg → photo.jpg.rotated.png with --output-format png; clip.mkv → clip.mkv.rotated.mp4",
+        "extract": "clip.mkv → clip.mkv.extracted.mkv",
+        "edit": "photo.jpg → photo.jpg.edited.jpg",
+        "frames": "anim.gif → anim.gif.frames.gif",
+        "strip": "clip.mov → clip.mov.stripped.mov",
+        "thumbs": "clip.mp4 → clip.mp4.sheet.jpg",
+        "animated_thumbs": "clip.mp4 → clip.mp4.animated-sheet.webp",
+        "preview": "clip.mp4 → clip.mp4.preview.webp",
+        "favicon": "logo.png → logo.png.favicons.zip",
+    }
+    sections = ("thumbs", "animated_thumbs") if operation == "thumbs" else (operation,)
+    found = []
+    for section in sections:
+        animated = section == "animated_thumbs"
+        if section in ROLES:
+            role, short, fields = f" The role is {ROLES[section]}.", "{input_stem}.{role}.{output_ext}", FIELD_HELP
+        else:
+            role, short = " Conversions have no {role}.", "{input_stem}.{output_ext}"
+            fields = FIELD_HELP.replace(", {role} (sheet)", "")
+        row: dict[str, Any] = {
+            "field": "output_name",
+            "option": "--output-name -a" if animated else "--output-name",
+            "default": default_output_name(section),
+            "accepted": f"text and the fields {fields}",
+            "description": f"The pattern for {'animated sheets' if animated else 'each output'}, e.g. "
+            f"{examples[section]}; in sashimi.toml, output_name in [{section}].{role} "
+            f"{short} gives short names, and a pattern may start with folders made "
+            "inside each input's folder (sheets/{input_name}.jpeg).",
+        }
+        configured = settings.output_name_setting(section, raw)
+        if configured is not None:
+            row["sashimi_toml"] = configured
+        found.append(row)
+    for section in sections:
+        animated = section == "animated_thumbs"
+        folder: dict[str, Any] = {
+            "field": "output_dir",
+            "option": "--output-dir -a" if animated else "--output-dir",
+            "default": None,
+            "accepted": "a folder: relative to where you run sashimi, or absolute (~ is your home folder)",
+            "description": f"Where {'animated sheets' if animated else 'outputs'} go, keeping the subfolders "
+            f"of searched directories; in sashimi.toml, output_dir in [{section}]. --no-output-dir writes "
+            "next to each input for one run.",
+        }
+        kept = settings.output_dir_setting(section, raw)
+        if kept is not None:
+            folder["sashimi_toml"] = kept
+        found.append(folder)
+    return found
+
+
 def limit_overrides(raw: dict[str, Any]) -> dict[str, Any]:
     """The limits set in `raw` (merged sashimi.toml), parsed, by field; unparsable values as written."""
     from sashimi.cli import settings
@@ -240,10 +310,24 @@ def toml_notes(raw: dict[str, Any]) -> dict[str, str]:
     for animated in (False, True):
         for key, value in toml_overrides(animated, raw).items():
             per_field.setdefault(key, {})["animated" if animated else "still"] = value
+    from sashimi.cli import settings
     from sashimi.config import CONTACT_SHEET
 
     still_fields = CONTACT_SHEET.model_for(animated=False).model_fields
     notes = {}
+    for kept_flag, setting in (
+        ("--output-name", settings.output_name_setting),
+        ("--output-dir", settings.output_dir_setting),
+    ):
+        kept = {
+            label: setting(section, raw) for label, section in (("still", "thumbs"), ("animated", "animated_thumbs"))
+        }
+        if any(value is not None for value in kept.values()):
+            notes[kept_flag] = ", ".join(
+                str(value) if label == "still" else f"animated {value}"
+                for label, value in kept.items()
+                if value is not None
+            )
     for key, values in per_field.items():
         flag = thumbs_cmd.FLAGS.get(key)
         if flag is None:

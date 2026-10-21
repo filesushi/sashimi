@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: 2026 The FileSushi Authors
 # SPDX-License-Identifier: Apache-2.0
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any
 
-from sashimi.api._batch import IMAGE_EXTENSIONS, FileProgress, PathInput, YieldType, output_name, run_batch
+from sashimi.api._batch import IMAGE_EXTENSIONS, Batch, FileProgress, PathInput, run_batch
+from sashimi.api._naming import NameTemplate, naming, output_format
 from sashimi.api._consume import consume_generator
 from sashimi.config import FaviconPackConfig, Limits
 from sashimi.core.image import favicon_pack
@@ -24,18 +25,25 @@ def make_favicon_packs_generator(
     output_dir: PathInput | None = None,
     dry_run: bool = False,
     limits: Limits | None = None,
-) -> Iterator[YieldType]:
+    output_name: str | NameTemplate | None = None,
+) -> Batch:
     """
     A favicon pack (see :func:`sashimi.image.favicon_pack`) for every image found, written as
-    ``<stem>.favicons.zip`` next to each image, under `output_dir`, or to `output` for a single image.
+    ``{input_name}.favicons.{output_ext}`` (``logo.png.favicons.zip``) next to each image, under
+    `output_dir`, or to `output` for a single image. `output_name` sets the pattern, as for
+    every batch function (see :mod:`sashimi.api`).
     """
     chosen = config or FaviconPackConfig()
+    fmt = output_format("zip")
+    names = naming("favicon", lambda _: fmt, output_name, fixed=fmt)
     return run_batch(
         paths,
+        names=names,
         extensions=extensions,
         recursive=recursive,
         force=force,
-        name_for=lambda _, stem: output_name(stem, "zip", "favicons"),
+        accepts="images",
+        route=lambda _: "favicon",
         process=lambda src, dst, progress: favicon_pack(src, dst, chosen, limits=limits, on_progress=progress),
         success_message="Favicon pack created: {name}",
         on_file_progress=on_file_progress,

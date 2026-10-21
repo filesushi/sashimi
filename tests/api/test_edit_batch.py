@@ -6,7 +6,7 @@
 import pytest
 from PIL import Image
 
-from sashimi.api import _batch, edit_frames, edit_images
+from sashimi.api import _batch, _naming, edit_frames, edit_images
 from sashimi.config import IMAGE_EDIT, IMAGE_FRAMES, GifFramesConfig, PngEditConfig
 from sashimi.errors import InvalidOptionsError
 
@@ -18,10 +18,10 @@ def test_edit_images_keeps_formats_and_crops_each_to_a_shape(tmp_path):
         tmp_path, lambda fmt: IMAGE_EDIT.from_params({"rotate": 90}, target=fmt), crop_aspect="1:1", show_progress=False
     )
     assert [row["output"] for row in report["results"]] == [
-        str(tmp_path / "tall.edited.PNG"),
-        str(tmp_path / "wide.edited.jpg"),
+        str(tmp_path / "tall.PNG.edited.PNG"),
+        str(tmp_path / "wide.jpg.edited.jpg"),
     ]
-    with Image.open(tmp_path / "tall.edited.PNG") as tall, Image.open(tmp_path / "wide.edited.jpg") as wide:
+    with Image.open(tmp_path / "tall.PNG.edited.PNG") as tall, Image.open(tmp_path / "wide.jpg.edited.jpg") as wide:
         assert (tall.format, tall.size, wide.format, wide.size) == ("PNG", (100, 100), "JPEG", (300, 300))
 
 
@@ -37,7 +37,7 @@ def test_edit_frames_drops_frames(tmp_path):
     frames[0].save(tmp_path / "a.gif", save_all=True, append_images=frames[1:], duration=80, loop=0)
     report = edit_frames(tmp_path / "a.gif", GifFramesConfig(keep=(0, 1, 2)), drop=[1], show_progress=False)
     assert report["summary"]["success"] == 1
-    with Image.open(tmp_path / "a.edited.gif") as out:
+    with Image.open(tmp_path / "a.gif.frames.gif") as out:
         assert out.n_frames == 2
     everything = edit_frames(tmp_path / "a.gif", GifFramesConfig(), drop=range(4), force=True, show_progress=False)
     assert everything["results"][0]["message"] == "That would drop every frame; keep at least one."
@@ -54,16 +54,26 @@ def test_run_batch_dry_run_never_processes(tmp_path):
         raise AssertionError("processed during a dry run")
 
     for force, expected in (
-        (False, ("exists", "Output already exists: b.webp")),
-        (True, ("success", "Would replace b.webp")),
+        (
+            False,
+            (
+                "exists",
+                "b.webp already exists (sashimi can't tell whether an earlier run made it: the pattern "
+                "{input_stem}.{output_ext} gives outputs an original's name).",
+            ),
+        ),
+        (True, ("success", "Would replace b.webp (the existing file)")),
     ):
         items = list(
             _batch.run_batch(
                 tmp_path,
+                names=_naming.naming(
+                    "convert", lambda path: _naming.output_format("webp"), "{input_stem}.{output_ext}"
+                ),
                 extensions=[".png"],
                 recursive=False,
                 force=force,
-                name_for=lambda path, stem: _batch.output_name(stem, "webp"),
+                accepts="images",
                 process=process,
                 success_message="made {name}",
                 output_dir=None,
@@ -80,10 +90,11 @@ def test_dry_run_creates_no_output_folder(tmp_path):
     list(
         _batch.run_batch(
             tmp_path / "a.png",
+            names=_naming.naming("convert", lambda path: _naming.output_format("out"), "{input_stem}.out"),
             extensions=[".png"],
             recursive=False,
             force=False,
-            name_for=lambda path, stem: stem + ".out",
+            accepts="images",
             process=lambda src, dst, progress: None,
             success_message="ok",
             output_dir=tmp_path / "out",

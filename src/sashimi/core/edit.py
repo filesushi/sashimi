@@ -624,8 +624,11 @@ def select_frames(
     :data:`~sashimi.config.IMAGE_FRAMES`). Kept frames play in their original order, each for its
     own duration divided by ``speed``; when the speed changes, frames browsers would play at
     100 ms (under 20 ms) count as 100 ms, no frame gets shorter than
-    :data:`~sashimi.config.MIN_FRAME_MS`, and none longer than the format can store. The loop
-    count is kept. Every frame is as shown in the source (the full canvas), so dropping frames
+    :data:`~sashimi.config.MIN_FRAME_MS`, and none longer than the format can store. GIFs store
+    durations in 10 ms steps, so in a GIF each frame's new duration is rounded to the nearest
+    step (a 70 ms frame at speed 2 plays for 40 ms, not 35), and the total length can differ
+    slightly from the source's divided by ``speed``; a preview of the length should round the
+    same way. The loop count is kept. Every frame is as shown in the source (the full canvas), so dropping frames
     never leaves holes.
 
     The output format comes from the config: pass the source's own format to keep it. With every

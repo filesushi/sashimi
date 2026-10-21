@@ -7,18 +7,19 @@ the Python API; every break is listed here. See [MIGRATION.md](MIGRATION.md) for
 
 The first release on PyPI, as **`sashimi-convert`**. Builds labelled 0.5.1 were shared privately
 but never published; 0.6.0 contains all of their changes, listed here too. It also brings over
-what ftool still did better (a sampled preview, remuxing, the animated-sheet grid and labels,
-cuts to the end), adds image editing (rotate, flip, crop, and brightness, contrast and saturation
-that match CSS filters, for still images and every frame of animated GIFs and WebPs), frame
-selection and speed for animations, and an MP4 conversion that copies the streams when it can,
-and settles the batch and CLI behaviour before it goes public: one output-naming policy, one
-meaning per flag, one JSON report, `--dry-run` everywhere and exit codes that report skipped
-files you named. Every limit is now the caller's to set (`sashimi.config.Limits`, passed as
-`limits=`; on the command line, `--max-*` flags and a `[limits]` section in `sashimi.toml`), with
-defaults that protect the machine and no limit on lengths. Every output that can carry the
-source's metadata has one `metadata` setting (`keep`, the default, `remove_location` or
-`remove_all`), `sashimi.metadata` reads what a file holds and removes it without re-encoding, and
-the last known bugs are fixed. [MIGRATION.md](MIGRATION.md) shows what to change.
+what ftool still did better (a sampled preview, remuxing, the animated-sheet grid and labels, cuts
+to the end), adds image editing (rotate, flip, crop, and brightness, contrast and saturation that
+match CSS filters, for still images and every frame of animated GIFs and WebPs), frame selection
+and speed for animations, and an MP4 conversion that copies the streams when it can, and settles
+the batch and CLI behaviour before it goes public: one output-naming policy in which a name
+depends only on its own input, with patterns you can set, one meaning per flag, one JSON report,
+`--dry-run` everywhere and exit codes that report skipped files you named. Every limit is now the
+caller's to set (`sashimi.config.Limits`, passed as `limits=`; on the command line, `--max-*`
+flags and a `[limits]` section in `sashimi.toml`), with defaults that protect the machine and no
+limit on lengths. Every output that can carry the source's metadata has one `metadata` setting
+(`keep`, the default, `remove_location` or `remove_all`), `sashimi.metadata` reads what a file
+holds and removes it without re-encoding, and the last known bugs are fixed.
+[MIGRATION.md](MIGRATION.md) shows what to change.
 
 Outputs are byte-identical to 0.5.1 except: animated contact sheets (a 3x3 grid by default, 4x2
 for portrait videos, and padded time labels), still sheets of videos with an aspect ratio from
@@ -154,10 +155,12 @@ lengths have none by default.
   `video.convert` returns the route taken (`VideoRoute`: `"copy"`, `"copy_video"` or
   `"encode"`; always `"encode"` for other targets), where it returned `None`. There is no
   option for the route.
-- **CLI exit codes:** a file named on the command line that is skipped (unsupported, already in
-  the target format, too short, not animated) now exits 1, like a failure; it exited 0. A
-  directory search that skips files it can't use still exits 0, and so does an output that
-  already exists.
+- **CLI exit codes:** a file named on the command line that is skipped (unsupported, too short,
+  not animated) now exits 1, like a failure; it exited 0. A directory search that skips files
+  it can't use still exits 0, and so does an output that already exists, and a named file that
+  is already what the command makes ("Already JPEG", "Already MKV"), since nothing went wrong
+  and there is nothing to do (`BatchPlan.already_done` and the report's `already_done` list
+  them).
 - **`sashimi info` on an image** prints the image's format, size and frames (with each frame's
   duration), and `--json` prints `sashimi.image.frames_info`'s fields, instead of ffprobe's view
   (which refused most images). Videos and audio are unchanged.
@@ -169,21 +172,86 @@ lengths have none by default.
   from an aspect ratio of 0.55 to 0.6.
 - **Animated sheets of short clips:** a video shorter than `sample_duration`, but at least a
   second long, gets one tile of the whole video instead of `MediaTooShortError`.
-- **One output-naming policy for the batch API and CLI** (see the README's "Where outputs go"):
-  conversions write `<stem>.<ext>` as before; derived outputs write `<stem>.<role>.<ext>`.
-  - Contact sheets: `<video name>.<format>` (`clip.mp4.jpeg`) becomes `clip.sheet.jpg`, and
-    animated ones `clip.animated-sheet.webp`.
-  - Resized images: `photo_resized.jpg` becomes `photo.resized.jpg`; rotated videos
-    `clip_rotated.mp4` become `clip.rotated.mp4`; cuts `clip_extracted.mkv` become `clip.extracted.mkv`.
-  - The `suffix` argument of `resize_images(_generator)` and `transform_videos(_generator)`, and
-    the CLI's `--suffix`, are removed.
-  - Two inputs that would share an output (`a.png` and `a.jpeg` → `a.webp`) both keep their
-    extension in the name (`a.png.webp`, `a.jpeg.webp`), where the second used to be reported as
-    existing, or with `force` overwrote the first. An output that would replace one of the batch's
-    inputs is an `error`, even with `force`.
-  - Without `force`, the output is moved into place only if its name is still free, so a file
-    created meanwhile is never replaced. With `force`, a replaced file is reported ("… (replaced
-    the existing file)").
+- **One output-naming policy for the batch API and CLI, in which a name depends only on its own
+  input** (see the README's "Where outputs go"). A name never depends on the other files in the
+  batch, so a rerun, a bigger batch or a subfolder plans the same name, and "exists" means the
+  same thing every time. **Every command's default is `{input_name}.{role}.{output_ext}`**, and
+  conversions, which have no role, are `{input_name}.{output_ext}` (see Added for patterns):
+  - contact sheets `<video name>.<format>` (`clip.mp4.jpeg`) become `clip.mp4.sheet.jpg`,
+    animated ones `clip.mp4.animated-sheet.webp`; previews are `clip.mp4.preview.webp` and
+    favicon packs `logo.png.favicons.zip`;
+  - conversions keep the input's name: `photo.png` to WebP is `photo.png.webp` (it was
+    `photo.webp`), and a remux of `clip.mp4` is `clip.mp4.mkv`;
+  - resized images `photo_resized.jpg` become `photo.jpg.resized.jpg`, rotated videos
+    `clip_rotated.mp4` become `clip.mp4.rotated.mp4`, cuts `clip_extracted.mkv` become
+    `clip.mkv.extracted.mkv`; edits are `photo.jpg.edited.jpg`, frame selections
+    `anim.gif.frames.gif` and copies without metadata `clip.mov.stripped.mov`. Rotating
+    `photo.jpg` to PNG gives `photo.jpg.rotated.png`: "photo.jpg, rotated, saved as PNG";
+  - `{output_ext}` is the extension the caller chose for the format (`convert . jpeg` writes
+    `.jpeg`, `convert . jpg` writes `.jpg`, and so do `--output-format` and `output_ext=`), else
+    the input's own as written when the output keeps its format (`IMG_0001.JPG` keeps `.JPG`),
+    else sashimi's standard one (`.jpg`, `.tif`). In 0.5 `jpeg` and `jpg` both wrote `.jpg`;
+  - the `suffix` argument of `resize_images(_generator)` and `transform_videos(_generator)`, and
+    the CLI's `--suffix`, are removed;
+  - **two inputs that would be written to the same file are both skipped**, never renamed, with
+    or without `force`, each with a `skipped` result naming the other and the shared name
+    ("Clashes with x.mp4: both would be named x.jpg."); when a pattern caused it,
+    `BatchPlan.clash_note` (the report's `clash_note`, printed once under the CLI's results) names
+    the pattern and where it was set, and how to tell the files apart ("2 files were skipped
+    because the pattern {input_stem}.jpg (--output-name) gives them the same name as another
+    input's output; keep {input_name} or {input_ext} in it to tell them apart."). The rest of
+    the batch carries on. In 0.5 the second was reported as existing, or with `force` overwrote
+    the first;
+  - **a run never processes its own outputs:** a directory search leaves out each file that
+    this command, with these settings (its pattern and output format), would make from another
+    file found in the same search, wherever in the search the two are, so outputs written with
+    `output_dir` are recognised too. Reruns report "exists" instead of making
+    `photo.jpg.resized.jpg.resized.jpg`, and `thumbs . -r --output-dir sheets` run twice writes
+    nothing new. A name that is only another file's stem with a new extension (`photo.webp`
+    under `{input_stem}.{output_ext}`) counts only in that file's folder. **Everything else is
+    processed, other commands' outputs included** (owner, 2026-10-21): `convert . webp` after
+    `thumbs .` converts the sheets too, and `convert . jpeg` after `convert . webp` writes
+    `photo.png.webp.jpeg`. The same goes for files named together, as a shell glob names them:
+    a second `resize *.jpg` leaves out the `*.resized.jpg` files the first made, where it made
+    `photo.jpg.resized.jpg.resized.jpg`. A file named on its own is always processed. A file
+    reached twice (named and found in a folder) is processed once;
+  - **an existing output is reported as it is:** "Output already exists: …" for a name sashimi
+    gives outputs, "… already exists (it's the input; …)" when a pattern writes in place, "(it's
+    also one of the inputs)", and "(sashimi can't tell whether an earlier run made it: …)" when
+    a pattern names outputs like originals;
+  - **`force` replaces whatever is in the way**, the input itself included (`{input_name}`
+    edits in place), and every replacement is reported ("… (replaced the existing file)",
+    "(replaced the input itself)"). Outputs are always written to a staged file and moved into
+    place, so a failure leaves the original intact; an input that another input's output will
+    replace is processed first. Without `force`, the output is moved into place only if its name
+    is still free, so a file created meanwhile is never replaced.
+- **Every `*_generator` returns a `sashimi.api.Batch`** (an iterator yielding the same protocol)
+  whose `plan()` returns a `BatchPlan`: each file's `PlannedFile` (output, action, kind and
+  route), counts by kind and route, `describe()` ("44 videos and 23 images"), `mixed`, the
+  command's own earlier outputs left out, and `clash_note`. Code that only iterates the generators is unaffected. Options a
+  batch function can tell are wrong, such as a pattern whose literal extension isn't the
+  output's format, still raise `InvalidOptionsError` when it's called.
+- **`--format` is `--output-format`** on every command that has one (`resize`, `rotate`, `edit`,
+  `frames`, `extract`, `remux`, `thumbs`, `preview`), and is written with the extension as typed:
+  `--output-format jpeg` writes `.jpeg`, `jpg` writes `.jpg` (`jpg` and `tif` are accepted
+  wherever `jpeg` and `tiff` are). `convert` keeps the format as its second argument.
+- **`sashimi rotate` takes photos, animated GIFs and WebPs, and videos** (it took only videos,
+  and a photo was "Unsupported file type"). Images go through `sashimi.image.edit`, the same code
+  as `edit --rotate`, keeping their format (`--output-format png` for no JPEG re-save); videos are
+  re-encoded as before. An image format in `--output-format` rotates only images, a video format
+  only videos. `rotate` also takes `-q` (images) and the image limits.
+- **Folders of mixed files ask first.** A run over a directory whose files the command handles
+  with different code (photos and videos for `rotate`; images and videos for `convert` to WebP or
+  GIF; images and video or audio for `strip`) asks on stderr ("holiday contains 23 images and 44
+  videos; rotate all 67? [y/N]"; "… rotate both?" for two files). `-y/--yes` answers yes, and `-f` implies it; without a terminal
+  the command stops with exit code 2. `--dry-run` shows the counts instead. The batch API never
+  asks; `Batch.plan()` gives callers the counts.
+- **Unsupported files say what the command takes:** "thumbs works on videos, not .jpg files.",
+  "resize works on images and animations; videos aren't supported yet.", instead of
+  "Unsupported file type".
+- **Problems come first** in the results table and the `--dry-run` listing (errors, skipped with
+  name clashes marked, existing, successes), and `--limit-output` hides successes before problems
+  and says how many of each it hid.
 - **The batch protocol's results have four items:** `(path, status, message, output)`, where
   `output` is the file written (or `None`). Every non-generator batch function returns the same
   report as the CLI's `--json`: `schema` (1), `command`, `summary` (with `avg_time_seconds`) and
@@ -206,7 +274,7 @@ lengths have none by default.
   refused where they were. Commands for files without such subtitles are unchanged.
 - **CLI flags mean one thing each:**
   - `-o` is the output file everywhere (`-o/--output`); `thumbs`, `resize` and `rotate` used it
-    for the format, which is `--format` (no short flag) in every command;
+    for the format, which is `--output-format` (no short flag) in every command;
   - `thumbs --duration` (seconds per animated tile) is `--clip-length`, so `--duration` always
     means the output's length;
   - `-h` is `--help` everywhere; `--height` is `-H` (it was `-h` in `convert` and `resize`), in
@@ -214,6 +282,23 @@ lengths have none by default.
   - `extract` needs a start, an end or a `--duration`, but no longer both a start and an end;
   - `--json` prints the shared report for `extract` and `flatten` too (`extract` printed a flat
     `{status, message, output, seconds}`).
+- **`sashimi.toml` takes current key names only.** `static_width`, `jpeg_quality`,
+  `animated_width`, `output_fps` and `output_format` were read as `width`, `quality`, `fps` and
+  `target`; they now get the unknown-settings warning and are ignored. Write `width`, `quality`,
+  `fps` and `target` (in `[animated_thumbs]` for animated sheets). `target` and `output_name`
+  in `[thumbs]` no longer apply to animated sheets.
+- **`sashimi config set` and `config unset` change your own settings by default**,
+  `~/.sashimi/sashimi.toml`, so a setting applies wherever you run sashimi; they changed the
+  project `sashimi.toml` (found from the current folder upward, or created there), and a
+  pattern set inside a folder was ignored when sashimi ran from the folder above. The project
+  file is written only with the new **`--project`/`-p`**; `-g/--global` is gone. Both print the
+  file they changed, as a full path, and when the project file that applies here sets what you
+  just saved to your own settings, `config set` says it wins there. `config path` names the files
+  "User" and "Project" and says when each applies; `config show` names both files and its
+  `--json` has `files` (`user`, `project`).
+- **`sashimi frames` with nothing to change is refused** (no `--keep`, `--drop`, `--speed` or
+  output format; `--speed 1` changes nothing too), saying what to pass, instead of writing an
+  unchanged copy (exit 2).
 - **The `[global]` section of `sashimi.toml` is gone.** `verbose` and `priority` were accepted but
   never read; files that still set them now get the unknown-settings warning, and `sashimi config
   set global.…` is refused.
@@ -310,7 +395,7 @@ lengths have none by default.
   `plan_frame_strip` computes it without the image.
 - **Batch editing:** `sashimi.api.edit_images(_generator)(paths, config_or_function, *,
   crop_aspect=…)` and `edit_frames(_generator)(paths, config_or_function, *, drop=…)`, writing
-  `<stem>.edited.<ext>` in each image's own format.
+  `<stem>.edited.<ext>` and `<stem>.frames.<ext>` in each image's own format.
 - **CLI:** `sashimi edit` (`--rotate`, `--flip`, `--crop WxH+X+Y`, `--aspect 16:9`,
   `--brightness`, `--contrast`, `--saturation` and the save options) and `sashimi frames`
   (`--keep 1-10,15`, `--drop 3`, `--speed 2`; frames numbered from 1, as `sashimi info` lists
@@ -318,7 +403,8 @@ lengths have none by default.
 - **`--dry-run` (`-n`) on every command that processes files** (`convert`, `resize`, `rotate`,
   `edit`, `frames`, `favicon`, `extract`, `remux`, `thumbs`, `preview`, as well as `flatten`):
   outputs are planned under the naming policy and each file is reported as "Would write …",
-  "Would replace …" (with `-f`), existing, or skipped, without opening or writing anything. Every
+  "Would replace …" (with `-f`), existing, refused (an unusable name), or skipped (a name clash),
+  without opening or writing anything. Every
   batch function takes `dry_run`.
 - `MediaInfo.pixel_format` (ffprobe's `pix_fmt` of the video, e.g. `yuv420p`).
 - `sashimi.config` exports `Rotation` and `Flip`, the types of `rotate` and `flip`.
@@ -343,23 +429,55 @@ lengths have none by default.
   can't break either. The zip's entries, order and timestamps are fixed, so the bytes are the same
   every run. Config: `FaviconPackConfig` (`ico_sizes`, `fit`, `resample`, `background_color`,
   `name`, `short_name`, `theme_color`, `manifest_background_color`). Also `favicon_manifest` and
-  `favicon_html`. Batch: `make_favicon_packs(_generator)`, writing `<stem>.favicons.zip`. CLI:
+  `favicon_html`. Batch: `make_favicon_packs(_generator)`, writing `<name>.favicons.zip` (`logo.png.favicons.zip`). CLI:
   `sashimi favicon`.
 - **`IcoConfig.background_color`:** fills transparent areas and the padding of `.ico` files; unset
   (the default) keeps them transparent, byte for byte as before. CLI: `convert … ico --background`.
 - **Remuxing:** `sashimi remux` and `sashimi.api.remux_files(_generator)` copy every stream of
-  each video into MKV (or MP4, WebM, MOV) without re-encoding, writing `<stem>.mkv`. It's a
+  each video into MKV (or MP4, WebM, MOV) without re-encoding, writing `<name>.mkv` (`clip.mp4.mkv`). It's a
   `video.trim` with a `CopyTrimConfig` and no end, so the container check runs before anything is
   written, and outputs are atomic. Sources are never changed or removed (ftool's `--cleanup` is
   not ported). Also `video.subtitle_conversions` and `build_trim_command(…, subtitles=…)`.
 - **Cuts to the end and by length:** `sashimi extract clip.mp4 10m` cuts from 10 minutes to the
   end, and `-d/--duration` gives a length instead of an end time. `extract` also takes a
-  directory, `-r`, `--format` (the container) and `--output-dir`.
+  directory, `-r`, `--output-format` (the container) and `--output-dir`.
 - **`-o/--output` and `--output-dir`** on every batch command, and `output`/`output_dir` on every
   batch function. Outputs under `output_dir` keep the subfolders of a searched directory; files
   already in `output_dir` aren't picked up as inputs.
-- `sashimi.api` exports `output_name` (the naming policy), `sheet_name`, `build_report`,
-  `YieldType`, `plan_flatten` and `FlattenPlan`.
+- **Output name patterns:** every batch function but `flatten` takes `output_name`, a pattern of
+  text and the fields `{input_name}` (`clip.mp4`), `{input_stem}` (`clip`), `{input_ext}`
+  (`mp4`), `{role}` (`sheet`) and `{output_ext}` (`jpg`), with `{{`/`}}` for literal braces;
+  `convert_files`, `resize_images`, `edit_images` and `make_thumbs` take
+  `output_ext` to spell the format's extension. A pattern is checked when the function is
+  called (`InvalidOptionsError` for an unknown field, with a hint for the names an unreleased
+  build used, a format spec, unbalanced braces, `/`, `\`, `<>:"|?*` or control characters,
+  `{role}` for a conversion, or a literal extension of another format when every output has one
+  format), and each planned name before anything runs: it must end in an extension of the
+  output's format (`{input_name}.jpeg` for a JPEG sheet, not `{input_name}.png`), be valid on
+  Windows and POSIX, and be at most 255 characters; a name that fails is that file's `error`
+  result. `NameTemplate(text, origin)` carries where a pattern was set, for messages.
+  `sashimi.api` exports `NameTemplate`, `default_output_name(command)`, `Batch`, `BatchPlan` and
+  `PlannedFile`, as well as `build_report`, `YieldType`, `plan_flatten` and `FlattenPlan`.
+- **`sashimi.api.rotate_files(_generator)(paths, rotate=90, flip="none", *, output_format=None,
+  image_config=None, video_config=None, …)`** rotates and flips images (through
+  `sashimi.image.edit`) and videos (through `sashimi.video.transform`), routed by kind; the
+  plan's routes are `edit` and `transform`. `transform_videos(_generator)` remain, for videos only.
+- **On the command line:** `--output-name PATTERN` on every command that writes files (but
+  `flatten`), and `output_name` in each command's section of `sashimi.toml` (`[convert]`,
+  `[remux]`, `[resize]`, `[rotate]`, `[extract]`, `[edit]`, `[frames]`, `[strip]`, `[preview]`,
+  `[favicon]`, and `[thumbs]` and `[animated_thumbs]` for their own sheets): `sashimi config set
+  thumbs.output_name '{input_name}.jpeg'` names sheets `video.mp4.jpeg`, so sheets made that way
+  before count as existing, and `{input_stem}.{role}.{output_ext}` gives short names
+  (`photo.resized.jpg`). A pattern given with `--output-name` is for that run only; `sashimi
+  config set` keeps one, and `--output-name`'s help says so with the command's own example. Each
+  command reads only its own section; a broken pattern there is refused (exit 2) with the file
+  and section named, and doesn't stop other commands. Flags win over the files; `-o` with `--output-name` is refused. `sashimi config
+  defaults <command>` starts with an "Output names" table (`--json`: a section with `"model":
+  null`) giving the pattern, an example and the `sashimi.toml` value, `thumbs --help` shows a
+  pattern from `sashimi.toml`, and `sashimi config defaults` covers `remux` and `strip`.
+- **`-y/--yes`** on every processing command and on `flatten`.
+- The JSON report (and every batch function's report) gains `kinds`, `routes`,
+  `outputs_left_out` (`[{"file", "made_from"}]`) and `clash_note`.
 - `sashimi flatten --dry-run` (`-n`) and `--json`.
 - **Shell completion:** `sashimi --install-completion` sets it up for the shell you run it from
   (bash, zsh, fish or PowerShell), and `--show-completion` prints the script instead.
@@ -379,11 +497,44 @@ lengths have none by default.
 - `sashimi config defaults <command> [format]` lists each option's flag, default, accepted values
   and description, per output format (`--json` for scripts); for `thumbs` it also shows values
   set in `sashimi.toml`.
-- The CLI warns about `sashimi.toml` keys it doesn't use (stale 0.2-era names such as
-  `output_width` or `start_offset`, typos, unknown sections), naming the file and the
-  `sashimi config unset` command that removes them. Such keys were silently ignored before.
+- The CLI warns about `sashimi.toml` keys it doesn't use (0.2-era names such as `static_width`,
+  `jpeg_quality`, `animated_width`, `output_format`, `output_fps`, `output_width` or
+  `start_offset`, typos, unknown sections), naming the file and the `sashimi config unset`
+  command that removes them. Such keys were silently ignored before.
 - `sashimi thumbs --help` shows the `sashimi.toml` values that replace built-in defaults, e.g.
   `[default: 85, animated 75; sashimi.toml: 80]`.
+
+- **Folders in name patterns:** a pattern may start with folders, made inside each input's own
+  folder: `sashimi config set thumbs.output_name 'sheets/{input_name}.jpeg'` writes
+  `New folder/sheets/Bluebeard-5.mkv.jpeg` for `New folder/Bluebeard-5.mkv`, from any folder,
+  and with `-r` each folder gets its own `sheets/`. Reruns find the outputs there ("Exists"),
+  and a run never processes them. `\` separates folders as `/` does, on every system. Patterns
+  that would leave the input's folder are refused (absolute paths, drive letters, `~`, `.` and
+  `..` folders, empty folder names), pointing at `output_dir`. With `output_dir`, the pattern's
+  folders go below it.
+- **A kept output folder per command:** `sashimi config set <command>.output_dir <folder>` (and
+  `animated_thumbs.output_dir`), shown by `config show`, `config defaults <command>` and the
+  command's `--help`, removed by `config unset`. It means what `--output-dir` means: an absolute
+  path as given, a relative one inside the folder sashimi runs from (`~` is the home folder).
+  `--output-dir` replaces it for one run, and the new **`--no-output-dir`** writes next to the
+  inputs. A value that isn't a folder stops only its own command (exit 2).
+- **`resize`, `convert` and `rotate` take several paths,** as `edit`, `thumbs` and the others
+  do: `sashimi resize *.jpg -w 800`. `convert` takes the format last, the way `cp` takes its
+  destination (`sashimi convert a.png b.png webp`), and `rotate` the angle, which stays optional
+  (`sashimi rotate *.jpg 180`, `sashimi rotate *.mp4` for 90). `convert . webp` and `rotate
+  x.mp4` work as before. The last argument of `convert` is always the format; when a file or
+  folder here has the format's name, a note says how to name it (`./webp`). A last `0`, `90`,
+  `180` or `270` given to `rotate` that is also a file or folder here is refused, since both
+  readings make sense; the new `convert --output-format` and `rotate --angle` give the format or
+  angle as an option, so every argument is a path. Other mistakes say what to write: "End with
+  the format to convert to, e.g. sashimi convert a.png webp", "45 isn't a file here, nor an angle
+  rotate takes (0, 90, 180 or 270)".
+- `thumbs` and `preview` take `-w` for `--width`, as `resize` and `convert` do.
+- A new settings file starts with a comment saying what it is and which file wins.
+- `BatchPlan.in_output_dir` (and the report's `in_output_dir`) lists the files a search found
+  inside `output_dir` and left out; the CLI says so under the results. `BatchPlan.accepts` and
+  `BatchPlan.recursive` let a caller explain an empty run: "Found no files thumbs works on
+  (videos); -r searches subfolders too."
 
 ### Changed
 
@@ -394,7 +545,7 @@ lengths have none by default.
 - The image models share per-format save fields with the edit models (internal; every field,
   default, description and order is unchanged).
 - **Quieter CLI output:** one file gets one line ("Success: clip.mp4: Preview created:
-  clip.preview.webp (1.2s)") instead of a panel and a table; several files get a heading, the
+  clip.mp4.preview.webp (1.2s)") instead of a panel and a table; several files get a heading, the
   progress bar, the summary and the table as before. Status lines have no emoji.
 - All logging goes to stderr, so `--json` output on stdout stays clean without the CLI checking
   its own arguments; warnings now also show in `--json` runs, on stderr.
@@ -426,6 +577,35 @@ lengths have none by default.
   files still work; delete one to go back to the built-in defaults.
 - `sashimi config show` lists only what your files set; built-in defaults are in
   `sashimi config defaults`.
+
+- **Messages say where an output is:** an output beside its input is named by its file name, any
+  other by its path as built from the paths you gave ("Output already exists:
+  sheets/Bluebeard-5.mkv.jpeg", "Would write sheets/S01/ep1.mkv.sheet.jpg", "Contact sheet
+  created: …"). The "left out" line under the results shows paths too.
+- **`output`/`-o` must end in an extension of the output's format:** `convert photo.jpg webp -o
+  out.png` used to write WebP data into `out.png`; it's now that file's error ("out.png must end
+  in .webp, since the output is WEBP."), as a pattern's literal extension already was.
+- `-o` with `--output-dir` is refused (exit 2), as `-o` with `--output-name` is; `--output-dir`
+  used to be ignored silently.
+- `rotate` says what it did: "Rotated to …", "Flipped to …" or "Rotated and flipped to …"
+  instead of "Saved …".
+- Help reads whole at 80 columns: options with long lists of values show a short placeholder
+  (`FORMAT`, `MODE`, `PRESET`, …) and list the values in their help, and number ranges are in the
+  help instead of the type column, so no option name, default or pattern is cut off with "…".
+  Command descriptions wrap to the terminal instead of breaking mid-sentence (`sashimi config
+  --help`, `sashimi convert --help`). `sashimi --help` describes `rotate` as rotating photos,
+  GIFs, WebPs and videos (it said videos), `favicon` as working on images, `extract` as lossless
+  or exact with `--accurate`, and `thumbs` sheets as still or animated.
+- `config defaults <command>`'s first table is "Output names and folder", with an `output_dir`
+  row ("next to each input", or your setting).
+- `config defaults` reads whole at 80 columns: when its columns don't fit the terminal without
+  cutting a value, each option is shown as a block (name, default, accepted values, description),
+  so default patterns such as `{input_name}.{role}.{output_ext}` are never cut off with "…".
+- `convert --help` and `remux --help` say that `convert clip.mkv mp4` and `remux clip.mkv
+  --output-format mp4` both write `clip.mkv.mp4`, and how they differ (the first video and audio
+  track, re-encoded when they don't fit, against every stream copied).
+- `info` and `metadata` given a folder say so ("videos is a folder; info shows one file at a
+  time.") instead of "This file doesn't look like media we can read."
 
 ### Fixed
 
@@ -488,6 +668,22 @@ lengths have none by default.
 - `resize --help` no longer mentions animated WebP or video widths.
 - A contact sheet whose ffmpeg can't be run raises `BinaryNotFoundError`, instead of
   `UnsupportedMediaError` ("We couldn't read any frames from this video.").
+- **An `--output-dir` that holds the searched folder left every file out:** `sashimi thumbs . -r
+  --output-dir .` (or `..`) said "No matching files found", because every file was inside the
+  output folder. Files are now left out only when the output folder is inside the search.
+- A file named on the command line that sits inside `--output-dir` is processed, like any file you
+  name; it used to be left out.
+- **`sashimi config set` replaced a `sashimi.toml` that wasn't valid TOML** with a file holding
+  only the new setting, losing everything else in it; `config unset` said the setting "wasn't
+  set there". Both now refuse, naming the file and the parse error, and leave it as it is.
+- **Rerunning a command on a shell glob processed its own outputs** (`sashimi edit *.jpg
+  --rotate 90` twice wrote `a.jpg.edited.jpg.edited.jpg`); see the naming policy under Breaking.
+- `config defaults convert` and `remux` suggested `{input_stem}.{role}.{output_ext}` for short
+  names, which conversions refuse (they have no `{role}`); they now suggest
+  `{input_stem}.{output_ext}`, and don't list `{role}` among their fields.
+- **`flatten` removed empty subfolders without asking** when there was nothing to move; it now
+  asks whenever it would change anything, and its help says that folders that were empty already
+  are removed too.
 
 ## 0.5.0 — 2026-10-12
 

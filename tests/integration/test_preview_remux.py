@@ -137,8 +137,8 @@ def test_remux_batch_never_touches_sources(mp4_with_subtitles, video_blob, tmp_p
     before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
     items = list(remux_files_generator([tmp_path / "phone.mp4", tmp_path / "already.mkv"], "mkv"))
     finals = [(p.name, status, message) for p, status, message, _ in items[1:] if status != "starting"]
-    assert finals == [("already.mkv", "skipped", "Already MKV"), ("phone.mp4", "success", "Remuxed to phone.mkv")]
+    assert finals == [("already.mkv", "skipped", "Already MKV"), ("phone.mp4", "success", "Remuxed to phone.mp4.mkv")]
     assert {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.name in before} == before
     again = list(remux_files_generator(tmp_path / "phone.mp4", "mkv", force=True))
-    assert again[-1][1:3] == ("success", "Remuxed to phone.mkv (replaced the existing file)")
+    assert again[-1][1:3] == ("success", "Remuxed to phone.mp4.mkv (replaced the existing file)")
     assert (tmp_path / "phone.mp4").read_bytes() == before["phone.mp4"]

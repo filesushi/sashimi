@@ -187,20 +187,25 @@ sashimi convert talk.mp4 mp3 --bitrate 128 --mono    # video or audio to mp3 m4a
 sashimi convert logo.png ico --background '#ffffff'  # favicon.ico with an opaque background
 sashimi favicon logo.png --name "My site"            # favicon pack: ICO, PNGs, manifest, <head> tags
 sashimi resize photos/ --width 800 -H 800           # shrink, keeping each format
+sashimi resize *.jpg -w 800                          # several files, as the shell lists them
+sashimi convert *.png webp                           # the format comes last, as cp's destination
 sashimi edit photo.jpg --rotate 90 --crop 1200x800+0+100  # crop is measured after rotating
 sashimi edit photos/ --aspect 1:1 --saturation 1.2   # centred square crop, more vivid
 sashimi edit clip.gif --brightness 1.3               # every frame of an animation
 sashimi frames clip.gif --drop 1-5 --speed 1.5       # frames are numbered from 1
 sashimi convert clip.mkv mp4                         # copies H.264/AAC when it can, else re-encodes
-sashimi rotate phone.mp4 90                          # rotate/flip and re-encode
+sashimi rotate phone.mp4 90                          # rotate/flip a video (re-encoded)
+sashimi rotate photo.jpg 90 --output-format png      # photo.jpg.rotated.png, no JPEG re-save
+sashimi rotate holiday/ 90 -y                        # photos, GIFs and videos; -y answers "go ahead?"
+sashimi rotate *.jpg 180                             # the angle comes last (90 when left out)
 sashimi extract clip.mkv 1m30s 2m                    # lossless cut (alias: trim)
 sashimi extract clip.mkv 1h -d 90s --accurate        # exact 90 s cut from 1 h, re-encoded
 sashimi extract clip.mkv 10m                         # from 10 minutes to the end
 sashimi remux videos/ -r                             # MP4 and others to MKV, no re-encoding
 sashimi thumbs videos/ -r                            # contact sheet next to each video
-sashimi thumbs clip.mp4 -a --format gif              # animated sheet (3x3 clips)
+sashimi thumbs clip.mp4 -a --output-format gif       # animated sheet (3x3 clips)
 sashimi preview clip.mp4                             # 5 x 2 s clips from across the video
-sashimi preview clip.mp4 --format gif --crop 9:16    # vertical GIF preview
+sashimi preview clip.mp4 --output-format gif --crop 9:16  # vertical GIF preview
 sashimi info clip.mkv                                # container, duration, codecs
 sashimi info clip.gif                                # an image's size, frames and their durations
 sashimi metadata photo.jpg                           # camera, dates, location: what the file holds
@@ -209,7 +214,12 @@ sashimi strip clip.mov --remove remove_location      # remove only GPS and place
 sashimi convert photo.heic jpeg --metadata remove_all  # convert without the photo's metadata
 sashimi convert photos/ webp -n                      # --dry-run: what would be written, change nothing
 sashimi flatten downloads/ --dry-run                 # see what flatten would move
-sashimi config set thumbs.cols 4                     # change CLI defaults
+sashimi config set thumbs.cols 4                     # change your defaults, wherever you run sashimi
+sashimi config set --project thumbs.cols 6           # ...or only in this folder (./sashimi.toml)
+sashimi config path                                  # which settings files apply here
+sashimi config set thumbs.output_name '{input_name}.jpeg'  # name sheets video.mp4.jpeg
+sashimi config set thumbs.output_name 'sheets/{input_name}.jpeg'  # ...in a sheets folder beside each video
+sashimi config set resize.output_dir ~/small          # collect resized photos in one folder
 sashimi convert scan.tif jpeg --max-pixels none      # no pixel limit for this run
 sashimi config defaults convert webp                 # every option's default for WebP output
 sashimi --install-completion                         # tab completion (bash, zsh, fish, PowerShell)
@@ -218,11 +228,37 @@ sashimi --install-completion                         # tab completion (bash, zsh
 Every command prints its help when run without arguments or with `-h`, and every library option
 has a flag (`sashimi convert --help` lists them by group, with their defaults; `sashimi config
 defaults <command> [format]` lists them per output format). The flags mean the same thing
-everywhere: `-o/--output` is the output file, `--format` the output format, `--output-dir` a
-folder for the outputs, `-f/--force` replaces existing outputs, `--duration` is how long the
-output is, and `--clip-length` how long each sampled clip is. The CLI reads defaults from
-`~/.sashimi/sashimi.toml` and a project `sashimi.toml`, which only `sashimi config set` creates
-(`-g` for the global one); the library never reads either.
+everywhere: `-o/--output` is the output file, `--output-format` the output format (written
+with the extension as you type it), `--output-dir` a folder for the outputs (`--no-output-dir`
+for next to the inputs when `sashimi.toml` keeps one), `--output-name` the pattern outputs are
+named by, `-f/--force` replaces whatever is in the way, `-y/--yes`
+answers questions, `--duration` is how long the output is, and `--clip-length` how long each
+sampled clip is.
+
+Commands that take several paths take them as the shell lists them (`sashimi resize *.jpg -w
+800`). `convert` takes its format last, the way `cp` takes its destination last (`sashimi
+convert a.png b.png webp`), and `rotate` its angle (`sashimi rotate *.jpg 180`; 90 when there's
+none). The last argument of `convert` is always the format: when a file or folder here has the
+format's name (a `webp` folder of earlier outputs), sashimi says so, and `./webp` names the
+folder. A last `0`, `90`, `180` or `270` given to `rotate` that is also a file or folder here is
+refused, since both readings make sense; `--angle 90` (or `--output-format webp` for `convert`)
+says it's the angle, and `./90` that it's the folder. A file you name that is already what the
+command makes ("Already JPEG") isn't an error.
+
+### Settings files
+
+`sashimi config set` keeps a default in your own settings file, `~/.sashimi/sashimi.toml`, so
+it applies wherever you run sashimi, and says which file it changed. `sashimi config set
+--project` writes the project file instead: the `sashimi.toml` (or `.sashimi.toml`) in the
+current folder or the nearest folder above it, created in the current folder if there is none.
+A project file applies only when you run sashimi in its folder or a folder inside it, where it
+wins over your own settings: a pattern kept with `--project` inside `New folder` isn't used by
+`sashimi thumbs "New folder"` run from the folder above. When a project file here sets what you
+just saved to your own settings, `config set` says so. `sashimi config unset` follows the same
+rule (`--project` for the project file), `sashimi config path` shows both files, and `sashimi
+config show` what they set. Only `sashimi config set` creates either file (a new one starts with
+a comment saying what it is), and it never rewrites a file that isn't valid TOML; the library
+never reads either.
 
 ### Limits on the command line
 
@@ -231,17 +267,17 @@ taking a number with a unit, or `none` for no limit:
 
 | Flag | Commands | Default | Example |
 |---|---|---|---|
-| `--max-pixels` | `convert`, `resize`, `favicon`, `edit`, `frames` | 64M | `sashimi convert scan.tif jpeg --max-pixels 300M` |
+| `--max-pixels` | `convert`, `resize`, `rotate`, `favicon`, `edit`, `frames` | 64M | `sashimi convert scan.tif jpeg --max-pixels 300M` |
 | `--max-frame-bytes` | `convert` (GIFs), `thumbs` (animated), `preview` (GIF) | 1G | `sashimi convert talk.mp4 gif -d 60 --max-frame-bytes 4G` |
-| `--max-animation-bytes` | `edit`, `frames` | 1G | `sashimi edit big.gif --rotate 90 --max-animation-bytes none` |
+| `--max-animation-bytes` | `rotate`, `edit`, `frames` | 1G | `sashimi edit big.gif --rotate 90 --max-animation-bytes none` |
 | `--max-sheet-pixels` | `thumbs` | 64M | `sashimi thumbs film.mkv --cols 10 --rows 20 --max-sheet-pixels 200M` |
 
 Every limit, the length limits included (off by default), can be set in the `[limits]` section of
 `sashimi.toml`, with the same values; flags win over the files:
 
 ```sh
-sashimi config set limits.max_pixels 300M -g          # in ~/.sashimi/sashimi.toml
-sashimi config set limits.max_video_seconds 10m       # refuse videos over 10 minutes, here
+sashimi config set limits.max_pixels 300M             # in ~/.sashimi/sashimi.toml
+sashimi config set --project limits.max_video_seconds 10m  # refuse videos over 10 minutes, here
 sashimi config set limits.max_frame_bytes none        # no frame memory limit
 sashimi config defaults limits                        # every limit, its flag, default and setting
 ```
@@ -251,32 +287,154 @@ Sizes take `K`, `M` and `G` (`512M`, `4G`, `4GiB`; a bare number is bytes), pixe
 
 ### Where outputs go
 
-Every command, and every `sashimi.api` batch function, names its outputs the same way:
+An output's name depends only on its own input, the command and your settings, never on the
+other files in the batch. Running a command again, on a bigger folder or on one subfolder, plans
+the same name for a file, so an output made before is found and reported as "Exists".
 
-| Output | Name | Example |
+Every command names its outputs `{input_name}.{role}.{output_ext}`: "this is `photo.jpg`,
+rotated, saved as PNG" is `photo.jpg.rotated.png`. Conversions have no role, so theirs is
+`{input_name}.{output_ext}`.
+
+| Command | Role | Example |
 |---|---|---|
-| A conversion (`convert`, `remux`) | `<stem>.<ext>` | `photo.png` → `photo.webp`; `clip.mp4` → `clip.mkv` |
-| A contact sheet | `<stem>.sheet.<ext>` | `clip.mp4` → `clip.sheet.jpg` |
-| An animated contact sheet | `<stem>.animated-sheet.<ext>` | `clip.mp4` → `clip.animated-sheet.webp` |
-| A preview | `<stem>.preview.<ext>` | `clip.mp4` → `clip.preview.webp` |
-| A resized image, rotated video, cut | `<stem>.resized.<ext>`, `<stem>.rotated.<ext>`, `<stem>.extracted.<ext>` | `photo.jpg` → `photo.resized.jpg` |
-| A favicon pack | `<stem>.favicons.zip` | `logo.png` → `logo.favicons.zip` |
-| An edited image or animation (`edit`, `frames`) | `<stem>.edited.<ext>`, in the image's own format | `photo.jpg` → `photo.edited.jpg` |
-| A copy without metadata (`strip`) | `<stem>.stripped.<ext>`, in the file's own format | `clip.mov` → `clip.stripped.mov` |
+| `convert` | (none) | `photo.png` → `photo.png.webp`; `convert . jpeg` → `photo.png.jpeg`, `convert . jpg` → `photo.png.jpg` |
+| `remux` | (none) | `clip.mp4` → `clip.mp4.mkv` |
+| `resize` | `resized` | `photo.jpg` → `photo.jpg.resized.jpg`; `photo.heic` → `photo.heic.resized.jpg` |
+| `rotate` | `rotated` | `photo.jpg` → `photo.jpg.rotated.jpg` (`.png` with `--output-format png`); `clip.mkv` → `clip.mkv.rotated.mp4` |
+| `extract` | `extracted` | `clip.mkv` → `clip.mkv.extracted.mkv` |
+| `edit` | `edited` | `photo.jpg` → `photo.jpg.edited.jpg` |
+| `frames` | `frames` | `anim.gif` → `anim.gif.frames.gif` |
+| `strip` | `stripped` | `clip.mov` → `clip.mov.stripped.mov` |
+| `thumbs` | `sheet` | `clip.mp4` → `clip.mp4.sheet.jpg` |
+| `thumbs -a` | `animated-sheet` | `clip.mp4` → `clip.mp4.animated-sheet.webp` |
+| `preview` | `preview` | `clip.mp4` → `clip.mp4.preview.webp` |
+| `favicon` | `favicons` | `logo.png` → `logo.png.favicons.zip` |
 
-- Outputs go next to their inputs. `--output-dir DIR` puts them in `DIR` instead, keeping the
-  subfolders of a directory you passed, and `-o FILE` names the output of a single input file.
-  JPEG is written as `.jpg` and TIFF as `.tif`.
-- If two inputs would get the same name (`a.png` and `a.jpeg` → `a.webp`), both keep their
-  extension in it instead: `a.png.webp` and `a.jpeg.webp`. An output that would replace one of
-  the inputs isn't written, even with `--force`.
-- An output that already exists is left alone and reported as "Exists". `--force` replaces it
-  and says so in the result ("replaced the existing file"). Without `--force` nothing is ever
-  replaced, even a file that appears while sashimi works.
-- `-n/--dry-run` shows each file's plan ("Would write a.webp", "Would replace a.webp" with
-  `--force`, "Output already exists", or why it's skipped) without reading or writing anything.
-- Nothing ever deletes or changes an input, except `flatten`, which moves files (see `sashimi
-  flatten --help`; `--dry-run` shows the plan first).
+- **`{output_ext}`** is the format as you typed it (`--output-format jpeg` writes `.jpeg`,
+  `jpg` writes `.jpg`, and so does `convert`'s format); else, when the output keeps the
+  input's format, the input's own extension as written (`IMG_0001.JPG` → `IMG_0001.JPG.resized.JPG`);
+  else sashimi's usual one (`.jpg` for JPEG, `.tif` for TIFF).
+- **Patterns.** `--output-name PATTERN`, or `output_name` in the command's section of
+  `sashimi.toml`, sets the pattern. Its fields are `{input_name}` (the input's file name,
+  `clip.mp4`), `{input_stem}` (without the extension, `clip`), `{input_ext}` (the extension,
+  `mp4`), `{role}` (`sheet`, `resized`, …) and `{output_ext}` (`jpg`); write `{{` and `}}` for
+  literal braces. A pattern may spell out the extension instead of `{output_ext}`, but it must
+  name the output's format (`.jpeg` is fine for a JPEG sheet, `.png` is refused before
+  anything runs). Names must be valid on Windows as well as Linux and macOS. A pattern may
+  start with folders, which are made inside each input's own folder (see below). For example:
+
+  ```sh
+  sashimi config set thumbs.output_name '{input_name}.jpeg'   # [thumbs] output_name = "{input_name}.jpeg"
+  sashimi thumbs videos/ -r                                   # your existing video.mp4.jpeg sheets: "Exists"
+  sashimi config set resize.output_name '{input_stem}.{role}.{output_ext}'   # short names: photo.resized.jpg
+  sashimi convert photos/ webp --output-name '{input_stem}.{output_ext}'     # photo.webp, for this run only
+  ```
+
+  Flags win over `sashimi.toml`, and `sashimi config defaults <command>` shows each command's
+  pattern and the one your files set. `[thumbs]` and `[animated_thumbs]` each name their own
+  sheets. `flatten` keeps names as they are, so it has no pattern.
+- **Outputs go next to their inputs,** wherever you run sashimi from.
+- **A folder beside each input goes in the pattern.** `sashimi config set thumbs.output_name
+  'sheets/{input_name}.jpeg'` writes `New folder/sheets/Bluebeard-5.mkv.jpeg` for `New
+  folder/Bluebeard-5.mkv`, from any folder, and with `-r` each folder gets its own `sheets/`.
+  Folders are made as needed, and a rerun finds the sheets there ("Exists"). `\` separates
+  folders as `/` does, on every system. Patterns can't leave the input's folder: absolute paths,
+  drive letters, `~`, `.` and `..` folders and empty folder names are refused; that is what
+  `--output-dir` is for.
+- **`--output-dir DIR` puts outputs in one folder** instead, with the usual meaning of a path: an
+  absolute one as given, a relative one (`sheets` and `./sheets` alike) inside the folder you run
+  sashimi from. The subfolders of a directory you passed are kept below it, and a pattern's
+  folders below those: `sashimi thumbs Show -r --output-dir /srv/sheets` with the pattern above
+  writes `/srv/sheets/S01/sheets/ep1.mkv.jpeg`. Files a search finds already inside `DIR` aren't
+  processed (a line under the results says so), unless `DIR` holds the folder you searched.
+- **Keep an output folder with `sashimi config set <command>.output_dir DIR`** (`~` is your home
+  folder; `animated_thumbs.output_dir` for animated sheets). It means what the flag means, so a
+  relative one is relative to wherever you run sashimi: with `output_dir = "sheets"`, `sashimi
+  thumbs ~/Videos -r` run from your home folder writes `~/sheets/…`. `--output-dir` replaces it
+  for one run, `--no-output-dir` writes next to the inputs, and `sashimi config unset
+  <command>.output_dir` removes it. `sashimi config defaults <command>` and the command's
+  `--help` show what your files keep, and `-n` shows where each file would go.
+- Because the subfolders below `DIR` depend on the folder you pass, a folder given to
+  `--output-dir` (or kept) finds earlier outputs only when you pass the same folder from the
+  same place: `sashimi thumbs Show -r --output-dir sheets` writes `sheets/S01/ep1.mkv.sheet.jpg`,
+  and a later `sashimi thumbs Show/S01 --output-dir sheets` writes `sheets/ep1.mkv.sheet.jpg`
+  as well. A folder in the pattern doesn't have this problem.
+- `-o FILE` names the output of a single input file, whatever the pattern and output folder; its
+  extension must name the output's format (`-o out.png` is refused for a WebP).
+- **A command never processes its own outputs.** When sashimi searches a folder, it leaves out
+  each file that the same command, with the same settings, would make from another file it
+  found: `photo.jpg.resized.jpg` for `resize`, `photo.png.webp` for `convert . webp`. That holds
+  wherever in the search the two are, so `sashimi thumbs . -r --output-dir sheets` run twice
+  writes nothing new, and a rerun reports the outputs as "Exists". The results end with a line
+  naming what was left out. The same holds for files you name together, as a shell glob names
+  them: a second `sashimi resize *.jpg -w 800` leaves out the `*.resized.jpg` files the first
+  one made. A file you name on its own is always processed.
+- **Everything else is processed, other commands' outputs included.** `sashimi convert . webp
+  -r` in a folder of videos with their contact sheets in `sheets/` converts the videos and the
+  sheets (and asks first, since that's videos and images), and `sashimi convert sheets webp`
+  converts just the sheets. Running `convert . jpeg` after `convert . webp` converts the WebPs
+  too (`photo.png.webp.jpeg`). Name files, or point at a subfolder, to process less.
+- **Keep a pattern with `sashimi config set`.** A pattern given with `--output-name` is for that
+  run only, and later runs don't know about it: after `sashimi thumbs . --output-name
+  '{input_name}.jpeg'`, a plain `sashimi thumbs .` writes `video.mp4.sheet.jpg` beside your
+  `video.mp4.jpeg`. `sashimi config set thumbs.output_name '{input_name}.jpeg'` keeps it, for
+  every later run, wherever you run sashimi (`--project` for runs in that folder only).
+- **Two outputs with one name are both skipped,** never renamed. This only happens with a
+  pattern of your own (`{input_stem}.{output_ext}` gives `x.mp4` for both `x.mkv` and `x.mov`)
+  or with names that differ only in case, which are one file on Windows and macOS. Each result
+  says which other file it clashes with and the name they'd share ("Clashes with x.mov: both
+  would be named x.mp4."), and one line at the end names the pattern, where you set it (the
+  flag, or the `sashimi.toml` file and section) and how to tell the files apart. `--force`
+  doesn't change this.
+- **An output that already exists is left alone** and reported as "Exists", with what sashimi
+  knows about it: "Output already exists" for a name sashimi gives outputs, "it's the input" for
+  a pattern that writes in place (`{input_name}`), and "sashimi can't tell whether an earlier run
+  made it" for a pattern that names outputs like originals (`{input_stem}.{output_ext}` beside
+  your own `photo.jpg`). Names don't record the settings, so a rerun with other settings also
+  reports "Exists"; use `--force` or another pattern.
+- **`-f/--force` replaces whatever is there,** your own files and the input itself included, and
+  says so in each result ("replaced the existing file", "replaced the input itself"). With
+  `--output-name '{input_name}' -f`, `strip`, `rotate`, `edit` and the others change files in
+  place. Outputs are written to a temporary file first and moved into place, so a failure leaves
+  the original as it was. Without `--force` nothing is ever replaced, even a file that appears
+  while sashimi works.
+- **Problems come first:** the results table and the `--dry-run` listing show errors, then
+  skipped files (name clashes marked), then existing outputs, then successes, and
+  `--limit-output` cuts successes before problems.
+- Messages name an output by its file name when it's beside its input, and otherwise by its path
+  as built from the paths you gave, so relative to where you ran sashimi when those were relative
+  ("Output already exists: sheets/Bluebeard-5.mkv.jpeg").
+- `-n/--dry-run` shows each file's plan ("Would write a.png.webp", "Would replace …" with
+  `--force`, "Output already exists", a skipped clash or a refused name, or why it's skipped)
+  without reading or writing anything.
+- Nothing deletes or changes an input unless you ask for it with an in-place pattern and
+  `--force`, except `flatten`, which moves files (see `sashimi flatten --help`; `--dry-run` shows
+  the plan first).
+
+### Folders of mixed files
+
+`rotate` handles photos and animated GIFs and WebPs (every frame) through the same code as `edit
+--rotate`, and videos by re-encoding them. Images keep their format, so a JPEG is re-saved (at
+quality 92); `--output-format png` keeps every pixel, and an image format rotates only images
+(`mp4` or `webm` only videos). `resize` works on images and animations; videos aren't supported
+yet. Every command's message for a file it can't take says what it works on.
+
+When a folder holds files that a command handles in different ways (photos and videos for
+`rotate`; images and videos for `convert` to WebP or GIF; images and video or audio for
+`strip`), sashimi asks first, on stderr:
+
+```text
+holiday contains 23 images and 44 videos; rotate all 67? [y/N]
+```
+
+(For two files it asks "rotate both?".)
+
+The counts are of the files that would be processed. `-y/--yes` answers yes, and so does `-f`.
+Without a terminal to ask on (in a script or a pipe), sashimi stops with exit code 2 and says to
+pass `-y`. `--dry-run` shows the counts instead of asking, and `--json` reports them as `kinds`
+and `routes`. Files you name one by one never ask, nor does a folder of one kind, nor
+`flatten` (which takes `-y` as well as `-f`), `info` or `metadata`. Still and animated images
+count as one kind: `rotate`, `edit`, `resize` and `convert` handle them with the same code.
 
 ### Scripting: exit codes and `--json`
 
@@ -285,8 +443,8 @@ Exit codes:
 | Code | When |
 |---|---|
 | 0 | every file succeeded or already existed ("Exists"), including when a directory search skipped files it can't use |
-| 1 | any file failed, or a file you named was skipped (not a video, already in that format, too short, not animated), or a path doesn't exist |
-| 2 | the options were refused before anything ran |
+| 1 | any file failed, or a file you named was skipped (not a video, already in that format, too short, not animated, its output name taken by another input's), or a path doesn't exist, or you answered "no" |
+| 2 | the options were refused before anything ran, or a folder of mixed files needed `-y` and there was no terminal to ask on |
 
 With `--json`, a command prints one report on stdout; logging and warnings go to stderr. Every
 command that processes files (`convert`, `resize`, `rotate`, `edit`, `frames`, `favicon`,
@@ -295,14 +453,18 @@ functions in `sashimi.api` also return:
 
 ```json
 {"schema": 1, "command": "convert", "dry_run": false,
+ "kinds": {"image": 2}, "routes": {"image": 2},
+ "outputs_left_out": [], "clash_note": null,
  "summary": {"total_found": 2, "success": 2, "exists": 0, "skipped": 0, "errors": 0,
              "time_taken_seconds": 0.4, "avg_time_seconds": 0.2},
- "results": [{"file": "a.png", "status": "success", "message": "Converted to a.webp", "output": "a.webp"}]}
+ "results": [{"file": "a.png", "status": "success", "message": "Converted to a.png.webp", "output": "a.png.webp"}]}
 ```
 
 `status` is `success`, `exists`, `skipped` or `error`. Every report also has `"dry_run": false`
-(true with `--dry-run`, when the results are the plan), and `flatten` adds `renamed` and
-`removed_dirs`. MP4 conversions say in the message when the streams were copied. `info --json` prints the probe result, `metadata --json` the metadata summary, and `config ... --json` its own data.
+(true with `--dry-run`, when the results are the plan); `kinds` and `routes` count the files the
+command planned to process, `outputs_left_out` lists the command's own earlier outputs a folder
+search left out (see "Where outputs go"), and `clash_note` names the pattern that gave inputs one
+output name, or is null. `flatten` adds `renamed` and `removed_dirs` instead. MP4 conversions say in the message when the streams were copied. `info --json` prints the probe result, `metadata --json` the metadata summary, and `config ... --json` its own data.
 
 ## Development
 

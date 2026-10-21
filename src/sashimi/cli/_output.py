@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import pathlib
 import time
@@ -45,6 +46,17 @@ def fail(message: str, code: int = 2) -> NoReturn:
     raise typer.Exit(code=code)
 
 
+@contextlib.contextmanager
+def refusals() -> Iterator[None]:
+    """Turns options a batch function refuses (:class:`~sashimi.errors.UserInputError`) into an error and exit code 2."""
+    from sashimi.errors import UserInputError
+
+    try:
+        yield
+    except UserInputError as e:
+        fail(escape(e.user_message))
+
+
 def exit_on_invalid_options(err: ValidationError, flags: dict[str, str]) -> NoReturn:
     """Reports config validation errors (from CLI options or TOML files) without a traceback."""
     seen = set()
@@ -78,7 +90,7 @@ def warn_unknown_settings(path: pathlib.Path, keys: list[str], project: bool) ->
     if not keys:
         return
     dotted = next((key for key in keys if "." in key), None)
-    hint = f" Remove one with `sashimi config unset{'' if project else ' -g'} {dotted}`." if dotted else ""
+    hint = f" Remove one with `sashimi config unset{' --project' if project else ''} {dotted}`." if dotted else ""
     err_console.print(
         f"[yellow]Warning: {path} has settings sashimi doesn't use: {', '.join(keys)}; they're ignored.{hint}[/yellow]",
         highlight=False,
@@ -90,24 +102,57 @@ def print_json(payload: Any) -> None:
     print(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
+def every(count: int) -> str:
+    """How a question names `count` files: ``it``, ``both``, ``all 3``."""
+    return "it" if count == 1 else "both" if count == 2 else f"all {count}"
+
+
+def _stdin_is_terminal() -> bool:
+    import sys
+
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
 class BatchRunner:
     """
     Consumes a batch generator and renders a Rich progress bar (with per-file progress for long
     conversions), then one line for a single file or a summary and table for several, or the
     JSON report (:func:`sashimi.api.build_report`). With `dry_run` the results are the plan.
+    Problems come first: errors, then skipped files, then existing outputs, then successes.
 
-    Exit codes: 0 when every file succeeded or already existed, and when a directory search
-    skipped files it can't use; 1 when any file failed, or a file named on the command line was
-    skipped (unsupported, too short, not animated, …); 2 when the options were refused before any
-    file was processed.
+    Before a run over a folder whose files take different routes (photos and videos through
+    ``rotate``), it asks on stderr, unless `yes`; without a terminal to ask on it stops with exit
+    code 2. A dry run shows the counts instead of asking.
+
+    Exit codes: 0 when every file succeeded or already existed, when a file named on the command
+    line is already what the command makes ("Already JPEG"), and when a directory search skipped
+    files it can't use; 1 when any file failed, a file named on the command line was
+    skipped (unsupported, too short, not animated, its output name taken by another input's, …),
+    or the question was answered no; 2 when the options were refused before any file was
+    processed, including a mixed folder without -y and without a terminal.
     """
 
-    def __init__(self, command: str, title: str, json_output: bool, limit_output: int = 50, *, dry_run: bool = False):
+    def __init__(
+        self,
+        command: str,
+        title: str,
+        json_output: bool,
+        limit_output: int = 50,
+        *,
+        dry_run: bool = False,
+        yes: bool = False,
+        verb: str = "",
+    ):
         self.command = command
         self.title = f"{title} (dry run)" if dry_run else title
         self.json_output = json_output
         self.limit_output = limit_output
         self.dry_run = dry_run
+        self.yes = yes
+        self.verb = verb or f"{command} {{every}}"
         self._progress: Any = None
         self._task: Any = None
         self._current = ""
@@ -117,17 +162,58 @@ class BatchRunner:
         if self._progress is not None and self._task is not None and stage != "done":
             self._progress.update(self._task, description=f"{stage.capitalize()} {self._current}: {fraction:.0%}")
 
+    def _plan(self, generator: Any) -> Any:
+        """The batch's plan, or None for a plain generator; asks about mixed folders."""
+        from sashimi.api._batch import Batch
+        from sashimi.errors import UserInputError
+
+        if not isinstance(generator, Batch):
+            return None
+        try:
+            plan = generator.plan()
+        except UserInputError as e:
+            fail(escape(e.user_message))
+        if not (plan.searched and plan.mixed):
+            return plan
+        roots = [path for path in self._inputs if path.is_dir()]
+        shown = display_path(roots[0]) if len(roots) == 1 else ""
+        where = (
+            "These folders contain"
+            if len(roots) != 1
+            else "This folder contains"
+            if shown == "."
+            else f"{shown} contains"
+        )
+        doing = self.verb.format(every=every(len(plan.to_process)))
+        question = f"{where} {plan.describe()}; {doing}?"
+        if self.dry_run:
+            err_console.print(f"[bold]{escape(question[:-1])}[/bold] (without -y, sashimi asks first).")
+            return plan
+        if self.yes:
+            return plan
+        if not _stdin_is_terminal():
+            fail(
+                escape(f"{where} {plan.describe()}, which {self.command} handles differently. ")
+                + f"Pass -y to {escape(doing)}, or run in a terminal to be asked."
+            )
+        if not typer.confirm(question, default=False, err=True):
+            err_console.print("Nothing was changed.")
+            raise typer.Exit(code=1)
+        return plan
+
     def run(self, generator: Iterator[YieldType], inputs: Iterable[pathlib.Path] = ()) -> None:
-        """Runs the batch. `inputs` are the paths given on the command line, for the exit code."""
+        """Runs the batch. `inputs` are the paths given on the command line, for the exit code and the question."""
         from sashimi.api._consume import build_report
         from sashimi.errors import UserInputError
 
+        self._inputs = list(inputs)
+        plan = self._plan(generator)
         start_time = time.perf_counter()
         results: list[tuple[pathlib.Path, str, str, pathlib.Path | None]] = []
         try:
             first = next(generator, 0)
         except UserInputError as e:
-            fail(e.user_message)
+            fail(escape(e.user_message))
         total_files = first if isinstance(first, int) else 0
         started: set[pathlib.Path] = set()
 
@@ -182,8 +268,9 @@ class BatchRunner:
                 self._progress = None
 
         elapsed = time.perf_counter() - start_time
-        report = build_report(self.command, total_files, results, elapsed, dry_run=self.dry_run)
-        named = {path for path in inputs if not path.is_dir()}
+        report = build_report(self.command, total_files, results, elapsed, dry_run=self.dry_run, plan=plan)
+        done = set(plan.already_done) if plan is not None else set()
+        named = {path for path in self._inputs if not path.is_dir() and path not in done}
         failed = report["summary"]["errors"] > 0 or any(
             status == "skipped" and path in named for path, status, _, _ in results
         )
@@ -191,29 +278,85 @@ class BatchRunner:
             print_json(report)
             raise typer.Exit(code=1 if failed else 0)
 
+        clashed = {item.source for item in plan.clashes} if plan is not None else set()
         styles = DRY_RUN_STYLES if self.dry_run else STATUS_STYLES
+        results.sort(key=lambda r: (STATUS_PRIORITY.get(r[1], 4), r[0] not in clashed, r[0]))
         if not results:
-            console.print("[yellow]No matching files found to process.[/yellow]")
+            console.print(f"[yellow]{escape(self._nothing_found(plan))}[/yellow]")
         elif len(results) == 1:
             path, status, message, _ = results[0]
-            style = styles.get(status, status)
+            style = self._style(styles, status, path in clashed)
             timing = "" if self.dry_run else f" [dim]({elapsed:.1f}s)[/dim]"
             console.print(f"{style}: [cyan]{escape(display_path(path))}[/cyan]: {escape(message)}{timing}")
         elif self.dry_run:
-            for path, status, message, _ in sorted(results, key=lambda r: r[0])[: self.limit_output]:
-                console.print(
-                    f"{styles.get(status, status)}: [cyan]{escape(display_path(path))}[/cyan]: {escape(message)}"
-                )
-            if len(results) > self.limit_output:
-                console.print(
-                    f"[dim]Showing the first {self.limit_output} of {len(results)}. Use --limit-output to show more.[/dim]"
-                )
+            for path, status, message, _ in results[: self.limit_output]:
+                style = self._style(styles, status, path in clashed)
+                console.print(f"{style}: [cyan]{escape(display_path(path))}[/cyan]: {escape(message)}")
+            self._more(results)
         else:
-            self._print_summary(results, report["summary"])
+            self._print_summary(results, report["summary"], clashed)
+        self._notes(plan)
         if failed:
             raise typer.Exit(code=1)
 
-    def _print_summary(self, results: list, summary: dict[str, Any]) -> None:
+    @staticmethod
+    def _style(styles: dict[str, str], status: str, clashed: bool) -> str:
+        style = styles.get(status, f"[bold white]{status.capitalize()}[/bold white]")
+        return f"{style} [yellow](name clash)[/yellow]" if clashed else style
+
+    def _more(self, results: list) -> None:
+        if len(results) <= self.limit_output:
+            return
+        hidden: dict[str, int] = {}
+        for _, status, _, _ in results[self.limit_output :]:
+            hidden[status] = hidden.get(status, 0) + 1
+        counts = ", ".join(f"{number} {status}" for status, number in hidden.items())
+        console.print(
+            f"[dim]Showing the first {self.limit_output} of {len(results)} ({counts} not shown). "
+            "Use --limit-output to show more.[/dim]"
+        )
+
+    def _nothing_found(self, plan: Any) -> str:
+        """What to say when no file was found, naming what the command works on."""
+        if plan is None or not plan.accepts:
+            return "No matching files found to process."
+        command = "thumbs" if self.command == "animated_thumbs" else self.command
+        found = f"Found no files {command} works on ({plan.accepts})"
+        if plan.in_output_dir:
+            return f"{found} outside the output folder."
+        if plan.searched and not plan.recursive:
+            return f"{found}; -r searches subfolders too."
+        return f"{found}."
+
+    def _notes(self, plan: Any) -> None:
+        """
+        Lines under the results: earlier outputs of this command left out, files left out because
+        they're in the output folder, then the pattern that made names clash.
+        """
+        if plan is None:
+            return
+        if plan.in_output_dir:
+            count = len(plan.in_output_dir)
+            shown = ", ".join(display_path(path) for path in plan.in_output_dir[:3])
+            more = f" and {count - 3} more" if count > 3 else ""
+            what = "1 file" if count == 1 else f"{count} files"
+            console.print(
+                f"[dim]Left out {what} already in the output folder: {escape(shown)}{more}. "
+                "Name a file to process it anyway.[/dim]"
+            )
+        if plan.left_out:
+            shown = ", ".join(display_path(path) for path, _ in plan.left_out[:3])
+            more = f" and {len(plan.left_out) - 3} more" if len(plan.left_out) > 3 else ""
+            count = len(plan.left_out)
+            what = "1 earlier output" if count == 1 else f"{count} earlier outputs"
+            console.print(
+                f"[dim]Left out {what} of this command, made from other files of this run: {escape(shown)}{more}. "
+                "To process one anyway, give it on its own.[/dim]"
+            )
+        if plan.clash_note:
+            console.print(f"[yellow]{escape(plan.clash_note)}[/yellow]")
+
+    def _print_summary(self, results: list, summary: dict[str, Any], clashed: set[pathlib.Path]) -> None:
         from rich.panel import Panel
         from rich.table import Table
 
@@ -229,17 +372,13 @@ class BatchRunner:
         console.print(Panel(grid, title=f"{self.title} summary", border_style="blue", expand=False))
         console.print()
 
-        results.sort(key=lambda r: (STATUS_PRIORITY.get(r[1], 4), r[0]))
         table = Table(show_header=True, header_style="bold magenta", expand=False)
         table.add_column("File", style="cyan", overflow="ellipsis")
         table.add_column("Status", style="magenta")
         table.add_column("Details", style="green", overflow="fold")
         for path, status, message, _ in results[: self.limit_output]:
-            style = STATUS_STYLES.get(status, f"[bold white]{status.capitalize()}[/bold white]")
-            table.add_row(escape(display_path(path)), style, escape(message))
-        console.print(table)
-        if len(results) > self.limit_output:
-            console.print(
-                f"[dim]Showing first {self.limit_output} of {len(results)} results. "
-                "Use --limit-output to show more.[/dim]"
+            table.add_row(
+                escape(display_path(path)), self._style(STATUS_STYLES, status, path in clashed), escape(message)
             )
+        console.print(table)
+        self._more(results)

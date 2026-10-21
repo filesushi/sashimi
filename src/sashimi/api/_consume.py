@@ -6,7 +6,7 @@ import time
 from collections.abc import Iterable, Iterator
 from typing import Any
 
-from sashimi.api._batch import ResultTuple, YieldType
+from sashimi.api._batch import Batch, BatchPlan, ResultTuple, YieldType
 
 REPORT_SCHEMA = 1
 """Version of the report layout below; it changes only when a key is renamed or removed."""
@@ -20,17 +20,28 @@ def build_report(
     seconds: float,
     *,
     dry_run: bool = False,
+    plan: BatchPlan | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
     """
     The report every batch operation returns, and the CLI prints with ``--json``::
 
         {"schema": 1, "command": "convert", "dry_run": false,
+         "kinds": {"video": 44, "image": 23}, "routes": {"transform": 44, "edit": 23},
+         "outputs_left_out": [{"file", "made_from"}, ...], "in_output_dir": ["...", ...],
+         "already_done": ["...", ...],
+         "clash_note": "..." or null,
          "summary": {"total_found", "success", "exists", "skipped", "errors", "time_taken_seconds", "avg_time_seconds"},
          "results": [{"file", "status", "message", "output"}, ...]}
 
     ``dry_run`` is true when nothing was written and the results say what would have been.
-    `extra` keys are added at the top level (``flatten`` adds ``renamed`` and ``removed_dirs``).
+    With the batch's `plan`, ``kinds`` and ``routes`` count the files it planned to process,
+    ``outputs_left_out`` lists the command's own earlier outputs the run left out,
+    each with the file it was made from, ``in_output_dir`` the files found inside ``output_dir``
+    and left out, ``already_done`` the files named directly that are already what the command
+    makes (``Already JPEG``; skipped, but not a problem), and ``clash_note`` names the pattern that gave inputs
+    one output name, and where it was set. `extra` keys are added at the top level (``flatten`` adds
+    ``renamed`` and ``removed_dirs``).
     """
     rows = list(results)
     counts = {status: 0 for status in STATUSES}
@@ -41,6 +52,18 @@ def build_report(
         "schema": REPORT_SCHEMA,
         "command": command,
         "dry_run": dry_run,
+        **(
+            {
+                "kinds": plan.kinds,
+                "routes": plan.routes,
+                "outputs_left_out": [{"file": str(f), "made_from": str(s)} for f, s in plan.left_out],
+                "in_output_dir": [str(f) for f in plan.in_output_dir],
+                "already_done": [str(f) for f in plan.already_done],
+                "clash_note": plan.clash_note,
+            }
+            if plan is not None
+            else {}
+        ),
         **extra,
         "summary": {
             "total_found": total_found,
@@ -98,4 +121,6 @@ def consume_generator(
         if pbar:
             pbar.close()
 
-    return build_report(command or desc, total_files, results, time.perf_counter() - start_time, dry_run=dry_run)
+    plan = gen.plan() if isinstance(gen, Batch) else None
+    elapsed = time.perf_counter() - start_time
+    return build_report(command or desc, total_files, results, elapsed, dry_run=dry_run, plan=plan)

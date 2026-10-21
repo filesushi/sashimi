@@ -12,7 +12,7 @@ from typing import Annotated, Any, List, Optional
 import typer
 
 from sashimi.cli import _options as opt
-from sashimi.cli._output import BatchRunner, err_console, exit_on_invalid_options, fail, warn_unused
+from sashimi.cli._output import BatchRunner, err_console, exit_on_invalid_options, fail, refusals, warn_unused
 
 MANIFEST = "Web app manifest"
 
@@ -56,7 +56,7 @@ FLAGS = {
     "short_name": "--short-name",
     "theme_color": "--theme-color",
     "manifest_background_color": "--manifest-background",
-    "target": "--format",
+    "target": "--output-format",
     "rotate": "angle",
     "flip": "--flip",
 }
@@ -70,6 +70,7 @@ class Target(str, Enum):
     gif = "gif"
     bmp = "bmp"
     tiff = "tiff"
+    tif = "tif"
     ico = "ico"
     webm = "webm"
     mp4 = "mp4"
@@ -88,9 +89,18 @@ class ImageFormat(str, Enum):
     gif = "gif"
     bmp = "bmp"
     tiff = "tiff"
+    tif = "tif"
 
 
-class VideoFormat(str, Enum):
+class RotateFormat(str, Enum):
+    jpeg = "jpeg"
+    jpg = "jpg"
+    png = "png"
+    webp = "webp"
+    gif = "gif"
+    bmp = "bmp"
+    tiff = "tiff"
+    tif = "tif"
     mp4 = "mp4"
     webm = "webm"
 
@@ -147,12 +157,30 @@ def _image_options(
 
 
 def convert_cmd(
-    path: Annotated[pathlib.Path, typer.Argument(help="File or directory to convert.", show_default=False)],
-    target: Annotated[Target, typer.Argument(help="Output format.", show_default=False)],
-    output: Annotated[Optional[pathlib.Path], opt.output_option("<name>.<format> next to the input")] = None,
-    output_dir: opt.OutputDir = None,
+    arguments: Annotated[
+        List[str],
+        typer.Argument(
+            metavar="PATH... FORMAT",
+            help="Files or folders to convert, then the output format, written with the extension as typed: "
+            "jpeg (or jpg), png, webp, gif, bmp, tiff (or tif), ico, webm, mp4, mp3, m4a, wav, ogg or flac.",
+            show_default=False,
+        ),
+    ],
+    output_format: Annotated[
+        Optional[Target],
+        opt.output_format_option(
+            "The output format, instead of the last argument, for when a file or folder is named like a format: "
+            "[cyan]sashimi convert webp --output-format jpeg[/cyan] converts the folder webp "
+            "[default: the last argument]."
+        ),
+    ] = None,
+    output: Annotated[Optional[pathlib.Path], opt.output_option()] = None,
+    output_name: Annotated[Optional[str], opt.output_name_option("convert", "{input_name}.{output_ext}")] = None,
+    output_dir: Annotated[Optional[pathlib.Path], opt.output_dir_option("convert")] = None,
+    no_output_dir: opt.NoOutputDir = False,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
+    yes: opt.Yes = False,
     dry_run: opt.DryRun = False,
     workers: opt.Workers = None,
     json_output: opt.JsonOutput = False,
@@ -201,11 +229,27 @@ def convert_cmd(
     [bold]Videos[/bold] → gif, webp (animated), webm, mp4; [bold]animated GIFs[/bold] → webm, mp4
     [bold]Videos and audio[/bold] → mp3, m4a, wav, ogg, flac
 
-    Writes [cyan]<name>.<format>[/cyan] next to each input (.jpg for JPEG, .tif for TIFF), under
-    --output-dir, or to -o for a single file. Files already in the target format are skipped.
+    Give the files or folders, then the format, as cp takes its destination last: [cyan]sashimi
+    convert *.png webp[/cyan]. Writes [cyan]photo.png.webp[/cyan] for photo.png, with the
+    extension as you type the format (jpeg or jpg), next to each input, under --output-dir, or to
+    -o for a single file ([cyan]--output-name '{input_stem}.{output_ext}'[/cyan] for photo.webp).
+    Files already in the target format, and this conversion's own earlier outputs in a searched
+    folder, are skipped. A folder whose files convert differently (photos and videos to WebP) asks
+    first unless -y.
+
+    To MP4, a video keeps its first video and audio track, copied when they already fit MP4 and
+    re-encoded otherwise; [bold]sashimi remux --output-format mp4[/bold] instead copies every
+    stream as it is. Both write [cyan]clip.mkv.mp4[/cyan], so each reports the other's output as
+    existing.
     """
-    t = "jpeg" if target is Target.jpg else target.value
-    opt.single_file_or_fail([path], output)
+    from sashimi.config._base import normalize_target
+
+    paths, typed_target = opt.paths_then_format(
+        arguments, [member.value for member in Target], opt.enum_value(output_format), "convert"
+    )
+    target = Target(typed_target)
+    t = normalize_target(target.value)
+    opt.single_file_or_fail(paths, output)
     from sashimi.cli import _limits
 
     limits = _limits.resolve(max_pixels=max_pixels, max_frame_bytes=max_frame_bytes)
@@ -244,7 +288,8 @@ def convert_cmd(
     extensions = None
     for kind, model in models.items():
         data, _ = opt.split_options(model, options)
-        if kind == "video" and "image" in models and not (path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS):
+        named_video = any(path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS for path in paths)
+        if kind == "video" and "image" in models and not named_video:
             from pydantic import ValidationError
 
             try:
@@ -260,38 +305,56 @@ def convert_cmd(
         else:
             configs[kind] = _validate(model, data)
 
-    runner = BatchRunner("convert", f"Convert to {t.upper()}", json_output, limit_output, dry_run=dry_run)
-    gen = convert_files_generator(
-        path,
-        t,  # type: ignore[arg-type]
-        image_config=configs.get("image") if t != "ico" else None,
-        ico_config=configs.get("image") if t == "ico" else None,
-        video_config=configs.get("video"),
-        audio_config=configs.get("audio"),
-        recursive=recursive,
-        force=force,
-        max_workers=workers,
-        extensions=extensions,
-        on_file_progress=runner.file_progress,
-        output=output,
-        output_dir=output_dir,
+    runner = BatchRunner(
+        "convert",
+        f"Convert to {t.upper()}",
+        json_output,
+        limit_output,
         dry_run=dry_run,
-        limits=limits,
+        yes=yes or force,
+        verb=f"convert {{every}} to {t.upper()}",
     )
-    runner.run(gen, [path])
+    naming = opt.naming_args("convert", output_name, output)
+    with refusals():
+        gen = convert_files_generator(
+            paths,
+            target.value,  # type: ignore[arg-type]
+            image_config=configs.get("image") if t != "ico" else None,
+            ico_config=configs.get("image") if t == "ico" else None,
+            video_config=configs.get("video"),
+            audio_config=configs.get("audio"),
+            recursive=recursive,
+            force=force,
+            max_workers=workers,
+            extensions=extensions,
+            on_file_progress=runner.file_progress,
+            output=output,
+            **opt.output_dir_args("convert", output_dir, no_output_dir, output),
+            dry_run=dry_run,
+            limits=limits,
+            **naming,
+        )
+    runner.run(gen, paths)
 
 
 def resize_cmd(
-    path: Annotated[pathlib.Path, typer.Argument(help="Image file or directory.", show_default=False)],
+    paths: Annotated[List[pathlib.Path], typer.Argument(help="Image files or directories.", show_default=False)],
     width: opt.FitWidth = None,
     height: opt.FitHeight = None,
     output_format: Annotated[
-        Optional[ImageFormat], opt.format_option("Output format [default: same as input].")
+        Optional[ImageFormat],
+        opt.output_format_option(
+            "Output format: jpeg (or jpg), png, webp, gif, bmp or tiff (or tif), written with the extension as "
+            "typed [default: same as input]."
+        ),
     ] = None,
-    output: Annotated[Optional[pathlib.Path], opt.output_option("<name>.resized.<ext> next to the input")] = None,
-    output_dir: opt.OutputDir = None,
+    output: Annotated[Optional[pathlib.Path], opt.output_option()] = None,
+    output_name: Annotated[Optional[str], opt.output_name_option("resize", "{input_name}.{role}.{output_ext}")] = None,
+    output_dir: Annotated[Optional[pathlib.Path], opt.output_dir_option("resize")] = None,
+    no_output_dir: opt.NoOutputDir = False,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
+    yes: opt.Yes = False,
     dry_run: opt.DryRun = False,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
@@ -313,8 +376,11 @@ def resize_cmd(
 ):
     """
     Shrink images to fit --width and/or --height (never upscaling), keeping their format unless
-    --format is given. Writes [cyan]<name>.resized.<ext>[/cyan] next to each image, under
-    --output-dir, or to -o for a single image (whose extension sets the format if --format doesn't).
+    --output-format is given, e.g. [cyan]sashimi resize *.jpg -w 800[/cyan]. Writes
+    [cyan]photo.jpg.resized.jpg[/cyan] for photo.jpg
+    ([cyan]photo.jpg.resized.webp[/cyan] with --output-format webp) next to each image, under
+    --output-dir, or to -o for a single image (whose extension sets the format if
+    --output-format doesn't). Videos aren't supported yet.
     """
     from sashimi.api.resize import resize_images_generator
     from sashimi.cli import _limits
@@ -323,7 +389,7 @@ def resize_cmd(
 
     if width is None and height is None:
         fail("Give --width and/or --height to resize to.")
-    opt.single_file_or_fail([path], output)
+    opt.single_file_or_fail(paths, output)
     limits = _limits.resolve(max_pixels=max_pixels)
     image_suffixes = {f".{name}": normalize_target(name) for name in ImageFormat.__members__} | {".tif": "tiff"}
     fmt = normalize_target(opt.format_from_output(opt.enum_value(output_format), output, image_suffixes))
@@ -351,84 +417,187 @@ def resize_cmd(
             warn_unused(_flags(skipped), f"{source_format.upper()} images")
         return configs[source_format]
 
-    runner = BatchRunner("resize", "Resize", json_output, limit_output, dry_run=dry_run)
-    gen = resize_images_generator(
-        path,
-        configs[targets[0]] if fmt else config_for,
-        recursive=recursive,
-        force=force,
-        on_file_progress=runner.file_progress,
-        output=output,
-        output_dir=output_dir,
-        dry_run=dry_run,
-        limits=limits,
-    )
-    runner.run(gen, [path])
+    runner = BatchRunner("resize", "Resize", json_output, limit_output, dry_run=dry_run, yes=yes or force)
+    naming = opt.naming_args("resize", output_name, output)
+    with refusals():
+        gen = resize_images_generator(
+            paths,
+            configs[targets[0]] if fmt else config_for,
+            output_ext=opt.enum_value(output_format),
+            recursive=recursive,
+            force=force,
+            on_file_progress=runner.file_progress,
+            output=output,
+            **opt.output_dir_args("resize", output_dir, no_output_dir, output),
+            dry_run=dry_run,
+            limits=limits,
+            **naming,
+        )
+    runner.run(gen, paths)
 
 
 def rotate_cmd(
-    path: Annotated[pathlib.Path, typer.Argument(help="Video file or directory.", show_default=False)],
-    angle: Annotated[Angle, typer.Argument(help="Clockwise rotation in degrees.")] = Angle.a90,
-    flip: Annotated[Flip, typer.Option("--flip", help="Mirror the picture.", rich_help_panel=opt.GENERAL)] = Flip.none,
-    output_format: Annotated[Optional[VideoFormat], opt.format_option("Output format [default: mp4].")] = None,
-    output: Annotated[Optional[pathlib.Path], opt.output_option("<name>.rotated.mp4 next to the input")] = None,
-    output_dir: opt.OutputDir = None,
+    arguments: Annotated[
+        List[str],
+        typer.Argument(
+            metavar="PATH... [ANGLE]",
+            help="Images, animations, videos or folders, then the clockwise angle: 0, 90, 180 or 270, "
+            "or 90 when left out.",
+            show_default=False,
+        ),
+    ],
+    angle_option: Annotated[
+        Optional[Angle],
+        opt.option(
+            "--angle",
+            metavar="ANGLE",
+            help="The angle, instead of the last argument, for when a file or folder is named like one: "
+            "[cyan]sashimi rotate 90 --angle 180[/cyan] rotates the folder 90 [default: the last argument, or 90].",
+            panel=opt.GENERAL,
+        ),
+    ] = None,
+    flip: Annotated[
+        Flip,
+        opt.option(
+            "--flip", metavar="DIRECTION", help="Mirror the picture: none, horizontal or vertical.", panel=opt.GENERAL
+        ),
+    ] = Flip.none,
+    output_format: Annotated[
+        Optional[RotateFormat],
+        opt.output_format_option(
+            "Output format, written with the extension as typed: an image format (jpeg or jpg, png, webp, "
+            "gif, bmp, tiff or tif) rotates only images (png is lossless), mp4 or webm only videos "
+            "[default: images keep theirs, videos mp4]."
+        ),
+    ] = None,
+    output: Annotated[Optional[pathlib.Path], opt.output_option()] = None,
+    output_name: Annotated[Optional[str], opt.output_name_option("rotate", "{input_name}.{role}.{output_ext}")] = None,
+    output_dir: Annotated[Optional[pathlib.Path], opt.output_dir_option("rotate")] = None,
+    no_output_dir: opt.NoOutputDir = False,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
+    yes: opt.Yes = False,
     dry_run: opt.DryRun = False,
     workers: opt.Workers = None,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
+    quality: Annotated[
+        Optional[str],
+        opt.option(
+            "--quality",
+            "-q",
+            help="[Image] JPEG/WebP quality: 92, 92% or 0.92 [default: 92, high, since the image is re-encoded].",
+            panel=opt.IMAGE,
+        ),
+    ] = None,
     crf: opt.Crf = None,
     preset: opt.PresetOpt = None,
     speed: opt.Speed = None,
     audio_bitrate: opt.AudioBitrate = None,
     mute: opt.Mute = False,
     metadata: opt.MetadataOpt = None,
+    max_pixels: opt.MaxPixels = None,
+    max_animation_bytes: opt.MaxAnimationBytes = None,
 ):
     """
-    Rotate (clockwise) and/or flip videos, re-encoding them. Writes
-    [cyan]<name>.rotated.mp4[/cyan] next to each video, under --output-dir, or to -o for a single
-    video.
+    Rotate (clockwise) and/or flip photos, animated GIFs and WebPs (every frame) and videos:
+    give the files or folders, then the angle ([cyan]sashimi rotate *.jpg 180[/cyan]; 90 when
+    left out). Images go through the same code as [bold]sashimi edit --rotate[/bold] and keep their format
+    (JPEGs are re-saved at high quality; --output-format png keeps every pixel); videos are
+    re-encoded as MP4. Writes [cyan]photo.jpg.rotated.jpg[/cyan] for photo.jpg
+    ([cyan]photo.jpg.rotated.png[/cyan] with --output-format png, [cyan]clip.mkv.rotated.mp4[/cyan]
+    for clip.mkv) next to each file, under --output-dir, or to -o for a single file. A folder of
+    both images and videos asks first unless -y.
     """
-    from sashimi.api.transform import transform_videos_generator
+    from sashimi.api.transform import rotate_files_generator
     from sashimi.cli import _limits
-    from sashimi.config import VIDEO_TRANSFORM
+    from sashimi.cli.edit_cmd import _configs
+    from sashimi.config import IMAGE_EDIT, VIDEO_TRANSFORM
+    from sashimi.config._base import normalize_target
 
-    opt.single_file_or_fail([path], output)
-    limits = _limits.resolve()
-    fmt = opt.format_from_output(opt.enum_value(output_format), output, {".mp4": "mp4", ".webm": "webm"}) or "mp4"
-    model = VIDEO_TRANSFORM.model_for(target=fmt)
-    options = {
-        "target": fmt, "rotate": int(angle.value), "flip": flip.value, "crf": crf,
-        "preset": opt.enum_value(preset), "speed": speed, "audio_bitrate_kbps": audio_bitrate, "mute": mute or None,
-        "metadata": opt.enum_value(metadata),
-    }  # fmt: skip
-    data, unused = opt.split_options(model, options)
-    warn_unused(_flags(unused), f"{fmt.upper()} output")
-    config = _validate(model, data)
-    runner = BatchRunner("rotate", "Rotate", json_output, limit_output, dry_run=dry_run)
-    gen = transform_videos_generator(
-        path,
-        config,
-        recursive=recursive,
-        force=force,
-        max_workers=workers,
-        on_file_progress=runner.file_progress,
-        output=output,
-        output_dir=output_dir,
-        dry_run=dry_run,
-        limits=limits,
+    paths, typed_angle = opt.paths_then_angle(
+        arguments, [member.value for member in Angle], opt.enum_value(angle_option), Angle.a90.value, "rotate"
     )
-    runner.run(gen, [path])
+    angle = Angle(typed_angle)
+    opt.single_file_or_fail(paths, output)
+    limits = _limits.resolve(max_pixels=max_pixels, max_animation_bytes=max_animation_bytes)
+    suffixes = {f".{member.value}": member.value for member in RotateFormat}
+    typed = opt.format_from_output(opt.enum_value(output_format), output, suffixes)
+    fmt = normalize_target(typed)
+    images = fmt is None or fmt in IMAGE_EDIT.targets
+    videos = fmt is None or fmt in VIDEO_TRANSFORM.targets
+    turn = int(angle.value)
+    image_options = {
+        "rotate": turn,
+        "flip": flip.value,
+        "quality": opt.parse_quality(quality),
+        "metadata": opt.enum_value(metadata),
+    }
+    video_options = {
+        "rotate": turn, "flip": flip.value, "crf": crf, "preset": opt.enum_value(preset), "speed": speed,
+        "audio_bitrate_kbps": audio_bitrate, "mute": mute or None, "metadata": opt.enum_value(metadata),
+    }  # fmt: skip
+    if turn == 0 and flip is Flip.none:
+        fail("Choose a rotation or a flip.")
+    unused = []
+    if not images:
+        unused += [field for field in ("quality",) if image_options[field] is not None]
+    if not videos:
+        unused += [f for f in ("crf", "preset", "speed", "audio_bitrate_kbps", "mute") if video_options[f] is not None]
+    warn_unused(_flags(unused), f"{str(fmt).upper()} output")
+    video_config = None
+    if videos:
+        model = VIDEO_TRANSFORM.model_for(target=fmt if fmt in VIDEO_TRANSFORM.targets else "mp4")
+        data, _ = opt.split_options(model, video_options)
+        video_config = _validate(model, data)
+    image_config: Any = None
+    if images:
+        configs, config_for = _configs(IMAGE_EDIT, opt.given(image_options), fmt, "images")
+        image_config = configs[fmt] if fmt else config_for
+    runner = BatchRunner(
+        "rotate",
+        "Rotate",
+        json_output,
+        limit_output,
+        dry_run=dry_run,
+        yes=yes or force,
+        verb="rotate {every}",
+    )
+    naming = opt.naming_args("rotate", output_name, output)
+    from sashimi.errors import UserInputError
+
+    try:
+        gen = rotate_files_generator(
+            paths,
+            turn,
+            flip.value,
+            output_format=typed,
+            image_config=image_config,
+            video_config=video_config,
+            recursive=recursive,
+            force=force,
+            max_workers=workers,
+            on_file_progress=runner.file_progress,
+            output=output,
+            **opt.output_dir_args("rotate", output_dir, no_output_dir, output),
+            dry_run=dry_run,
+            limits=limits,
+            **naming,
+        )
+    except UserInputError as e:
+        fail(e.user_message)
+    runner.run(gen, paths)
 
 
 def favicon_cmd(
     paths: Annotated[List[pathlib.Path], typer.Argument(help="Image files or directories.", show_default=False)],
-    output: Annotated[Optional[pathlib.Path], opt.output_option("<name>.favicons.zip next to the image")] = None,
-    output_dir: opt.OutputDir = None,
+    output: Annotated[Optional[pathlib.Path], opt.output_option()] = None,
+    output_name: Annotated[Optional[str], opt.output_name_option("favicon", "{input_name}.{role}.{output_ext}")] = None,
+    output_dir: Annotated[Optional[pathlib.Path], opt.output_dir_option("favicon")] = None,
+    no_output_dir: opt.NoOutputDir = False,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
+    yes: opt.Yes = False,
     dry_run: opt.DryRun = False,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
@@ -475,8 +644,8 @@ def favicon_cmd(
     """
     Make a favicon pack for each image: a .zip with [cyan]favicon.ico[/cyan], PNG icons (16, 32, 48,
     180 for Apple and 192, 512 for web apps), [cyan]site.webmanifest[/cyan] and [cyan]favicon.html[/cyan]
-    with the <head> tags to paste. Writes [cyan]<name>.favicons.zip[/cyan] next to each image,
-    under --output-dir, or to -o for a single image.
+    with the <head> tags to paste. Writes [cyan]logo.png.favicons.zip[/cyan] for logo.png, next
+    to each image, under --output-dir, or to -o for a single image.
     """
     from sashimi.api.favicon import make_favicon_packs_generator
     from sashimi.cli import _limits
@@ -495,16 +664,19 @@ def favicon_cmd(
         "manifest_background_color": manifest_background,
     }
     config = _validate(FaviconPackConfig, opt.given(options))
-    runner = BatchRunner("favicon", "Favicon packs", json_output, limit_output, dry_run=dry_run)
-    gen = make_favicon_packs_generator(
-        paths,
-        config,
-        recursive=recursive,
-        force=force,
-        on_file_progress=runner.file_progress,
-        output=output,
-        output_dir=output_dir,
-        dry_run=dry_run,
-        limits=limits,
-    )
+    runner = BatchRunner("favicon", "Favicon packs", json_output, limit_output, dry_run=dry_run, yes=yes or force)
+    naming = opt.naming_args("favicon", output_name, output)
+    with refusals():
+        gen = make_favicon_packs_generator(
+            paths,
+            config,
+            recursive=recursive,
+            force=force,
+            on_file_progress=runner.file_progress,
+            output=output,
+            **opt.output_dir_args("favicon", output_dir, no_output_dir, output),
+            dry_run=dry_run,
+            limits=limits,
+            **naming,
+        )
     runner.run(gen, paths)

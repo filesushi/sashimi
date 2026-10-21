@@ -10,10 +10,9 @@ from enum import Enum
 from typing import Annotated, Any, List, Optional
 
 import typer
-from typer.core import TyperCommand
 
 from sashimi.cli import _options as opt
-from sashimi.cli._output import BatchRunner, exit_on_invalid_options, fail, warn_ignored, warn_unused
+from sashimi.cli._output import BatchRunner, exit_on_invalid_options, fail, refusals, warn_ignored, warn_unused
 
 FLAGS = {
     "width": "--width",
@@ -21,7 +20,7 @@ FLAGS = {
     "rows": "--rows",
     "gap": "--gap",
     "quality": "--quality",
-    "target": "--format",
+    "target": "--output-format",
     "sample_duration": "--clip-length",
     "fps": "--fps",
     "loop": "--no-loop",
@@ -44,32 +43,22 @@ FLAGS = {
 
 class SheetFormat(str, Enum):
     jpeg = "jpeg"
+    jpg = "jpg"
     png = "png"
     webp = "webp"
     gif = "gif"
 
 
-class ThumbsCommand(TyperCommand):
+class ThumbsCommand(opt.KeptCommand):
     """Shows the sashimi.toml values that replace built-in defaults in ``sashimi thumbs --help``."""
 
-    def format_help(self, ctx: Any, formatter: Any) -> None:
+    def toml_notes(self, ctx: Any, raw: dict[str, Any]) -> dict[str, str]:
         from sashimi.cli import settings
-        from sashimi.cli._defaults import toml_notes, with_toml_note
+        from sashimi.cli._defaults import toml_notes
 
-        raw, _ = settings.read_config()
         builtin = settings.DEFAULT_CONFIG_DICT
         unchanged = all(raw.get(name, {}) == builtin.get(name, {}) for name in ("thumbs", "animated_thumbs"))
-        notes = {} if unchanged else toml_notes(raw)
-        original = {param: getattr(param, "help", None) for param in self.params}
-        try:
-            for param, help in original.items():
-                note = next((notes[name] for name in param.opts if name in notes), None)
-                if note is not None and help is not None:
-                    setattr(param, "help", with_toml_note(help, note))  # noqa: B010
-            return super().format_help(ctx, formatter)
-        finally:
-            for param, help in original.items():
-                setattr(param, "help", help)  # noqa: B010
+        return {} if unchanged else toml_notes(raw)
 
 
 def _option(*names: str, help: str, panel: str = opt.SHEET, **kwargs: Any) -> Any:
@@ -81,22 +70,34 @@ def thumbs_cmd(
     animated: Annotated[
         bool, _option("-a", "--animated", help="Animated WebP/GIF sheet of short clips.", panel=opt.GENERAL)
     ] = False,
-    output: Annotated[
-        Optional[pathlib.Path], opt.output_option("<name>.sheet.jpg (animated: <name>.animated-sheet.webp)")
+    output: Annotated[Optional[pathlib.Path], opt.output_option()] = None,
+    output_name: Annotated[
+        Optional[str],
+        opt.output_name_option(
+            "thumbs", "{input_name}.{role}.{output_ext}, with the role sheet, or animated-sheet for animated sheets"
+        ),
     ] = None,
-    output_dir: opt.OutputDir = None,
+    output_dir: Annotated[Optional[pathlib.Path], opt.output_dir_option("thumbs")] = None,
+    no_output_dir: opt.NoOutputDir = False,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
+    yes: opt.Yes = False,
     dry_run: opt.DryRun = False,
     workers: opt.Workers = None,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
     output_format: Annotated[
         Optional[SheetFormat],
-        _option("--format", help="jpeg, png or webp (still); webp or gif (animated) [default: jpeg, animated webp]."),
+        _option(
+            "--output-format",
+            metavar="FORMAT",
+            help="jpeg (or jpg), png or webp (still); webp or gif (animated), written with the extension "
+            "as typed [default: jpeg as .jpg, animated webp].",
+            panel=opt.GENERAL,
+        ),
     ] = None,
     width: Annotated[
-        Optional[int], _option("--width", help="Sheet width in pixels [default: 2560, animated 1280].")
+        Optional[int], _option("--width", "-w", help="Sheet width in pixels [default: 2560, animated 1280].")
     ] = None,
     cols: Annotated[
         Optional[str],
@@ -171,13 +172,16 @@ def thumbs_cmd(
     """
     Make video contact sheets: a header with the file's details above a grid of timestamped
     frames ([bold]--animated[/bold]: short looping clips, a 3x3 grid by default). Writes
-    [cyan]<name>.sheet.jpg[/cyan] ([cyan]<name>.animated-sheet.webp[/cyan]) next to each video,
-    under --output-dir, or to -o for a single video. Defaults come from sashimi.toml; see
-    [bold]sashimi config[/bold].
+    [cyan]clip.mp4.sheet.jpg[/cyan] for clip.mp4 ([cyan]clip.mp4.animated-sheet.webp[/cyan]) next
+    to each video, under --output-dir, or to -o for a single video; --output-name changes the
+    pattern, e.g. [cyan]'{input_name}.jpeg'[/cyan] for clip.mp4.jpeg, or
+    [cyan]'sheets/{input_name}.jpeg'[/cyan] for a sheets folder beside each video. Defaults come
+    from sashimi.toml; see [bold]sashimi config[/bold].
     """
     opt.single_file_or_fail(paths, output)
     suffixes = {".jpg": "jpeg", ".jpeg": "jpeg", ".png": "png", ".webp": "webp", ".gif": "gif"}
-    fmt = opt.format_from_output(output_format.value if output_format else None, output, suffixes)
+    typed = output_format.value if output_format else None
+    fmt = opt.format_from_output("jpeg" if typed == "jpg" else typed, output, suffixes)
     if not animated:
         warn_ignored(
             [
@@ -231,25 +235,34 @@ def thumbs_cmd(
     warn_unused([FLAGS.get(field, field) for field in unused], f"{config.target.upper()} sheets")
 
     extensions = settings.video_extensions()
+    naming = opt.naming_args("animated_thumbs" if animated else "thumbs", output_name, output)
     runner = BatchRunner(
-        "thumbs", "Animated sheets" if animated else "Contact sheets", json_output, limit_output, dry_run=dry_run
-    )
-    gen = make_thumbs_generator(
-        paths,
-        config,
-        recursive=recursive,
-        force=force,
-        max_workers=workers,
-        extensions=extensions or VIDEO_EXTENSIONS,
-        header_font=resources["header_font"],
-        timestamp_font=resources["timestamp_font"],
-        emoji_dir=resources["emoji_dir"],
-        on_file_progress=runner.file_progress,
-        output=output,
-        output_dir=output_dir,
+        "thumbs",
+        "Animated sheets" if animated else "Contact sheets",
+        json_output,
+        limit_output,
         dry_run=dry_run,
-        limits=limits,
+        yes=yes or force,
     )
+    with refusals():
+        gen = make_thumbs_generator(
+            paths,
+            config,
+            output_ext=typed if output is None else None,
+            recursive=recursive,
+            force=force,
+            max_workers=workers,
+            extensions=extensions or VIDEO_EXTENSIONS,
+            header_font=resources["header_font"],
+            timestamp_font=resources["timestamp_font"],
+            emoji_dir=resources["emoji_dir"],
+            on_file_progress=runner.file_progress,
+            output=output,
+            **opt.output_dir_args("animated_thumbs" if animated else "thumbs", output_dir, no_output_dir, output),
+            dry_run=dry_run,
+            limits=limits,
+            **naming,
+        )
     runner.run(gen, paths)
 
 
@@ -264,7 +277,7 @@ PREVIEW_FLAGS = {
     "fps": "--fps",
     "loop": "--no-loop",
     "quality": "--quality",
-    "target": "--format",
+    "target": "--output-format",
 }
 
 
@@ -285,12 +298,16 @@ PREVIEW = "Preview"
 def preview_cmd(
     paths: Annotated[List[pathlib.Path], typer.Argument(help="Video files or directories.", show_default=False)],
     output_format: Annotated[
-        Optional[PreviewFormat], _option("--format", help="webp or gif [default: webp].", panel=opt.GENERAL)
+        Optional[PreviewFormat],
+        _option("--output-format", metavar="FORMAT", help="webp or gif [default: webp].", panel=opt.GENERAL),
     ] = None,
-    output: Annotated[Optional[pathlib.Path], opt.output_option("<name>.preview.webp next to the video")] = None,
-    output_dir: opt.OutputDir = None,
+    output: Annotated[Optional[pathlib.Path], opt.output_option()] = None,
+    output_name: Annotated[Optional[str], opt.output_name_option("preview", "{input_name}.{role}.{output_ext}")] = None,
+    output_dir: Annotated[Optional[pathlib.Path], opt.output_dir_option("preview")] = None,
+    no_output_dir: opt.NoOutputDir = False,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
+    yes: opt.Yes = False,
     dry_run: opt.DryRun = False,
     workers: opt.Workers = None,
     json_output: opt.JsonOutput = False,
@@ -309,7 +326,7 @@ def preview_cmd(
         Optional[int], _option("--height", "-H", help="Maximum height in pixels [default: 360].", panel=PREVIEW)
     ] = None,
     width: Annotated[
-        Optional[int], _option("--width", help="Maximum width in pixels [default: no limit].", panel=PREVIEW)
+        Optional[int], _option("--width", "-w", help="Maximum width in pixels [default: no limit].", panel=PREVIEW)
     ] = None,
     crop: Annotated[
         Optional[Crop], _option("--crop", help="Crop the centre to this shape first [default: none].", panel=PREVIEW)
@@ -325,7 +342,8 @@ def preview_cmd(
     Make a short preview of each video: [bold]--samples[/bold] clips of [bold]--clip-length[/bold]
     seconds taken from across the video (skipping the first and last 10%), played one after
     another as an animated WebP or GIF. Writes
-    [cyan]<name>.preview.webp[/cyan] next to each video, under --output-dir, or to -o for a single video.
+    [cyan]clip.mp4.preview.webp[/cyan] for clip.mp4, next to each video, under --output-dir, or to
+    -o for a single video.
     """
     from sashimi.api.preview import make_previews_generator
     from sashimi.cli import _limits
@@ -356,17 +374,20 @@ def preview_cmd(
         config = model.model_validate(data)
     except ValidationError as e:
         exit_on_invalid_options(e, PREVIEW_FLAGS)
-    runner = BatchRunner("preview", "Previews", json_output, limit_output, dry_run=dry_run)
-    gen = make_previews_generator(
-        paths,
-        config,
-        recursive=recursive,
-        force=force,
-        max_workers=workers,
-        on_file_progress=runner.file_progress,
-        output=output,
-        output_dir=output_dir,
-        dry_run=dry_run,
-        limits=limits,
-    )
+    naming = opt.naming_args("preview", output_name, output)
+    runner = BatchRunner("preview", "Previews", json_output, limit_output, dry_run=dry_run, yes=yes or force)
+    with refusals():
+        gen = make_previews_generator(
+            paths,
+            config,
+            recursive=recursive,
+            force=force,
+            max_workers=workers,
+            on_file_progress=runner.file_progress,
+            output=output,
+            **opt.output_dir_args("preview", output_dir, no_output_dir, output),
+            dry_run=dry_run,
+            limits=limits,
+            **naming,
+        )
     runner.run(gen, paths)

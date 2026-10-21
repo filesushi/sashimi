@@ -30,7 +30,7 @@ def test_skip_reasons(tmp_path):
     (tmp_path / "b.txt").write_bytes(b"x")
     assert finals(convert_files_generator([tmp_path / "a.mp3", tmp_path / "b.txt"], "mp3")) == [
         ("a.mp3", "skipped", "Already MP3"),
-        ("b.txt", "skipped", "Can't convert .txt to MP3"),
+        ("b.txt", "skipped", "Can't convert .txt to MP3; converting to MP3 works on videos and audio files."),
     ]
 
 
@@ -50,18 +50,24 @@ def test_routes_each_kind(video_blob, audio_blob, tmp_path):
     (tmp_path / "song.mp3").write_bytes(audio_blob.read_bytes())
     Image.new("RGB", (20, 20), "blue").save(tmp_path / "pic.png")
 
-    assert finals(convert_files_generator(tmp_path, "ogg")) == [
+    assert finals(convert_files_generator(tmp_path, "ogg", output_name="{input_stem}.{output_ext}")) == [
         ("clip.mkv", "success", "Converted to clip.ogg"),
         ("song.mp3", "success", "Converted to song.ogg"),
     ]
-    assert sorted(finals(convert_files_generator(tmp_path, "gif"))) == [
+    assert sorted(finals(convert_files_generator(tmp_path, "gif", output_name="{input_stem}.{output_ext}"))) == [
         ("clip.mkv", "success", "Converted to clip.gif"),
         ("pic.png", "success", "Converted to pic.gif"),
     ]
-    assert finals(convert_files_generator(tmp_path / "clip.gif", "mp4")) == [
+    assert finals(convert_files_generator(tmp_path / "clip.gif", "mp4", output_name="{input_stem}.{output_ext}")) == [
         ("clip.gif", "success", "Converted to clip.mp4")
     ]
-    assert sorted(finals(convert_files_generator([tmp_path / "clip.mkv", tmp_path / "pic.png"], "webp"))) == [
+    assert sorted(
+        finals(
+            convert_files_generator(
+                [tmp_path / "clip.mkv", tmp_path / "pic.png"], "webp", output_name="{input_stem}.{output_ext}"
+            )
+        )
+    ) == [
         ("clip.mkv", "success", "Converted to clip.webp"),
         ("pic.png", "success", "Converted to pic.webp"),
     ]

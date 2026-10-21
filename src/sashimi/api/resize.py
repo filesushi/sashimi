@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pathlib
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
-from sashimi.api._batch import IMAGE_EXTENSIONS, FileProgress, PathInput, YieldType, output_name, run_batch
+from sashimi.api._batch import IMAGE_EXTENSIONS, Batch, FileProgress, PathInput, run_batch
 from sashimi.api._consume import consume_generator
-from sashimi.api.convert import _SAME_FORMAT, TARGET_SUFFIX
+from sashimi.api._kinds import kind_of, unsupported
+from sashimi.api._naming import NameTemplate, check_output_ext, naming, output_format
 from sashimi.config import ImageResizeConfig, Limits
 from sashimi.core.image import convert
 
@@ -44,10 +45,15 @@ def resize_images_generator(
     output_dir: PathInput | None = None,
     dry_run: bool = False,
     limits: Limits | None = None,
-) -> Iterator[YieldType]:
+    output_name: str | NameTemplate | None = None,
+    output_ext: str | None = None,
+) -> Batch:
     """
-    Shrinks every image found, writing ``<stem>.resized.<ext>`` next to it, under `output_dir`, or
-    to `output` for a single image.
+    Shrinks every image found, writing ``{input_name}.resized.{output_ext}`` next to it
+    (``a.png.resized.png``; ``a.png.resized.webp`` in WebP), under `output_dir`, or to `output`
+    for a single image. `output_ext` spells the extension when a format is chosen (``jpeg`` or
+    ``jpg``), and `output_name` sets the pattern, as for every batch
+    function (see :mod:`sashimi.api`).
 
     `config` is either one resize config for every image, or a function that returns the config
     for a format name. The function is called with each image's own format (see
@@ -57,22 +63,29 @@ def resize_images_generator(
     def config_for(path: pathlib.Path) -> ImageResizeConfig:
         return config(source_target(path)) if callable(config) else config
 
-    def name_for(p: pathlib.Path, stem: str) -> str:
-        target = config_for(p).target
-        ext = (
-            p.suffix if p.suffix.lower() in _SAME_FORMAT.get(target, {TARGET_SUFFIX[target]}) else TARGET_SUFFIX[target]
-        )
-        return output_name(stem, ext, "resized")
+    fixed = None
+    if not callable(config):
+        check_output_ext(output_ext, (config.target,))
+        fixed = output_format(config.target, typed=output_ext)
+    names = naming("resize", lambda p: output_format(config_for(p).target, p, output_ext), output_name, fixed=fixed)
+
+    def reject_reason(path: pathlib.Path) -> str:
+        if kind_of(path) == "video":
+            return "resize works on images and animations; videos aren't supported yet."
+        return unsupported("resize", "images and animations", path)
 
     return run_batch(
         paths,
+        names=names,
         extensions=extensions,
         recursive=recursive,
         force=force,
-        name_for=name_for,
         process=lambda src, dst, progress: convert(src, dst, config_for(src), limits=limits, on_progress=progress),
         success_message="Resized to {name}",
+        accepts="images and animations",
+        route=lambda _: "image",
         on_file_progress=on_file_progress,
+        reject_reason=reject_reason,
         output=output,
         output_dir=output_dir,
         dry_run=dry_run,

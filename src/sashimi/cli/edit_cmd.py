@@ -13,7 +13,7 @@ from typing import Annotated, Any, List, Optional
 import typer
 
 from sashimi.cli import _options as opt
-from sashimi.cli._output import BatchRunner, exit_on_invalid_options, fail, warn_unused
+from sashimi.cli._output import BatchRunner, exit_on_invalid_options, fail, refusals, warn_unused
 
 EDIT = "Edit"
 FRAMES = "Frames"
@@ -41,7 +41,7 @@ FLAGS = {
     "keep_icc": "--strip-icc",
     "keep": "--keep",
     "speed": "--speed",
-    "target": "--format",
+    "target": "--output-format",
 }
 """Config field to CLI flag, for `edit` and `frames`."""
 
@@ -146,11 +146,13 @@ def _configs(family: Any, options: dict[str, Any], fmt: str | None, kind: str) -
 
 class EditFormat(str, Enum):
     jpeg = "jpeg"
+    jpg = "jpg"
     png = "png"
     webp = "webp"
     gif = "gif"
     bmp = "bmp"
     tiff = "tiff"
+    tif = "tif"
 
 
 class FramesFormat(str, Enum):
@@ -170,7 +172,9 @@ Quality = Annotated[
 Lossless = Annotated[bool, _option("--lossless", help="WebP: lossless compression.", panel=SAVE)]
 WebpMethod = Annotated[
     Optional[int],
-    _option("--webp-method", min=0, max=6, help="WebP effort, 0 (fast) to 6 (small) [default: 4].", panel=SAVE),
+    _option(
+        "--webp-method", callback=opt.within(0, 6), help="WebP effort, 0 (fast) to 6 (small) [default: 4].", panel=SAVE
+    ),
 ]
 StripIcc = Annotated[bool, _option("--strip-icc", help="Drop the colour profile.", panel=SAVE)]
 Optimize = Annotated[
@@ -188,7 +192,12 @@ def edit_cmd(
     paths: Annotated[List[pathlib.Path], typer.Argument(help="Image files or directories.", show_default=False)],
     rotate: Annotated[Optional[Rotation], _option("--rotate", help="Rotate clockwise by degrees [default: 0].")] = None,
     flip: Annotated[
-        Optional[Flip], _option("--flip", help="Mirror the picture, after rotating [default: none].")
+        Optional[Flip],
+        _option(
+            "--flip",
+            metavar="DIRECTION",
+            help="Mirror the picture, after rotating: horizontal or vertical [default: none].",
+        ),
     ] = None,
     crop: Annotated[
         Optional[str],
@@ -214,11 +223,20 @@ def edit_cmd(
     saturation: Annotated[
         Optional[float], _option("--saturation", help="0 is greyscale, 1 unchanged, 2 twice as vivid [default: 1].")
     ] = None,
-    output_format: Annotated[Optional[EditFormat], opt.format_option("Output format [default: same as input].")] = None,
-    output: Annotated[Optional[pathlib.Path], opt.output_option("<name>.edited.<ext> next to the input")] = None,
-    output_dir: opt.OutputDir = None,
+    output_format: Annotated[
+        Optional[EditFormat],
+        opt.output_format_option(
+            "Output format: jpeg (or jpg), png, webp, gif, bmp or tiff (or tif), written with the extension as "
+            "typed [default: same as input]."
+        ),
+    ] = None,
+    output: Annotated[Optional[pathlib.Path], opt.output_option()] = None,
+    output_name: Annotated[Optional[str], opt.output_name_option("edit", "{input_name}.{role}.{output_ext}")] = None,
+    output_dir: Annotated[Optional[pathlib.Path], opt.output_dir_option("edit")] = None,
+    no_output_dir: opt.NoOutputDir = False,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
+    yes: opt.Yes = False,
     dry_run: opt.DryRun = False,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
@@ -227,17 +245,27 @@ def edit_cmd(
     webp_method: WebpMethod = None,
     compress_level: Annotated[
         Optional[int],
-        _option("--compress-level", min=0, max=9, help="PNG zlib level 0-9 [default: 6].", panel=SAVE),
+        _option("--compress-level", callback=opt.within(0, 9), help="PNG zlib level 0-9 [default: 6].", panel=SAVE),
     ] = None,
     optimize: Optimize = None,
     progressive: Annotated[bool, _option("--progressive", help="JPEG: progressive encoding.", panel=SAVE)] = False,
     subsampling: Annotated[
         Optional[opt.Subsampling],
-        _option("--subsampling", help="JPEG chroma subsampling [default: 4:2:0].", panel=SAVE),
+        _option(
+            "--subsampling",
+            metavar="RATIO",
+            help="JPEG chroma subsampling: 4:4:4, 4:2:2 or 4:2:0 [default: 4:2:0].",
+            panel=SAVE,
+        ),
     ] = None,
     tiff_compression: Annotated[
         Optional[opt.TiffCompression],
-        _option("--tiff-compression", help="TIFF compression [default: lzw].", panel=SAVE),
+        _option(
+            "--tiff-compression",
+            metavar="METHOD",
+            help="TIFF compression: none, lzw, deflate or jpeg [default: lzw].",
+            panel=SAVE,
+        ),
     ] = None,
     metadata: opt.MetadataOpt = None,
     strip_icc: StripIcc = False,
@@ -249,8 +277,9 @@ def edit_cmd(
     [bold]--flip[/bold], then [bold]--crop[/bold] (or [bold]--aspect[/bold]), then
     [bold]--brightness[/bold], [bold]--contrast[/bold] and [bold]--saturation[/bold] (the same as
     CSS filters). Each image keeps its format; animated GIFs and WebPs have every frame edited.
-    Writes [cyan]<name>.edited.<ext>[/cyan] next to each image, under --output-dir, or to -o for a
-    single image.
+    With no options, it writes a copy with the photo's own orientation applied.
+    Writes [cyan]photo.jpg.edited.jpg[/cyan] for photo.jpg, next to each image, under
+    --output-dir, or to -o for a single image.
 
     [dim]Examples:  sashimi edit photo.jpg --rotate 90 --crop 1200x800+0+100   ·   sashimi edit photos/ --aspect 1:1 --saturation 1.2[/dim]
     """
@@ -271,8 +300,9 @@ def edit_cmd(
             aspect_crop(16, 9, aspect)
         except InvalidOptionsError as e:
             fail(f"--aspect: {e.user_message}")
-    suffixes = {f".{name}": name for name in EditFormat.__members__} | {".jpg": "jpeg", ".tif": "tiff"}
-    fmt = normalize_target(opt.format_from_output(opt.enum_value(output_format), output, suffixes))
+    suffixes = {f".{name}": name for name in EditFormat.__members__}
+    typed = opt.format_from_output(opt.enum_value(output_format), output, suffixes)
+    fmt = normalize_target(typed)
     options = {
         "rotate": int(rotate.value) if rotate else None,
         "flip": opt.enum_value(flip),
@@ -286,19 +316,23 @@ def edit_cmd(
         ),
     }  # fmt: skip
     configs, config_for = _configs(IMAGE_EDIT, options, fmt, "images")
-    runner = BatchRunner("edit", "Edit", json_output, limit_output, dry_run=dry_run)
-    gen = edit_images_generator(
-        paths,
-        configs[fmt] if fmt else config_for,
-        crop_aspect=aspect,
-        recursive=recursive,
-        force=force,
-        on_file_progress=runner.file_progress,
-        output=output,
-        output_dir=output_dir,
-        dry_run=dry_run,
-        limits=limits,
-    )
+    runner = BatchRunner("edit", "Edit", json_output, limit_output, dry_run=dry_run, yes=yes or force)
+    naming = opt.naming_args("edit", output_name, output)
+    with refusals():
+        gen = edit_images_generator(
+            paths,
+            configs[fmt] if fmt else config_for,
+            crop_aspect=aspect,
+            output_ext=opt.enum_value(output_format),
+            recursive=recursive,
+            force=force,
+            on_file_progress=runner.file_progress,
+            output=output,
+            **opt.output_dir_args("edit", output_dir, no_output_dir, output),
+            dry_run=dry_run,
+            limits=limits,
+            **naming,
+        )
     runner.run(gen, paths)
 
 
@@ -323,12 +357,15 @@ def frames_cmd(
         _option("--speed", help="Playback speed: 2 is twice as fast, 0.5 half as fast [default: 1].", panel=FRAMES),
     ] = None,
     output_format: Annotated[
-        Optional[FramesFormat], opt.format_option("Output format [default: same as input].")
+        Optional[FramesFormat], opt.output_format_option("Output format: gif or webp [default: same as input].")
     ] = None,
-    output: Annotated[Optional[pathlib.Path], opt.output_option("<name>.edited.<ext> next to the input")] = None,
-    output_dir: opt.OutputDir = None,
+    output: Annotated[Optional[pathlib.Path], opt.output_option()] = None,
+    output_name: Annotated[Optional[str], opt.output_name_option("frames", "{input_name}.{role}.{output_ext}")] = None,
+    output_dir: Annotated[Optional[pathlib.Path], opt.output_dir_option("frames")] = None,
+    no_output_dir: opt.NoOutputDir = False,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
+    yes: opt.Yes = False,
     dry_run: opt.DryRun = False,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
@@ -360,8 +397,10 @@ def frames_cmd(
     """
     Keep or drop frames of animated GIFs and WebPs, and change their speed. Kept frames play in
     their original order, each as it looked in the animation. Each file keeps its format.
-    Writes [cyan]<name>.edited.<ext>[/cyan] next to each animation, under --output-dir, or to -o
-    for a single animation. See the frames and their durations with [bold]sashimi info[/bold].
+    Writes [cyan]clip.gif.frames.gif[/cyan] for clip.gif, next to each animation, under
+    --output-dir, or to -o for a single animation. See the frames and their durations with [bold]sashimi info[/bold].
+    A run needs --keep, --drop, --speed or --output-format; without any it would only copy the
+    animation, so it's refused.
 
     [dim]Examples:  sashimi frames clip.gif --drop 1-5   ·   sashimi frames clip.webp --keep 10-40 --speed 1.5[/dim]
     """
@@ -372,6 +411,11 @@ def frames_cmd(
     opt.single_file_or_fail(paths, output)
     limits = _limits.resolve(max_pixels=max_pixels, max_animation_bytes=max_animation_bytes)
     fmt = opt.format_from_output(opt.enum_value(output_format), output, {".gif": "gif", ".webp": "webp"})
+    if keep is None and drop is None and speed in (None, 1) and fmt is None:
+        fail(
+            "Nothing to change: give --keep or --drop (frames, numbered from 1 as sashimi info lists them), "
+            "--speed, or --output-format, e.g. sashimi frames anim.gif --drop 1-5."
+        )
     options = {
         "keep": parse_frames(keep, "--keep"),
         "speed": speed,
@@ -379,17 +423,20 @@ def frames_cmd(
     }
     dropped = parse_frames(drop, "--drop") or []
     configs, config_for = _configs(IMAGE_FRAMES, options, fmt, "animations")
-    runner = BatchRunner("frames", "Frames", json_output, limit_output, dry_run=dry_run)
-    gen = edit_frames_generator(
-        paths,
-        configs[fmt] if fmt else config_for,
-        drop=dropped,
-        recursive=recursive,
-        force=force,
-        on_file_progress=runner.file_progress,
-        output=output,
-        output_dir=output_dir,
-        dry_run=dry_run,
-        limits=limits,
-    )
+    runner = BatchRunner("frames", "Frames", json_output, limit_output, dry_run=dry_run, yes=yes or force)
+    naming = opt.naming_args("frames", output_name, output)
+    with refusals():
+        gen = edit_frames_generator(
+            paths,
+            configs[fmt] if fmt else config_for,
+            drop=dropped,
+            recursive=recursive,
+            force=force,
+            on_file_progress=runner.file_progress,
+            output=output,
+            **opt.output_dir_args("frames", output_dir, no_output_dir, output),
+            dry_run=dry_run,
+            limits=limits,
+            **naming,
+        )
     runner.run(gen, paths)

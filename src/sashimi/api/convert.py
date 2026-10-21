@@ -4,19 +4,20 @@
 """Batch conversion of images, videos and audio, routed by each file's kind and the target format."""
 
 import pathlib
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any, Literal
 
 from sashimi.api._batch import (
     AUDIO_EXTENSIONS,
     IMAGE_EXTENSIONS,
     VIDEO_EXTENSIONS,
+    Batch,
     FileProgress,
     PathInput,
-    YieldType,
-    output_name,
     run_batch,
 )
+from sashimi.api._kinds import kind_of
+from sashimi.api._naming import EXTENSIONS, NameTemplate, check_output_ext, naming, output_format
 from sashimi.api._consume import consume_generator
 from sashimi.config import (
     AUDIO_CONVERT,
@@ -40,6 +41,7 @@ __all__ = [
     "convert_images",
     "convert_images_generator",
     "to_jpeg",
+    "route_for",
     "to_png",
 ]
 
@@ -63,11 +65,7 @@ Processor = Callable[[pathlib.Path, pathlib.Path, Callable[[float, str], None] |
 
 
 def _kind(path: pathlib.Path) -> str | None:
-    suffix = path.suffix.lower()
-    for kind, extensions in (("image", IMAGE_EXTENSIONS), ("video", VIDEO_EXTENSIONS), ("audio", AUDIO_EXTENSIONS)):
-        if suffix in extensions:
-            return kind
-    return None
+    return kind_of(path)
 
 
 def _source_extensions(target: str) -> list[str]:
@@ -83,6 +81,36 @@ def _source_extensions(target: str) -> list[str]:
         candidates += VIDEO_EXTENSIONS + AUDIO_EXTENSIONS
     own = _SAME_FORMAT.get(target, {TARGET_SUFFIX[target]})
     return sorted({ext for ext in candidates if ext not in own})
+
+
+def _accepts(target: str) -> str:
+    """What converting to `target` works on, in words."""
+    if target in AUDIO_TARGETS:
+        return "videos and audio files"
+    if target in ("webm", "mp4"):
+        return "videos and GIFs"
+    if target in VIDEO_TARGETS:
+        return "images and videos"
+    return "images"
+
+
+def route_for(target: str, path: pathlib.Path) -> str | None:
+    """
+    The code that converts `path` to `target`: ``image`` (:func:`sashimi.image.convert`), ``ico``
+    (:func:`sashimi.image.to_ico`), ``video`` (:func:`sashimi.video.convert`, animated GIFs to
+    MP4 or WebM included) or ``audio`` (:func:`sashimi.audio.convert`, from video or audio), or
+    None when it can't be converted.
+    """
+    kind = kind_of(path)
+    if target in AUDIO_TARGETS and kind in ("video", "audio"):
+        return "audio"
+    if target in VIDEO_TARGETS and (kind == "video" or (kind == "image" and target in ("webm", "mp4"))):
+        return "video"
+    if target == "ico" and kind == "image":
+        return "ico"
+    if kind == "image" and target in IMAGE_CONVERT.targets:
+        return "image"
+    return None
 
 
 def convert_files_generator(
@@ -102,20 +130,25 @@ def convert_files_generator(
     output_dir: PathInput | None = None,
     dry_run: bool = False,
     limits: Limits | None = None,
-) -> Iterator[YieldType]:
+    output_name: str | NameTemplate | None = None,
+    output_ext: str | None = None,
+) -> Batch:
     """
-    Converts every file found to `target`, writing ``<stem>.<ext>`` next to each input (``.jpg``
-    for JPEG and ``.tif`` for TIFF), or under `output_dir`, or to `output` for a single file.
-    See :mod:`sashimi.api` for the naming and collision rules.
+    Converts every file found to `target`, writing ``{input_name}.{output_ext}`` next to each
+    input (``photo.png`` → ``photo.png.webp``), or under `output_dir`, or to `output` for a
+    single file. The extension is `output_ext` if given, else `target` as given (``jpeg`` writes
+    ``photo.png.jpeg``, ``jpg`` writes ``photo.png.jpg``). `output_name` sets the pattern (``{input_stem}.{output_ext}`` for
+    ``photo.webp``; see :mod:`sashimi.api`).
 
-    Each file is handled by its kind (from its extension): images go through
+    Each file is handled by its kind (from its extension; see :func:`route_for`): images go through
     :func:`sashimi.image.convert` (or :func:`~sashimi.image.to_ico`), videos (to GIF, WebP, WebM
     or MP4) and animated GIFs (to WebM or MP4) through :func:`sashimi.video.convert`, and audio targets through
     :func:`sashimi.audio.convert`. Pass a config per kind to set options; its ``target`` must match.
     Kinds without a config use that target's defaults. Files already in the target format aren't
     picked up unless `extensions` says so. `limits` (default ``Limits()``) is passed to each converter.
     """
-    target = normalize_target(str(target))
+    typed = str(target).strip()
+    target = normalize_target(typed)
     if target not in TARGET_SUFFIX:
         raise InvalidOptionsError(f"Can't convert to {str(target).upper()}.")
     for config in (image_config, video_config, audio_config):
@@ -126,19 +159,15 @@ def convert_files_generator(
     audio_cfg = audio_config or (AUDIO_CONVERT.from_params(target=target) if target in AUDIO_TARGETS else None)
 
     def process(src: pathlib.Path, dst: pathlib.Path, progress: Callable[[float, str], None] | None) -> str | None:
-        kind = _kind(src)
-        if target in AUDIO_TARGETS and kind in ("video", "audio") and audio_cfg:
+        route = route_for(target, src)
+        if route == "audio" and audio_cfg:
             audio.convert(src, dst, audio_cfg, max_workers=max_workers, limits=limits, on_progress=progress)
-        elif (
-            target in VIDEO_TARGETS
-            and (kind == "video" or (kind == "image" and target in ("webm", "mp4")))
-            and video_cfg
-        ):
+        elif route == "video" and video_cfg:
             route = video.convert(src, dst, video_cfg, max_workers=max_workers, limits=limits, on_progress=progress)
             return ROUTE_MESSAGES.get(route)
-        elif target == "ico" and kind == "image":
+        elif route == "ico":
             image.to_ico(src, dst, ico_config, limits=limits, on_progress=progress)
-        elif kind == "image" and image_cfg:
+        elif route == "image" and image_cfg:
             image.convert(src, dst, image_cfg, limits=limits, on_progress=progress)
         else:
             raise UnsupportedMediaError(f"Can't convert {src.suffix or 'this file'} to {target.upper()}.")
@@ -146,22 +175,30 @@ def convert_files_generator(
 
     suffix = TARGET_SUFFIX[target]
     own_format = _SAME_FORMAT.get(target, {suffix})
+    check_output_ext(output_ext, (target,))
+    spelled = output_ext or (typed.lower() if typed.lower() in EXTENSIONS.get(target, ()) else None)
+    fmt = output_format(target, typed=spelled)
+    names = naming("convert", lambda _: fmt, output_name, fixed=fmt)
+    accepts = _accepts(target)
 
     def reject_reason(path: pathlib.Path) -> str:
         if path.suffix.lower() in own_format:
             return f"Already {target.upper()}"
-        return f"Can't convert {path.suffix or 'this file'} to {target.upper()}"
+        return f"Can't convert {path.suffix or 'this file'} to {target.upper()}; converting to {target.upper()} works on {accepts}."
 
     return run_batch(
         paths,
+        names=names,
         extensions=extensions if extensions is not None else _source_extensions(target),
         recursive=recursive,
         force=force,
-        name_for=lambda _, stem: output_name(stem, suffix),
         process=process,
         success_message="Converted to {name}",
+        accepts=accepts,
+        route=lambda path: route_for(target, path) or "unsupported",
         on_file_progress=on_file_progress,
         reject_reason=reject_reason,
+        already=lambda path: path.suffix.lower() in own_format,
         output=output,
         output_dir=output_dir,
         dry_run=dry_run,
@@ -195,7 +232,8 @@ def convert_images_generator(
     output_dir: PathInput | None = None,
     dry_run: bool = False,
     limits: Limits | None = None,
-) -> Iterator[YieldType]:
+    output_name: str | NameTemplate | None = None,
+) -> Batch:
     """Image-only conversion: every image found is converted to `config.target`."""
     if extensions is None:
         own = _SAME_FORMAT.get(config.target, {TARGET_SUFFIX[config.target]})
@@ -203,6 +241,7 @@ def convert_images_generator(
     return convert_files_generator(
         paths,
         config.target,
+        output_ext=EXTENSIONS[config.target][0],
         image_config=config,
         recursive=recursive,
         force=force,
@@ -210,6 +249,7 @@ def convert_images_generator(
         output_dir=output_dir,
         dry_run=dry_run,
         limits=limits,
+        output_name=output_name,
     )
 
 
@@ -224,6 +264,7 @@ def convert_images(
     output_dir: PathInput | None = None,
     dry_run: bool = False,
     limits: Limits | None = None,
+    output_name: str | NameTemplate | None = None,
 ) -> dict[str, Any]:
     """Like :func:`convert_images_generator`, but runs to completion and returns a summary."""
     gen = convert_images_generator(
@@ -235,6 +276,7 @@ def convert_images(
         output_dir=output_dir,
         dry_run=dry_run,
         limits=limits,
+        output_name=output_name,
     )
     return consume_generator(gen, show_progress, f"Converting to {config.target.upper()}", "convert", dry_run=dry_run)
 

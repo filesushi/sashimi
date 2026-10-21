@@ -24,7 +24,7 @@ EMOJI = re.compile("[\U0001f300-\U0001faff✀-➿←-⇿]")
 
 @pytest.fixture(autouse=True)
 def isolated_config(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "GLOBAL_CONFIG_DIR", tmp_path / "home")
+    monkeypatch.setattr(settings, "USER_CONFIG_DIR", tmp_path / "home")
     monkeypatch.chdir(tmp_path)
     settings.load_raw_config.cache_clear()
     yield
@@ -39,9 +39,9 @@ def options(command):
 def test_o_is_the_output_path_and_format_has_no_short_flag(command):
     found = options(command)
     assert found["-o"].name == "output" and found["--output"] is found["-o"]
-    assert "--output-dir" in found
-    if "--format" in found:
-        assert found["--format"].opts == ["--format"]
+    assert "--output-dir" in found and "--format" not in found
+    if "--output-format" in found:
+        assert found["--output-format"].opts == ["--output-format"]
 
 
 def test_duration_always_means_output_length():
@@ -85,7 +85,7 @@ def test_no_emoji_and_one_line_for_one_file(tmp_path):
     Image.new("RGB", (40, 20), "red").save(tmp_path / "a.png")
     result = runner.invoke(app, ["convert", "a.png", "webp"])
     assert result.exit_code == 0
-    assert re.fullmatch(r"Success: a\.png: Converted to a\.webp \(\d+\.\ds\)", result.stdout.strip())
+    assert re.fullmatch(r"Success: a\.png: Converted to a\.png\.webp \(\d+\.\ds\)", result.stdout.strip())
     assert not EMOJI.search(result.output)
 
 
@@ -116,7 +116,7 @@ def test_json_report_is_the_same_everywhere(tmp_path):
         ]  # fmt: skip
         assert all(set(row) == {"file", "status", "message", "output"} for row in report["results"])
     assert [r["command"] for r in reports] == ["convert", "resize", "favicon", "thumbs", "flatten"]
-    assert reports[0]["results"][0]["output"] == "a.jpg"
+    assert reports[0]["results"][0]["output"] == "a.png.jpeg"
 
 
 def test_output_names_and_options(tmp_path):
@@ -128,7 +128,7 @@ def test_output_names_and_options(tmp_path):
     assert Image.open(tmp_path / "small" / "x.png").size == (10, 5)
     assert runner.invoke(app, ["resize", ".", "--width", "10", "--output-dir", "out", "--json"]).exit_code == 0
     assert sorted(p.name for p in (tmp_path / "out").iterdir()) == [
-        "a.jpeg.resized.webp", "a.png.resized.webp", "a.resized.jpeg", "a.resized.png",
+        "a.jpeg.resized.jpeg", "a.jpeg.webp.resized.webp", "a.png.resized.png", "a.png.webp.resized.webp",
     ]  # fmt: skip
     refused = runner.invoke(app, ["convert", ".", "jpeg", "-o", "x.jpg"])
     assert refused.exit_code == 2 and "--output-dir" in refused.stderr
@@ -137,10 +137,20 @@ def test_output_names_and_options(tmp_path):
 def test_force_reports_replacements(tmp_path):
     Image.new("RGB", (40, 20), "red").save(tmp_path / "a.png")
     (tmp_path / "a.jpg").write_bytes(b"someone's photo")
-    kept = json.loads(runner.invoke(app, ["convert", "a.png", "jpeg", "--json"]).stdout)["results"][0]
-    assert kept["status"] == "exists" and (tmp_path / "a.jpg").read_bytes() == b"someone's photo"
-    replaced = json.loads(runner.invoke(app, ["convert", "a.png", "jpeg", "-f", "--json"]).stdout)["results"][0]
-    assert replaced["message"] == "Converted to a.jpg (replaced the existing file)"
+    (tmp_path / "a.png.jpg").write_bytes(b"an earlier conversion")
+    kept = json.loads(runner.invoke(app, ["convert", "a.png", "jpg", "--json"]).stdout)["results"][0]
+    assert kept["status"] == "exists" and (tmp_path / "a.png.jpg").read_bytes() == b"an earlier conversion"
+    assert kept["message"] == "Output already exists: a.png.jpg"
+    replaced = json.loads(runner.invoke(app, ["convert", "a.png", "jpg", "-f", "--json"]).stdout)["results"][0]
+    assert replaced["message"] == "Converted to a.png.jpg (replaced the existing file)"
+    assert (tmp_path / "a.jpg").read_bytes() == b"someone's photo"
+    stem = ["--output-name", "{input_stem}.{output_ext}", "--json"]
+    plain = json.loads(runner.invoke(app, ["convert", "a.png", "jpg", *stem]).stdout)["results"][0]
+    assert plain["status"] == "exists" and "can't tell whether an earlier run made it" in plain["message"]
+    assert (tmp_path / "a.jpg").read_bytes() == b"someone's photo"
+    forced = json.loads(runner.invoke(app, ["convert", "a.png", "jpg", "-f", *stem]).stdout)["results"][0]
+    assert forced["message"] == "Converted to a.jpg (replaced the existing file)"
+    assert (tmp_path / "a.jpg").read_bytes() != b"someone's photo"
 
 
 def test_ico_background(tmp_path):
@@ -149,7 +159,7 @@ def test_ico_background(tmp_path):
         runner.invoke(app, ["convert", "logo.png", "ico", "--background", "#00ff00", "--ico-sizes", "16"]).exit_code
         == 0
     )
-    with Image.open(tmp_path / "logo.ico") as ico:
+    with Image.open(tmp_path / "logo.png.ico") as ico:
         assert ico.convert("RGBA").getpixel((8, 8)) == (0, 255, 0, 255)
 
 
@@ -159,7 +169,7 @@ def test_favicon_command(tmp_path):
         app, ["favicon", "logo.png", "--name", "Demo & Co", "--theme-color", "#336699", "--background", "#000000"]
     )
     assert result.exit_code == 0, result.output
-    with zipfile.ZipFile(tmp_path / "logo.favicons.zip") as archive:
+    with zipfile.ZipFile(tmp_path / "logo.png.favicons.zip") as archive:
         assert json.loads(archive.read("site.webmanifest"))["name"] == "Demo & Co"
         assert 'content="#336699"' in archive.read("favicon.html").decode()
     bad = runner.invoke(app, ["favicon", "logo.png", "--ico-sizes", "8", "-f"])
@@ -170,16 +180,29 @@ def test_favicon_command(tmp_path):
 def test_preview_command(video_blob, tmp_path):
     (tmp_path / "clip.mkv").write_bytes(video_blob.read_bytes())
     result = runner.invoke(
-        app, ["preview", "clip.mkv", "--format", "gif", "--samples", "2", "--clip-length", "1", "--fps", "5", "--json"]
+        app,
+        [
+            "preview",
+            "clip.mkv",
+            "--output-format",
+            "gif",
+            "--samples",
+            "2",
+            "--clip-length",
+            "1",
+            "--fps",
+            "5",
+            "--json",
+        ],
     )
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["results"][0]["output"] == "clip.preview.gif"
-    with Image.open(tmp_path / "clip.preview.gif") as img:
+    assert json.loads(result.stdout)["results"][0]["output"] == "clip.mkv.preview.gif"
+    with Image.open(tmp_path / "clip.mkv.preview.gif") as img:
         assert img.n_frames == 10 and img.size == (320, 180)
     webp = runner.invoke(app, ["preview", "clip.mkv", "-o", "p.webp", "--samples", "1", "--height", "90", "-q", "50"])
     assert webp.exit_code == 0, webp.output
     assert Image.open(tmp_path / "p.webp").size == (160, 90)
-    warned = runner.invoke(app, ["preview", "clip.mkv", "--format", "gif", "-q", "50", "-f", "--samples", "1"])
+    warned = runner.invoke(app, ["preview", "clip.mkv", "--output-format", "gif", "-q", "50", "-f", "--samples", "1"])
     assert "--quality doesn't apply to GIF previews" in " ".join(warned.stderr.split())
     (tmp_path / "sashimi.toml").write_text("[limits]\nmax_gif_seconds = 30\n")
     settings.load_raw_config.cache_clear()
@@ -201,7 +224,7 @@ def test_remux_command(video_blob, tmp_path):
     assert (tmp_path / "clip.mkv").read_bytes() == video_blob.read_bytes()
     skipped = runner.invoke(app, ["remux", "clip.mkv", "--json"])
     assert json.loads(skipped.stdout)["results"][0]["message"] == "Already MKV"
-    refused = runner.invoke(app, ["remux", "clip.mkv", "--format", "webm", "--json"])
+    refused = runner.invoke(app, ["remux", "clip.mkv", "--output-format", "webm", "--json"])
     assert refused.exit_code == 1 and "WEBM without re-encoding" in refused.stdout
 
 
@@ -212,6 +235,6 @@ def test_thumbs_names_and_clip_length(video_blob, tmp_path):
     assert runner.invoke(app, ["thumbs", "clip.mkv", *args]).exit_code == 0
     animated = runner.invoke(app, ["thumbs", "clip.mkv", "-a", "--clip-length", "1", "--fps", "2", *args])
     assert animated.exit_code == 0, animated.output
-    assert (tmp_path / "clip.sheet.jpg").exists() and (tmp_path / "clip.animated-sheet.webp").exists()
+    assert (tmp_path / "clip.mkv.sheet.jpg").exists() and (tmp_path / "clip.mkv.animated-sheet.webp").exists()
     png = runner.invoke(app, ["thumbs", "clip.mkv", "-o", "s.png", *args])
     assert png.exit_code == 0 and Image.open(tmp_path / "s.png").format == "PNG"

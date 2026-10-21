@@ -3,10 +3,11 @@
 
 import pathlib
 import re
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any, Literal
 
-from sashimi.api._batch import VIDEO_EXTENSIONS, FileProgress, PathInput, YieldType, output_name, run_batch
+from sashimi.api._batch import VIDEO_EXTENSIONS, Batch, FileProgress, PathInput, run_batch
+from sashimi.api._naming import NameTemplate, naming, output_format
 from sashimi.api._consume import consume_generator
 from sashimi.config import KEYFRAME_NOTE, VIDEO_TRIM, CopyTrimConfig, Limits, MetadataMode, TrimConfig
 from sashimi.core.probe import probe
@@ -121,7 +122,8 @@ def extract_generator(
     output_dir: PathInput | None = None,
     dry_run: bool = False,
     limits: Limits | None = None,
-) -> Iterator[YieldType]:
+    output_name: str | NameTemplate | None = None,
+) -> Batch:
     """
     Cuts a section out of every video found (see :func:`sashimi.video.trim`), from `start`
     (default the beginning) to `end`, or for `duration`; with neither, to the end of the video.
@@ -136,8 +138,10 @@ def extract_generator(
     location tags or all of them (see :data:`~sashimi.config.VIDEO_TRIM`).
 
     The container is `container`, or else `output`'s extension if it names one, or else the
-    input's (MKV for anything else). Each clip is written as ``<stem>.extracted.<ext>`` next to
-    its video, under `output_dir`, or to `output` for a single video. Invalid times raise
+    input's (MKV for anything else). Each clip is written as
+    ``{input_name}.extracted.{output_ext}`` next to its video (``clip.mkv.extracted.mkv``,
+    ``clip.avi.extracted.mkv``), under `output_dir`, or to `output` for a single video.
+    `output_name` sets the pattern, as for every batch function (see :mod:`sashimi.api`). Invalid times and patterns raise
     :class:`~sashimi.errors.InvalidOptionsError` before anything runs.
     """
     start_s, end_s, duration_s = _seconds(start), _seconds(end), _seconds(duration)
@@ -168,10 +172,8 @@ def extract_generator(
             metadata=metadata,
         )
 
-    def name_for(source: pathlib.Path, stem: str) -> str:
-        chosen = container_for(source)
-        keep = _CONTAINER_FOR_SUFFIX.get(source.suffix.lower()) == chosen
-        return output_name(stem, source.suffix if keep else chosen, "extracted")
+    fixed = output_format(container) if container is not None else None
+    names = naming("extract", lambda p: output_format(container_for(p), p, container), output_name, fixed=fixed)
 
     def process(source: pathlib.Path, target: pathlib.Path, progress: Callable[[float, str], None] | None) -> str:
         config = config_for(source)
@@ -180,12 +182,14 @@ def extract_generator(
 
     return run_batch(
         paths,
+        names=names,
         extensions=extensions,
         recursive=recursive,
         force=force,
-        name_for=name_for,
         process=process,
         success_message="Extracted to {name}",
+        accepts="videos",
+        route=lambda _: "trim",
         on_file_progress=on_file_progress,
         output=output,
         output_dir=output_dir,

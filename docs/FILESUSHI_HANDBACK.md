@@ -164,7 +164,9 @@ images with a colour profile, now converted to sRGB (§1 item 21).
    sashimi sets no upper bound any more, so give the form your own 0.25-4;
    each frame's duration is divided by it; frames under 20 ms, which browsers play at 100 ms,
    count as 100 ms, none gets shorter than `MIN_FRAME_MS`, 20 ms, and none longer than the
-   format holds); WebP adds `quality` (92),
+   format holds; GIFs store durations in 10 ms steps, so in a GIF each new duration is rounded to
+   the nearest step, and a page that previews the total length should round each frame the same
+   way); WebP adds `quality` (92),
    `lossless`, `webp_method`, `metadata`, `keep_icc`; GIF adds `optimize` and `metadata`. Errors: a frame the
    animation doesn't have, `InvalidOptionsError` "Some of the frames to keep aren't in this
    animation, which has 120 frames."; an image that isn't animated, `UnsupportedMediaError`
@@ -173,7 +175,9 @@ images with a colour profile, now converted to sRGB (§1 item 21).
    and speed 1 the animation is unchanged.
    **To show the frames:** `sashimi.image.frames_info(src)` reads the frame count, each frame's
    duration (`durations_ms`), the loop count and the size from the file's blocks, without
-   decoding (2-40 ms for 300 frames), so the web app can call it when the page opens.
+   decoding (2-40 ms for 300 frames). It reads the upload, so like `metadata.read` (item 20) it
+   belongs **in the worker, never the web app**: run it as part of the job that opens the
+   editor, and hand its fields to the page.
    `sashimi.image.frame_strip(src, dst, FrameStripConfig(...))` draws every frame as a tile in
    one still WebP (default tiles 96 px tall, 10 per row, quality 80) and returns the layout:
    frame `i` is at `x = (i % columns) * tile_width`, `y = (i // columns) * tile_height`, so the
@@ -200,6 +204,25 @@ images with a colour profile, now converted to sRGB (§1 item 21).
      one JSON report with `dry_run`, `--dry-run` everywhere, exit 1 for a named file that was
      skipped, `edit` and `frames`, `--max-*` flags and a `[limits]` settings section), but
      FileSushi uses neither.
+   - output names in the batch API and the CLI (2026-10-21: a name depends only on its own
+     input, sheets are `clip.mp4.sheet.jpg`, conversions `photo.png.webp`, `--output-name`
+     patterns, clashes refused) changed nothing FileSushi uses: it calls core functions with
+     explicit output paths, and core's code and `sashimi.config` are unchanged (only the
+     `select_frames` docstring gained the GIF rounding note in item 11).
+   - the second naming round (2026-10-21: `{input_name}.{role}.{output_ext}` names, `rotate` for
+     images, `--output-format`, the mixed-folder question, `-y`, `-f` replacing anything) is also
+     batch API and CLI only, and changes nothing FileSushi uses: core, `sashimi.config` and every
+     output's bytes are unchanged.
+   - the output-folder round (2026-10-21: name patterns may start with folders inside each
+     input's folder, `sashimi.toml` keeps an `output_dir` per command, messages show where an
+     output is, `output` must end in an extension of its format, and `BatchPlan.in_output_dir`,
+     `accepts` and `recursive` plus the report's `in_output_dir` are new) is batch API and CLI
+     only too: core, `sashimi.config` and every output's bytes are unchanged.
+   - the settings and several-paths round (2026-10-21: `config set` writes the user's own
+     settings by default, `resize`/`convert`/`rotate` take several paths, files named together
+     leave out their own earlier outputs, `BatchPlan.already_done` and the report's
+     `already_done`) is CLI and batch API only: core, `sashimi.config` and every output's bytes
+     are unchanged.
 14. **Limits are now FileSushi's to set (required; owner, 2026-10-20: "all limits should be config
    driven … The sashimi defaults don't need to be aligned with filesushi at all, sashimi just needs
    to be configurable").** sashimi enforces only the limits its caller passes, in one

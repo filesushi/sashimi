@@ -3,10 +3,12 @@
 
 """Batch metadata removal, without re-encoding."""
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any, Literal
 
-from sashimi.api._batch import FileProgress, PathInput, YieldType, output_name, run_batch
+from sashimi.api._batch import Batch, FileProgress, PathInput, run_batch
+from sashimi.api._kinds import kind_of
+from sashimi.api._naming import NameTemplate, naming, source_format
 from sashimi.api._consume import consume_generator
 from sashimi.config import Limits
 from sashimi.core.metadata import strip
@@ -34,23 +36,29 @@ def strip_files_generator(
     output_dir: PathInput | None = None,
     dry_run: bool = False,
     limits: Limits | None = None,
-) -> Iterator[YieldType]:
+    output_name: str | NameTemplate | None = None,
+) -> Batch:
     """
     Removes metadata from every file found without re-encoding (see
-    :func:`sashimi.metadata.strip`), writing ``<stem>.stripped.<ext>`` in the file's own format
-    next to it, under `output_dir`, or to `output` for a single file. `mode` is ``remove_all``
-    (the default) or ``remove_location``; `keep_icc` False also drops images' colour profiles.
+    :func:`sashimi.metadata.strip`), writing ``{input_name}.stripped.{output_ext}`` in the file's
+    own format next to it (``clip.mov.stripped.mov``), under `output_dir`, or to `output` for a
+    single file. `output_name` sets the pattern (``{input_name}`` with ``force`` strips files in
+    place), as for every batch function (see :mod:`sashimi.api`). The plan's routes are ``image`` and ``media`` (video and audio). `mode` is ``remove_all`` (the default) or ``remove_location``; `keep_icc` False also
+    drops images' colour profiles.
     """
+    names = naming("strip", source_format, output_name)
 
     def process(src: Any, dst: Any, progress: Any) -> None:
         strip(src, dst, mode, keep_icc=keep_icc, limits=limits, on_progress=progress)
 
     return run_batch(
         paths,
+        names=names,
         extensions=extensions,
         recursive=recursive,
         force=force,
-        name_for=lambda path, stem: output_name(stem, path.suffix or ".bin", "stripped"),
+        accepts="images, videos and audio files",
+        route=lambda path: "image" if kind_of(path) == "image" else "media",
         process=process,
         success_message="Metadata removed: {name}",
         on_file_progress=on_file_progress,

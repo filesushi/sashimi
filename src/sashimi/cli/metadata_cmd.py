@@ -11,7 +11,7 @@ from typing import Annotated, List, Optional
 import typer
 
 from sashimi.cli import _options as opt
-from sashimi.cli._output import BatchRunner, console, display_path, fail
+from sashimi.cli._output import BatchRunner, console, display_path, fail, refusals
 
 _LABELS = (
     ("carriers", "Found in"),
@@ -40,6 +40,7 @@ def metadata_cmd(
     found, not a promise that nothing else is there.
     """
     opt.exists_or_fail(path)
+    opt.file_or_fail(path, "metadata")
     from sashimi.config import Limits
     from sashimi.core.metadata import read
     from sashimi.errors import SashimiError, UserInputError
@@ -85,6 +86,7 @@ def strip_cmd(
         Optional[opt.StripMode],
         opt.option(
             "--remove",
+            metavar="WHAT",
             help="What to remove: remove_all (keep only what showing or playing the file needs) or "
             "remove_location (GPS and place names) [default: remove_all].",
             panel=opt.GENERAL,
@@ -92,10 +94,13 @@ def strip_cmd(
         ),
     ] = None,
     strip_icc: opt.StripIcc = False,
-    output: Annotated[Optional[pathlib.Path], opt.output_option("<name>.stripped.<ext> next to the input")] = None,
-    output_dir: opt.OutputDir = None,
+    output: Annotated[Optional[pathlib.Path], opt.output_option()] = None,
+    output_name: Annotated[Optional[str], opt.output_name_option("strip", "{input_name}.{role}.{output_ext}")] = None,
+    output_dir: Annotated[Optional[pathlib.Path], opt.output_dir_option("strip")] = None,
+    no_output_dir: opt.NoOutputDir = False,
     recursive: opt.Recursive = False,
     force: opt.Force = False,
+    yes: opt.Yes = False,
     dry_run: opt.DryRun = False,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
@@ -103,24 +108,36 @@ def strip_cmd(
     """
     Remove metadata (camera, dates, GPS, titles, comments) from images, videos and audio without
     re-encoding: the pictures and sound are copied as they are. Writes
-    [cyan]<name>.stripped.<ext>[/cyan] in the file's own format next to each file, under
-    --output-dir, or to -o for a single file. Removal is best effort: it covers the places
-    sashimi knows metadata is kept.
+    [cyan]clip.mov.stripped.mov[/cyan] for clip.mov, in the file's own format, next to each file,
+    under --output-dir, or to -o for a single file; [cyan]--output-name '{input_name}' -f[/cyan]
+    strips files in place. Removal is best effort: it covers the places sashimi knows metadata
+    is kept. A folder of both images and videos or audio asks first unless -y.
     """
     from sashimi.api.strip import strip_files_generator
 
     opt.single_file_or_fail(paths, output)
     chosen = opt.enum_value(mode) or "remove_all"
-    runner = BatchRunner("strip", "Remove metadata", json_output, limit_output, dry_run=dry_run)
-    gen = strip_files_generator(
-        paths,
-        chosen,  # type: ignore[arg-type]
-        keep_icc=not strip_icc,
-        recursive=recursive,
-        force=force,
-        on_file_progress=runner.file_progress,
-        output=output,
-        output_dir=output_dir,
+    runner = BatchRunner(
+        "strip",
+        "Remove metadata",
+        json_output,
+        limit_output,
         dry_run=dry_run,
+        yes=yes or force,
+        verb="remove metadata from {every}",
     )
+    naming = opt.naming_args("strip", output_name, output)
+    with refusals():
+        gen = strip_files_generator(
+            paths,
+            chosen,  # type: ignore[arg-type]
+            keep_icc=not strip_icc,
+            recursive=recursive,
+            force=force,
+            on_file_progress=runner.file_progress,
+            output=output,
+            **opt.output_dir_args("strip", output_dir, no_output_dir, output),
+            dry_run=dry_run,
+            **naming,
+        )
     runner.run(gen, paths)

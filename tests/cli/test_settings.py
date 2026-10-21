@@ -30,10 +30,10 @@ def test_recursive_merge():
     assert result["f"] == 5
 
 
-def test_get_global_config_path(fs):
+def test_get_user_config_path(fs):
     home = pathlib.Path.home()
     expected = home / ".sashimi" / "sashimi.toml"
-    assert str(manager.get_global_config_path()) == str(expected)
+    assert str(manager.get_user_config_path()) == str(expected)
 
 
 def test_find_project_config_path(fs):
@@ -51,7 +51,7 @@ def test_find_project_config_path(fs):
     fs.create_file(f"{sub_dir}/.sashimi.toml")
     assert manager.find_project_config_path() == pathlib.Path(f"{sub_dir}/.sashimi.toml")
 
-    with patch("sashimi.cli.settings.get_global_config_path") as mock_global:
+    with patch("sashimi.cli.settings.get_user_config_path") as mock_global:
         mock_global.return_value = pathlib.Path(f"{sub_dir}/.sashimi.toml")
 
         assert manager.find_project_config_path() == pathlib.Path(f"{root_dir}/sashimi.toml")
@@ -61,8 +61,8 @@ def test_reading_settings_creates_no_files(fs):
     os.chdir("/")
     config, path = manager.load_raw_config()
     assert config == manager.DEFAULT_CONFIG_DICT
-    assert path == manager.get_global_config_path()
-    assert not path.exists() and not manager.GLOBAL_CONFIG_DIR.exists()
+    assert path == manager.get_user_config_path()
+    assert not path.exists() and not manager.USER_CONFIG_DIR.exists()
 
 
 def test_load_config_file(fs):
@@ -79,7 +79,7 @@ def test_load_config_file(fs):
 
 
 def test_load_raw_config(fs):
-    global_path = manager.get_global_config_path()
+    global_path = manager.get_user_config_path()
     fs.create_file(str(global_path), contents="[global]\nverbose = 1\n[thumbs]\ncols = 5")
 
     os.chdir("/")
@@ -96,22 +96,44 @@ def test_load_raw_config(fs):
 def test_set_config_value(fs):
     os.chdir("/")
 
-    manager.set_config_value("global", "verbose", 5, scope="global")
-    global_path = manager.get_global_config_path()
-    assert "verbose = 5" in global_path.read_text()
+    written = manager.set_config_value("thumbs", "cols", 5)
+    user_path = manager.get_user_config_path()
+    assert written == user_path
+    assert "cols = 5" in user_path.read_text()
+    assert user_path.read_text().startswith("# sashimi settings: your own defaults")
+    assert not pathlib.Path("/sashimi.toml").exists()
 
-    manager.set_config_value("thumbs", "cols", 4, scope="project")
+    assert manager.set_config_value("thumbs", "cols", 4, scope="project") == pathlib.Path("/sashimi.toml")
     proj_path = pathlib.Path("/sashimi.toml")
     assert "cols = 4" in proj_path.read_text()
+    assert proj_path.read_text().startswith("# sashimi settings for this folder")
 
     manager.set_config_value("new_section", "key", "val", scope="project")
     assert "[new_section]" in proj_path.read_text()
     assert 'key = "val"' in proj_path.read_text()
 
-    proj_path.write_text("invalid [ toml")
-    manager.set_config_value("thumbs", "cols", 2, scope="project")
-    assert "cols = 2" in proj_path.read_text()
-    assert "invalid" not in proj_path.read_text()
+    with pytest.raises(ValueError):
+        manager.set_config_value("thumbs", "cols", 1, scope="global")
+
+
+def test_project_scope_writes_the_project_file_that_applies(fs):
+    fs.create_dir("/proj/nested")
+    fs.create_file("/proj/sashimi.toml", contents="[thumbs]\nrows = 2\n")
+    os.chdir("/proj/nested")
+    assert manager.set_config_value("thumbs", "cols", 3, scope="project") == pathlib.Path("/proj/sashimi.toml")
+    assert "rows = 2" in pathlib.Path("/proj/sashimi.toml").read_text()
+    assert not pathlib.Path("/proj/nested/sashimi.toml").exists()
+
+
+def test_a_file_that_isnt_toml_is_never_overwritten(fs):
+    os.chdir("/")
+    proj_path = pathlib.Path("/sashimi.toml")
+    proj_path.write_text("[thumbs]\ncols = 4\nrows = \n")
+    with pytest.raises(manager.SettingsFileError, match="isn't valid TOML"):
+        manager.set_config_value("thumbs", "cols", 2, scope="project")
+    with pytest.raises(manager.SettingsFileError):
+        manager.remove_config_value("thumbs", "cols", scope="project")
+    assert proj_path.read_text() == "[thumbs]\ncols = 4\nrows = \n"
 
 
 @patch("sashimi.cli.settings.open", side_effect=IOError("Write failed"))
@@ -123,7 +145,7 @@ def test_set_config_value_write_exception(mock_open, fs):
 def test_remove_config_value(fs):
     os.chdir("/")
     proj_path = pathlib.Path("/sashimi.toml")
-    fs.create_file(str(proj_path), contents="[thumbs]\ncols = 5\nrows = 5\n[global]\nverbose = 1")
+    fs.create_file(str(proj_path), contents="[thumbs]\ncols = 5\nrows = 5\n[limits]\nmax_pixels = 1")
 
     assert manager.remove_config_value("thumbs", "cols", scope="project") is True
     content = proj_path.read_text()
@@ -133,24 +155,19 @@ def test_remove_config_value(fs):
     assert manager.remove_config_value("thumbs", "rows", scope="project") is True
     content = proj_path.read_text()
     assert "[thumbs]" not in content
-    assert "[global]" in content
+    assert "[limits]" in content
 
     assert manager.remove_config_value("thumbs", "cols", scope="project") is False
     assert manager.remove_config_value("fake", "key", scope="project") is False
+    assert manager.remove_config_value("limits", "max_pixels") is False
 
-    global_path = manager.get_global_config_path()
-    fs.create_file(str(global_path), contents="[global]\nverbose = 1")
-    assert manager.remove_config_value("global", "verbose", scope="global") is True
+    user_path = manager.get_user_config_path()
+    fs.create_file(str(user_path), contents="[limits]\nmax_pixels = 1")
+    assert manager.remove_config_value("limits", "max_pixels") is True
+    assert "[limits]" in proj_path.read_text()
 
     os.remove(str(proj_path))
-    assert manager.remove_config_value("global", "verbose", scope="project") is False
-
-
-@patch("sashimi.cli.settings.tomlkit.load", side_effect=Exception("Read error"))
-def test_remove_config_value_read_exception(mock_load, fs):
-    os.chdir("/")
-    fs.create_file("/sashimi.toml", contents="dummy")
-    assert manager.remove_config_value("thumbs", "cols") is False
+    assert manager.remove_config_value("limits", "max_pixels", scope="project") is False
 
 
 @patch("sashimi.cli.settings.tomlkit.dump", side_effect=Exception("Write error"))
@@ -158,21 +175,14 @@ def test_remove_config_value_write_exception(mock_dump, fs):
     os.chdir("/")
     fs.create_file("/sashimi.toml", contents="[thumbs]\ncols = 5")
     with pytest.raises(OSError, match="Failed to write to config file"):
-        manager.remove_config_value("thumbs", "cols")
-
-
-@patch("sashimi.cli.settings.tomlkit.load", side_effect=Exception)
-def test_set_config_value_invalid_toml(mock_load, fs):
-    """Hits the except Exception fallback that creates a new document."""
-    fs.create_file("/sashimi.toml", contents="invalid [")
-    manager.set_config_value("global", "verbose", 1, scope="project")
-    assert "verbose = 1" in pathlib.Path("/sashimi.toml").read_text()
+        manager.remove_config_value("thumbs", "cols", scope="project")
 
 
 def test_remove_config_value_not_a_table(fs):
     """Hits the branch where a config section exists but isn't a TOML table."""
-    fs.create_file("/sashimi.toml", contents='global = "just_a_string"')
-    assert manager.remove_config_value("global", "verbose", scope="project") is False
+    fs.create_file("/sashimi.toml", contents='limits = "just_a_string"')
+    os.chdir("/")
+    assert manager.remove_config_value("limits", "max_pixels", scope="project") is False
 
 
 def test_unknown_keys():
@@ -184,9 +194,14 @@ def test_unknown_keys():
     }
     assert manager.unknown_keys(data) == [
         "global",
+        "thumbs.static_width",
+        "thumbs.jpeg_quality",
         "thumbs.output_width",
         "thumbs.start_offset",
+        "animated_thumbs.animated_width",
         "animated_thumbs.static_width",
         "animated_thumbs.video_extensions",
         "extras",
     ]
+    named = {"convert": {"output_name": "{stem}.{format}", "quality": 80}, "thumbs": {"output_name": "{name}.jpeg"}}
+    assert manager.unknown_keys(named) == ["convert.quality"]
