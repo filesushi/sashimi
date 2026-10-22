@@ -8,12 +8,14 @@ nothing depends on file names or extensions.
 """
 
 import logging
+import os
 import pathlib
 import shutil
 import subprocess
 
 import pytest
 
+os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 logging.getLogger("PIL").setLevel(logging.INFO)
 
 HAS_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
