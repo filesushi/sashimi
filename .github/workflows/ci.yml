@@ -1,0 +1,125 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FFMPEG_SERIES: "8.1"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run static analysis
+        run: |
+          uv run --frozen ruff format --check src/sashimi tests scripts
+          uv run --frozen ruff check src/sashimi tests scripts
+          uv run --frozen mypy src/sashimi
+
+  build-and-test:
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv and Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Install FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          name="ffmpeg-n${FFMPEG_SERIES}-latest-linux64-gpl-${FFMPEG_SERIES}"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/ffmpeg.tar.xz" \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/${name}.tar.xz"
+          tar -xJf "$RUNNER_TEMP/ffmpeg.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/${name}/bin" >> "$GITHUB_PATH"
+
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          name="ffmpeg-n${FFMPEG_SERIES}-latest-win64-gpl-${FFMPEG_SERIES}"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/ffmpeg.zip" \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/${name}.zip"
+          unzip -q "$RUNNER_TEMP/ffmpeg.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP\\${name}\\bin" >> "$GITHUB_PATH"
+
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          for i in 1 2 3; do
+            brew install ffmpeg && break
+            echo "brew install failed, retrying..."
+            sleep 15
+          done
+
+      - name: Show FFmpeg version
+        shell: bash
+        run: |
+          ffmpeg -hide_banner -version | head -n 1
+          ffprobe -hide_banner -version | head -n 1
+
+      - name: Run tests with coverage
+        run: uv run --frozen pytest -o log_cli=false --cov=sashimi --cov-report=xml
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: filesushi/sashimi
+          files: coverage.xml
+          flags: ${{ runner.os }}-py${{ matrix.python-version }}
+
+  ci-success:
+    needs: [lint, build-and-test]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check workflow status
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" || "${{ contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+            echo "One or more jobs failed."
+            exit 1
+          fi
+          echo "All checks passed!"

@@ -12,7 +12,7 @@ Licensing: Apache-2.0, copyright "The FileSushi Authors" (listed in `AUTHORS`). 
 
 ```sh
 sh scripts/check.sh                 # ruff format --check, ruff check, mypy, then pytest on 3.14 only, quiet (failures and the summary): use it while working
-sh scripts/check.sh full            # the same, then pytest on 3.11–3.14, verbose (about 20 minutes): run it once before handing work back (there is no CI)
+sh scripts/check.sh full            # the same, then pytest on 3.11–3.14, verbose (about 20 minutes): run it once before handing work back (GitHub Actions also runs `.github/workflows/ci.yml` on pushes and PRs to `main`)
 UV_PROJECT_ENVIRONMENT=.venvs/3.14 uv run --frozen --python 3.14 -- pytest -q -o log_cli=false tests/core/test_video_commands.py::test_gif_defaults   # single test
 UV_PROJECT_ENVIRONMENT=.venvs/3.14 uv run --frozen --python 3.14 -- pytest -q -o log_cli=false tests/core   # fast unit tests, no ffmpeg needed
 sh scripts/sandbox_check.sh [--skip-long]   # every converter in a FileSushi-style locked-down Alpine container (needs Docker)
