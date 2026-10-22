@@ -5,9 +5,10 @@
 
 import logging
 from collections.abc import Iterator
+from typing import Any
 
 from sashimi.config import GifPreviewConfig, Limits, PreviewConfig
-from sashimi.config._limits import megabytes, resolve_limits
+from sashimi.config._limits import resolve_limits
 from sashimi.core._atomic import PathLike, atomic_output
 from sashimi.core._ffmpeg import (
     INPUT_PROTOCOLS,
@@ -20,18 +21,26 @@ from sashimi.core._ffmpeg import (
     run_ffmpeg,
     stream_ffmpeg,
 )
+from sashimi.core._palette import (
+    PALETTE_SHARE,
+    PALETTE_STAGE,
+    one_pass,
+    palette_input,
+    palette_output,
+    palette_use,
+    scaled,
+)
 from sashimi.core._resources import resolve_max_workers
 from sashimi.core.sheets._layout import sample_window
 from sashimi.core.video import _probe_video
 from sashimi.errors import (
     BinaryNotFoundError,
-    InvalidOptionsError,
     MediaTooShortError,
     ProcessingError,
     UnsupportedMediaError,
 )
 
-__all__ = ["plan_preview", "preview_size", "build_preview_commands", "preview"]
+__all__ = ["plan_preview", "preview_size", "build_preview_commands", "build_preview_palette_command", "preview"]
 
 logger = logging.getLogger("sashimi")
 
@@ -40,6 +49,7 @@ TOO_SHORT_FOR_PREVIEW = "This video is too short for a preview."
 NO_PREVIEW_FRAMES = "We couldn't read any frames from this video. The file may be damaged."
 _CROP = {"9:16": 9 / 16, "1:1": 1.0}
 _EPSILON = 1e-9
+_PALETTEUSE = "dither=bayer:bayer_scale=4"
 
 
 def plan_preview(
@@ -95,6 +105,10 @@ def _frames(length: float, fps: int) -> int:
     return max(1, round(length * fps))
 
 
+def _raw_input(out_w: int, out_h: int, fps: int) -> list[str]:
+    return ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{out_w}x{out_h}", "-framerate", str(fps), "-i", "pipe:0"]
+
+
 def build_preview_commands(
     input_path: PathLike,
     output_path: PathLike,
@@ -106,6 +120,7 @@ def build_preview_commands(
     threads: int,
     ffmpeg: str = "ffmpeg",
     limits: Limits | None = None,
+    palette: bytes | None = None,
 ) -> tuple[list[list[str]], list[str]]:
     """
     Builds the ffmpeg commands for :func:`preview`: one per clip, then the encoder. Pure.
@@ -114,8 +129,12 @@ def build_preview_commands(
     aspect applied). Each clip command decodes with one thread (``-ss``/``-t`` before ``-i``) and
     writes exactly its frames, scaled and cropped, as raw RGB on stdout. The encoder reads them all,
     one clip after another, on stdin and writes the GIF or WebP with up to `threads` threads.
-    Raises InvalidOptionsError for a config over `limits`, and when a GIF would need more than
-    ``limits.max_frame_bytes`` of frames in memory (its palette is built from every frame).
+    Raises InvalidOptionsError for a config over `limits`.
+
+    `palette` is the PNG that :func:`build_preview_palette_command`'s command writes from the
+    same frames: a GIF's encoder then reads it as a second input. Without it, a GIF's encoder
+    builds the palette itself, which holds every frame in memory until the end; the GIF is
+    byte-identical either way. A WebP ignores it.
     """
     limits = resolve_limits(limits)
     limits.check(config)
@@ -123,17 +142,6 @@ def build_preview_commands(
         duration, config.samples, config.sample_duration, config.start_offset_percent, config.end_offset_percent
     )
     (scale_w, scale_h), (out_w, out_h) = preview_size(width, height, config)
-    total_frames = sum(_frames(length, config.fps) for _, length in clips)
-    needed = total_frames * out_w * out_h * 3
-    budget = limits.max_frame_bytes
-    if isinstance(config, GifPreviewConfig) and budget is not None and needed > budget:
-        raise InvalidOptionsError(
-            f"These settings would make the preview too large to render as a GIF: its frames would take "
-            f"{megabytes(needed)} of memory, and the limit is {megabytes(budget)}. Use a smaller size, a lower "
-            "frame rate, or fewer or shorter clips.",
-            detail=f"{total_frames} frames of {out_w}x{out_h}",
-            limit="max_frame_bytes",
-        )
 
     vf = f"fps={config.fps},scale={scale_w}:{scale_h}:flags=lanczos,setsar=1"
     if (scale_w, scale_h) != (out_w, out_h):
@@ -147,15 +155,36 @@ def build_preview_commands(
         cmd += ["-frames:v", str(_frames(length, config.fps)), "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
         clip_commands.append(cmd)
 
-    encode = [ffmpeg, *base_args(threads), "-progress", "pipe:1", "-nostats", "-f", "rawvideo", "-pix_fmt", "rgb24"]
-    encode += ["-s", f"{out_w}x{out_h}", "-framerate", str(config.fps), "-i", "pipe:0"]
+    encode = [ffmpeg, *base_args(threads), "-progress", "pipe:1", "-nostats", *_raw_input(out_w, out_h, config.fps)]
     if isinstance(config, GifPreviewConfig):
-        encode += ["-vf", "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4"]
+        if palette is not None:
+            encode += [*palette_input(palette), *palette_use("", _PALETTEUSE)]
+        else:
+            encode += ["-vf", one_pass("", "diff", _PALETTEUSE)]
         encode += ["-loop", "0" if config.loop else "-1", *OUTPUT_FLAGS, "-f", "gif"]
     else:
         encode += ["-c:v", "libwebp_anim", "-lossless", "0", "-quality", str(config.quality)]
         encode += ["-loop", "0" if config.loop else "1", "-threads", str(threads), *OUTPUT_FLAGS, "-f", "webp"]
     return clip_commands, [*encode, file_arg(output_path)]
+
+
+def build_preview_palette_command(
+    config: GifPreviewConfig,
+    *,
+    width: int,
+    height: int,
+    threads: int,
+    ffmpeg: str = "ffmpeg",
+) -> list[str]:
+    """
+    Builds the first pass of a GIF preview: it reads the same frames as the encoder of
+    :func:`build_preview_commands` on stdin and writes their palette as one PNG on stdout, with
+    each frame's time on stderr for progress. Pass its output to :func:`build_preview_commands`
+    as `palette`. `width` x `height` is the display size. Pure.
+    """
+    out_w, out_h = preview_size(width, height, config)[1]
+    cmd = [ffmpeg, *base_args(threads), *_raw_input(out_w, out_h, config.fps)]
+    return [*cmd, *palette_output("", "diff")]
 
 
 def preview(
@@ -178,10 +207,13 @@ def preview(
     The clips are decoded one at a time by a single-threaded ffmpeg and streamed into one encoder
     that uses up to `max_workers` threads (default min(4, CPUs)), so at most two ffmpeg processes
     run, whatever the number of clips, and only one frame at a time is held in Python. A clip that
-    can't be read is left out; if none can, UnsupportedMediaError is raised. A GIF's encoder keeps
-    every frame until the palette is built, so GIFs over ``limits.max_frame_bytes`` of frames are
-    refused; so are previews over ``limits.max_gif_seconds`` in all or ``limits.max_preview_clips``
-    clips, before the file is read. Written atomically.
+    can't be read is left out; if none can, UnsupportedMediaError is raised. Previews over
+    ``limits.max_gif_seconds`` in all or ``limits.max_preview_clips`` clips are refused before the
+    file is read. Written atomically.
+
+    A GIF is made in two passes, so its memory doesn't grow with its length: the clips are decoded
+    once to build the palette (written to no file; the first third of the progress, as
+    "analysing") and again to encode with it.
     """
     limits = resolve_limits(limits)
     limits.check(config)
@@ -208,32 +240,47 @@ def preview(
             except ProcessingError as e:
                 logger.debug(f"Preview clip failed: {e}")
 
-    with atomic_output(output_path, scratch_dir) as temp:
-        clip_commands, encode = build_preview_commands(
+    def build(output: PathLike, palette: bytes | None) -> tuple[list[list[str]], list[str]]:
+        return build_preview_commands(
             input_path,
-            temp,
+            output,
             config,
-            duration=info.duration,
+            duration=info.duration or 0.0,
             width=width,
             height=height,
             threads=threads,
             ffmpeg=ffmpeg,
             limits=limits,
+            palette=palette,
         )
-        total = sum(int(cmd[cmd.index("-frames:v") + 1]) for cmd in clip_commands) / config.fps
+
+    def run(cmd: list[str], clip_commands: list[list[str]], **kwargs: Any) -> bytes:
         try:
-            run_ffmpeg(
-                encode,
-                stdin_chunks=frames(clip_commands),
-                progress_total=total,
-                on_progress=on_progress,
-                stage="encoding",
-            )
+            return run_ffmpeg(cmd, stdin_chunks=frames(clip_commands), **kwargs)
         except BinaryNotFoundError:
             raise
         except ProcessingError as e:
             if sent == 0:
                 raise UnsupportedMediaError(NO_PREVIEW_FRAMES, detail=str(e)) from e
             raise
+
+    clip_commands = build(output_path, None)[0]
+    total = sum(int(cmd[cmd.index("-frames:v") + 1]) for cmd in clip_commands) / config.fps
+    palette = None
+    report = on_progress
+    if isinstance(config, GifPreviewConfig):
+        first = build_preview_palette_command(config, width=width, height=height, threads=threads, ffmpeg=ffmpeg)
+        palette = run(
+            first,
+            clip_commands,
+            capture_stdout=True,
+            progress_total=total,
+            on_progress=scaled(on_progress, 0.0, PALETTE_SHARE),
+            stage=PALETTE_STAGE,
+        )
+        report = scaled(on_progress, PALETTE_SHARE, 1 - PALETTE_SHARE)
+    with atomic_output(output_path, scratch_dir) as temp:
+        clip_commands, encode = build(temp, palette)
+        run(encode, clip_commands, progress_total=total, on_progress=report, stage="encoding")
     if on_progress:
         on_progress(1.0, "done")

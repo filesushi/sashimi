@@ -8,7 +8,8 @@ import pytest
 from sashimi.config import VIDEO_PREVIEW, GifPreviewConfig, Limits, WebpPreviewConfig
 from sashimi.core.preview import preview_size
 from sashimi.errors import InvalidOptionsError, MediaTooShortError
-from sashimi.video import build_preview_commands, plan_preview
+from sashimi.core._ffmpeg import FRAME_PROGRESS
+from sashimi.video import build_preview_commands, build_preview_palette_command, plan_preview
 
 COMMON = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-filter_threads"]
 FORMATS = "3g2,3gp,aac,asf,avi,flac,flv,gif,m4a,matroska,mj2,mov,mp3,mp4,mpeg,mpegts,ogg,wav,webm"
@@ -18,10 +19,18 @@ VF = "fps=15,scale=640:360:flags=lanczos,setsar=1"
 FILESUSHI = Limits(max_gif_seconds=30, max_preview_clips=10, max_frame_bytes=400 * 1024 * 1024)
 
 
-def build(target, duration=103.0, width=1280, height=720, limits=None, **params):
+def build(target, duration=103.0, width=1280, height=720, limits=None, palette=None, **params):
     config = VIDEO_PREVIEW.from_params(params, target=target)
     return build_preview_commands(
-        "in.blob", "out.tmp", config, duration=duration, width=width, height=height, threads=2, limits=limits
+        "in.blob",
+        "out.tmp",
+        config,
+        duration=duration,
+        width=width,
+        height=height,
+        threads=2,
+        limits=limits,
+        palette=palette,
     )
 
 
@@ -68,21 +77,27 @@ def test_options():
     assert build("gif", loop=False)[1][-7:-5] == ["-loop", "-1"]
 
 
-def test_gifs_that_would_not_fit_in_memory_are_refused():
-    assert len(build("gif", samples=10, sample_duration=3, fps=15, limits=FILESUSHI)[0]) == 10
-    with pytest.raises(InvalidOptionsError) as e:
-        build("gif", samples=10, sample_duration=3, fps=30, limits=FILESUSHI)
-    assert e.value.user_message == (
-        "These settings would make the preview too large to render as a GIF: its frames would take 593 MB of "
-        "memory, and the limit is 400 MB. Use a smaller size, a lower frame rate, or fewer or shorter clips."
-    )
-    assert e.value.limit == "max_frame_bytes"
-    assert len(build("webp", samples=10, sample_duration=3, fps=30, max_height=720, limits=FILESUSHI)[0]) == 10
-    assert len(build("gif", samples=10, sample_duration=3, fps=30)[0]) == 10
-    with pytest.raises(InvalidOptionsError):
-        build("gif", samples=10, sample_duration=3, fps=30, max_height=720)
-    unlimited = Limits(max_frame_bytes=None)
-    assert len(build("gif", samples=10, sample_duration=3, fps=30, max_height=720, limits=unlimited)[0]) == 10
+def test_gif_previews_have_no_frame_budget():
+    for limits in (FILESUSHI, Limits(max_frame_bytes=1), None):
+        assert len(build("gif", samples=10, sample_duration=3, fps=30, limits=limits)[0]) == 10
+
+
+def test_gif_preview_in_two_passes():
+    config = VIDEO_PREVIEW.from_params({}, target="gif")
+    assert build_preview_palette_command(config, width=1280, height=720, threads=2) == [
+        *COMMON, "2", *RAW, "-s", "640x360", "-framerate", "15", "-i", "pipe:0",
+        "-vf", f"{FRAME_PROGRESS},palettegen=stats_mode=diff", "-frames:v", "1", "-fflags", "+bitexact",
+        "-f", "image2pipe", "-c:v", "png", "pipe:1",
+    ]  # fmt: skip
+    clips, encode = build("gif", palette=b"\x89PNG")
+    assert clips == build("gif")[0]
+    assert encode == [
+        *encoder(), "-protocol_whitelist", "data", "-format_whitelist", "png_pipe", "-f", "png_pipe",
+        "-i", "data:image/png;base64,iVBORw==", "-filter_complex",
+        "[0:v][1:v]paletteuse=dither=bayer:bayer_scale=4[gif]", "-map", "[gif]",
+        "-loop", "0", "-fflags", "+bitexact", "-f", "gif", "file:out.tmp",
+    ]  # fmt: skip
+    assert build("webp", palette=b"\x89PNG") == build("webp")
 
 
 @pytest.mark.parametrize(

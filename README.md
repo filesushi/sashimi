@@ -91,7 +91,7 @@ sashimi enforces only the limits you pass, as one `sashimi.config.Limits`:
 | Field | Default | What it limits |
 |---|---|---|
 | `max_pixels` | 64,000,000 | images, by decoded pixels (conversions, icons, favicon packs, edits, frames) |
-| `max_frame_bytes` | 1 GiB | video frames held in memory at once (width × height × 3 each): animated sheets, GIF previews, GIFs made from a video |
+| `max_frame_bytes` | 1 GiB | video frames held in memory at once (width × height × 3 each): an animated sheet's clips |
 | `max_animation_bytes` | 1 GiB | frames of an animated GIF or WebP being edited (width × height × 4 each) |
 | `max_sheet_pixels` | 64,000,000 | contact sheets |
 | `max_video_seconds` | none | WebM/MP4 conversions (MP4 copies included), rotate and flip, accurate cuts |
@@ -106,6 +106,13 @@ longer than allowed), so a web app can refuse a job before it has the file. What
 format limits and correctness rules: WebP's 16,383 px, the codecs' quality and bitrate ranges and
 sample rates, a frame rate of at most 50 for GIF and animated WebP (browsers slow faster frames
 down), and tiles of at least 16 px.
+
+A GIF's palette is built from all its frames, so GIFs made from a video, GIF previews and animated
+GIF sheets are made in two passes: the first builds the palette, the second encodes with it.
+Neither holds more than a few frames, so a GIF's memory doesn't grow with its length, at the cost
+of decoding the video twice; the output is the same as building the palette in one pass. The
+palette passes between them in memory, never as a file. A palette per frame (`palette_mode =
+"single"`) takes one pass.
 
 ## Metadata
 
@@ -268,7 +275,7 @@ taking a number with a unit, or `none` for no limit:
 | Flag | Commands | Default | Example |
 |---|---|---|---|
 | `--max-pixels` | `convert`, `resize`, `rotate`, `favicon`, `edit`, `frames`, `strip` | 64M | `sashimi convert scan.tif jpeg --max-pixels 300M` |
-| `--max-frame-bytes` | `convert` (GIFs), `thumbs` (animated), `preview` (GIF) | 1G | `sashimi convert talk.mp4 gif -d 60 --max-frame-bytes 4G` |
+| `--max-frame-bytes` | `thumbs` (animated) | 1G | `sashimi thumbs film.mkv -a --cols 6 --rows 6 --max-frame-bytes 4G` |
 | `--max-animation-bytes` | `rotate`, `edit`, `frames` | 1G | `sashimi edit big.gif --rotate 90 --max-animation-bytes none` |
 | `--max-sheet-pixels` | `thumbs` | 64M | `sashimi thumbs film.mkv --cols 10 --rows 20 --max-sheet-pixels 200M` |
 
@@ -494,7 +501,7 @@ sh scripts/sandbox_check.sh   # run every converter in a FileSushi-style locked-
 --read-only --pids-limit 128 --cpus 2 --memory 1g`) on an input named `original.blob`. Each job reports
 its time, peak memory and peak process/thread count, and fails if the output is invalid, anything is
 written outside `/vault/output` or left in `/tmp`, or a network call is attempted. `--skip-long` skips
-the 10-minute, 300 MB animated-sheet budget case. The image is tagged `sashimi-sandbox-check`, or
+the two cases on a 10-minute 1080p video: the 300 MB animated-sheet budget and a 60-second, 1920 px GIF. The image is tagged `sashimi-sandbox-check`, or
 `$SASHIMI_SANDBOX_IMAGE` if set; remove it with `docker rmi` when you're done.
 
 ## License

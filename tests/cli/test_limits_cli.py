@@ -176,10 +176,18 @@ def test_sheet_and_frame_limits(video_blob, tmp_path):
     sheet = runner.invoke(app, ["thumbs", "clip.mkv", "--max-sheet-pixels", "1M", "--json"])
     assert sheet.exit_code == 1
     assert result_message(sheet).startswith("These settings would make the contact sheet too large: it would have")
-    gif = runner.invoke(app, ["convert", "clip.mkv", "gif", "--max-frame-bytes", "1M", "--json"])
-    assert gif.exit_code == 1
-    assert result_message(gif).startswith("These settings would make the GIF too large to render: its frames")
-    assert (
-        runner.invoke(app, ["convert", "clip.mkv", "gif", "-d", "1", "--fps", "2", "--max-frame-bytes", "1M"]).exit_code
-        == 0
-    )
+    animated = runner.invoke(app, ["thumbs", "clip.mkv", "-a", "--max-frame-bytes", "1M", "--json"])
+    assert animated.exit_code == 1
+    assert result_message(animated).startswith("These settings would make the animated sheet too large to render")
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("command", [["convert", "clip.mkv", "gif"], ["preview", "clip.mkv", "--output-format", "gif"]])
+def test_gifs_have_no_frame_budget(video_blob, tmp_path, command):
+    (tmp_path / "clip.mkv").write_bytes(video_blob.read_bytes())
+    flag = runner.invoke(app, [*command, "--max-frame-bytes", "1M"])
+    assert flag.exit_code == 2 and "No such option: --max-frame-bytes" in " ".join(flag.stderr.split())
+    toml(tmp_path, "[limits]\nmax_frame_bytes = 1\n")
+    made = runner.invoke(app, [*command, "--json"])
+    assert made.exit_code == 0, made.output
+    assert json.loads(made.stdout)["summary"]["success"] == 1

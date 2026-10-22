@@ -19,7 +19,7 @@ from sashimi.config import (
     VideoConvertConfig,
     WebpVideoConfig,
 )
-from sashimi.config._limits import duration_text, megabytes, resolve_limits
+from sashimi.config._limits import duration_text, resolve_limits
 from sashimi.config._video import _H264Options, _Vp9Options
 from sashimi.core._atomic import PathLike, atomic_output
 from sashimi.core._ffmpeg import (
@@ -30,9 +30,19 @@ from sashimi.core._ffmpeg import (
     ffmpeg_binary,
     file_arg,
     fmt_seconds,
+    holds_packets,
     run_ffmpeg,
 )
 from sashimi.core._mediameta import dropped_streams, first_stream, metadata_args, opus_kbps
+from sashimi.core._palette import (
+    PALETTE_SHARE,
+    PALETTE_STAGE,
+    one_pass,
+    palette_input,
+    palette_output,
+    palette_use,
+    scaled,
+)
 from sashimi.core._resources import resolve_max_workers
 from sashimi.core.probe import VIDEO_CONTAINERS, MediaInfo, probe
 from sashimi.errors import (
@@ -46,8 +56,9 @@ from sashimi.errors import (
 __all__ = [
     "VideoRoute",
     "build_convert_command",
+    "build_palette_command",
     "convert",
-    "gif_frame_bytes",
+    "two_pass",
     "plan_mp4_route",
     "subtitle_conversions",
     "build_trim_command",
@@ -184,7 +195,77 @@ def _probe_video(input_path: PathLike) -> MediaInfo:
 
 def _check_start(start: float, duration: float) -> None:
     if start >= duration:
-        raise InvalidOptionsError(f"The start time ({start:g}s) is past the end of the video ({duration:.0f}s).")
+        raise InvalidOptionsError(
+            f"The start time ({start:g}s) is at or past the end of the video ({fmt_seconds(duration)}s)."
+        )
+
+
+def _after_last_frame(start: float, action: str) -> InvalidOptionsError:
+    return InvalidOptionsError(
+        f"The start time ({start:g}s) is after the video's last frame, so there's nothing to {action}.",
+        detail="no frames after the start time",
+    )
+
+
+def _too_close_to_the_end(start: float, fps: int) -> InvalidOptionsError:
+    return InvalidOptionsError(
+        f"The start time ({start:g}s) is too close to the end of the video: it leaves less than one frame "
+        f"at {fps} fps, so there's nothing to convert.",
+        detail="no frames after the start time at this frame rate",
+    )
+
+
+def _frames_after(
+    input_path: PathLike, start: float, ffmpeg: str, *, copied: bool = False, fps: int | None = None
+) -> bool:
+    """
+    Whether ffmpeg, seeking to `start`, finds any video frame; True when that can't be told.
+    Frames are decoded, as a re-encode sees them (through ``fps=`` `fps` when given, as a GIF or
+    animated WebP does), or with `copied` only demuxed, as a stream copy sees them (no decoding,
+    so it costs the same whatever the keyframe interval).
+    """
+    cmd = [ffmpeg, *base_args(1), *INPUT_PROTOCOLS, "-threads", "1", "-ss", fmt_seconds(start)]
+    cmd += ["-i", file_arg(input_path)]
+    if copied:
+        cmd += ["-map", "0:v:0", "-c", "copy", "-copypriorss", "0", "-copyinkf", "-frames:v", "1", "-f", "data"]
+    else:
+        scale = f"fps={fps},scale=2:2" if fps else "scale=2:2"
+        cmd += ["-an", "-sn", "-dn", "-vf", scale, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray"]
+    cmd.append("pipe:1")
+    try:
+        return bool(run_ffmpeg(cmd, capture_stdout=True))
+    except BinaryNotFoundError:
+        raise
+    except ProcessingError:
+        return True
+
+
+def _nothing_from(input_path: PathLike, start: float, ffmpeg: str, action: str) -> InvalidOptionsError | None:
+    """
+    Why ffmpeg, seeking to `start`, decodes no video frame: there is none after it, or there are
+    some it can't decode from there (it found no keyframe to start from). None when it decodes one.
+    """
+    if _frames_after(input_path, start, ffmpeg):
+        return None
+    if _frames_after(input_path, start, ffmpeg, copied=True):
+        return InvalidOptionsError(
+            f"No frame of the video could be read from the start time ({start:g}s), so there's nothing to "
+            f"{action}. Try an earlier start.",
+            detail="frames after the start time can't be decoded from there",
+        )
+    return _after_last_frame(start, action)
+
+
+def _require_video(output: PathLike, input_path: PathLike, start: float, ffmpeg: str, action: str) -> None:
+    """
+    Raises unless `output` holds a video frame: InvalidOptionsError when ffmpeg decodes no frame
+    of the input from `start` (see :func:`_nothing_from`), else ProcessingError.
+    """
+    if holds_packets(output, "video"):
+        return
+    if refusal := _nothing_from(input_path, start, ffmpeg, action):
+        raise refusal
+    raise ProcessingError(f"ffmpeg wrote no video frames from {start:g}s")
 
 
 def _length_limit(requested: float | None, start: float, duration: float, limit: float | None) -> float:
@@ -288,6 +369,7 @@ def build_convert_command(
     route: VideoRoute = "encode",
     limits: Limits | None = None,
     source: MediaInfo | None = None,
+    palette: bytes | None = None,
 ) -> list[str]:
     """
     Builds the ffmpeg command for :func:`convert`. Pure: no filesystem or process access.
@@ -305,6 +387,12 @@ def build_convert_command(
     `source` is the probed input, used to carry out ``metadata`` (stream tags and languages) and
     to keep Opus within its per-channel bitrate; without it, tags named by the mode's fixed list
     are removed and the bitrate is passed as asked.
+
+    `palette` is the PNG that :func:`build_palette_command`'s command writes, for a GIF that
+    :func:`two_pass` says is built in two passes: the command then reads it as a second input
+    instead of building the palette itself. Without it, a GIF's command builds the palette in the
+    same pass, which holds every frame in memory until the end; the GIF is byte-identical
+    either way. Other targets ignore it.
     """
     limits = resolve_limits(limits)
     limits.check(config)
@@ -317,25 +405,14 @@ def build_convert_command(
             input_path, output_path, config, route, t_value=t_value, threads=threads, ffmpeg=ffmpeg, source=source
         )
 
-    cmd = [ffmpeg, *base_args(threads), *_progress_args(), *INPUT_PROTOCOLS, "-threads", str(threads)]
-    if config.start_seconds > 0:
-        cmd += ["-ss", fmt_seconds(config.start_seconds)]
-    cmd += ["-t", fmt_seconds(t_value), "-i", file_arg(input_path)]
-
+    cmd = [ffmpeg, *base_args(threads), *_progress_args(), *_input_args(input_path, config, t_value, threads)]
     if isinstance(config, GifVideoConfig):
-        paletteuse = ["new=1"] if config.palette_mode == "single" else []
-        if config.dither == "bayer":
-            paletteuse += ["dither=bayer", "bayer_scale=4"]
+        filters = _gif_filters(config)
+        if palette is not None and two_pass(config):
+            cmd += [*palette_input(palette), *palette_use(filters, _paletteuse(config))]
         else:
-            paletteuse.append(f"dither={config.dither}")
-        palette = f"[a]palettegen=stats_mode={config.palette_mode}[p];[b][p]paletteuse={':'.join(paletteuse)}"
-        cmd += [
-            "-vf",
-            f"fps={config.fps},scale='min({config.max_width},iw)':-2:flags=lanczos,split[a][b];{palette}",
-            "-loop",
-            "0" if config.loop else "-1",
-            "-an",
-        ]
+            cmd += ["-vf", one_pass(filters, config.palette_mode, _paletteuse(config))]
+        cmd += ["-loop", "0" if config.loop else "-1", "-an"]
     elif isinstance(config, WebpVideoConfig):
         cmd += [
             "-vf",
@@ -359,27 +436,57 @@ def build_convert_command(
     return cmd
 
 
-def gif_frame_bytes(info: MediaInfo, config: GifVideoConfig) -> int:
+def two_pass(config: GifVideoConfig) -> bool:
     """
-    The memory a GIF made from this video needs for its frames, counted as for
-    ``Limits.max_frame_bytes`` (width x height x 3 bytes a frame): ffmpeg keeps every frame
-    until it has built the palette. Pure.
+    Whether :func:`convert` builds this GIF's palette in a first pass of its own. Pure.
+
+    A palette built from every frame ("diff", "full") is: building it in the same pass would hold
+    every frame in memory until the end. A palette per frame ("single") streams in one pass.
     """
-    width, height = max(info.width or 2, 2), max(info.height or 2, 2)
-    out_w = min(config.max_width, width)
-    out_h = max(2, round(height * out_w / width / 2) * 2)
-    remaining = max(0.0, (info.duration or 0.0) - config.start_seconds)
-    frames = max(1, round(min(config.duration_seconds, remaining) * config.fps))
-    return frames * out_w * out_h * 3
+    return config.palette_mode != "single"
 
 
-def _too_big_gif(needed: int, limit: int) -> InvalidOptionsError:
-    return InvalidOptionsError(
-        f"These settings would make the GIF too large to render: its frames would take {megabytes(needed)} of "
-        f"memory, and the limit is {megabytes(limit)}. Use a smaller width, a lower frame rate or a shorter length.",
-        detail=f"{needed} bytes of frames",
-        limit="max_frame_bytes",
-    )
+def _gif_filters(config: GifVideoConfig) -> str:
+    return f"fps={config.fps},scale='min({config.max_width},iw)':-2:flags=lanczos"
+
+
+def _paletteuse(config: GifVideoConfig) -> str:
+    options = ["new=1"] if config.palette_mode == "single" else []
+    if config.dither == "bayer":
+        options += ["dither=bayer", "bayer_scale=4"]
+    else:
+        options.append(f"dither={config.dither}")
+    return ":".join(options)
+
+
+def _input_args(input_path: PathLike, config: VideoConvertConfig, t_value: float, threads: int) -> list[str]:
+    cmd = [*INPUT_PROTOCOLS, "-threads", str(threads)]
+    if config.start_seconds > 0:
+        cmd += ["-ss", fmt_seconds(config.start_seconds)]
+    return [*cmd, "-t", fmt_seconds(t_value), "-i", file_arg(input_path)]
+
+
+def build_palette_command(
+    input_path: PathLike,
+    config: GifVideoConfig,
+    *,
+    duration: float,
+    threads: int,
+    ffmpeg: str = "ffmpeg",
+    limits: Limits | None = None,
+) -> list[str]:
+    """
+    Builds the first pass of a two-pass GIF (see :func:`two_pass`): the same frames as
+    :func:`build_convert_command`'s, through ``palettegen``, written as one PNG on stdout, with
+    each frame's time on stderr for progress. Pass its output to :func:`build_convert_command`
+    as `palette`. Pure; raises the same user errors as :func:`build_convert_command`.
+    """
+    limits = resolve_limits(limits)
+    limits.check(config)
+    _check_start(config.start_seconds, duration)
+    t_value = _length_limit(config.duration_seconds, config.start_seconds, duration, limits.max_video_seconds)
+    cmd = [ffmpeg, *base_args(threads), *_input_args(input_path, config, t_value, threads)]
+    return [*cmd, "-an", *palette_output(_gif_filters(config), config.palette_mode)]
 
 
 def convert(
@@ -404,16 +511,20 @@ def convert(
 
     `limits` (default ``Limits()``): a GIF or animated WebP longer than ``max_gif_seconds`` and a
     WebM or MP4 clip longer than ``max_video_seconds`` raise InvalidOptionsError before the file
-    is read; a whole video longer than ``max_video_seconds`` raises MediaTooLongError, and a GIF
-    whose frames need more than ``max_frame_bytes`` (see :func:`gif_frame_bytes`)
-    InvalidOptionsError.
+    is read; a whole video longer than ``max_video_seconds`` raises MediaTooLongError. A start
+    time after the video's last frame (inside the probed length, for example where the audio runs
+    on past the picture) raises InvalidOptionsError, and nothing is written.
+
+    A GIF's memory doesn't grow with its length: a palette built from every frame is built in a
+    first pass, written to no file, then used in a second (see :func:`two_pass`), so the video is
+    decoded twice. The first pass is the first third of the progress, as "analysing".
 
     WebM and MP4 keep the source's tags and chapters as far as the container holds them, unless
     ``metadata`` says to remove location tags or all of them; GIFs and animated WebPs hold none.
     An Opus bitrate above what Opus allows for the audio's channels is lowered to it.
 
     `max_workers` is the number of threads each ffmpeg stage may use (default min(4, CPUs)).
-    One ffmpeg process runs; with ``max_workers=2`` it uses roughly 15 threads in total.
+    One ffmpeg process runs at a time; with ``max_workers=2`` it uses roughly 15 threads in total.
     The output is written atomically; the input's name and extension are ignored.
     """
     limits = resolve_limits(limits)
@@ -421,15 +532,28 @@ def convert(
     threads = resolve_max_workers(max_workers)
     info = _probe_video(input_path)
     assert info.duration is not None
-    if isinstance(config, GifVideoConfig) and limits.max_frame_bytes is not None:
-        _check_start(config.start_seconds, info.duration)
-        needed = gif_frame_bytes(info, config)
-        if needed > limits.max_frame_bytes:
-            raise _too_big_gif(needed, limits.max_frame_bytes)
     remaining = info.duration - config.start_seconds
     expected = min(config.duration_seconds or remaining, remaining)
+    ffmpeg = ffmpeg_binary()
+    animated = isinstance(config, (GifVideoConfig, WebpVideoConfig))
 
     def run(route: VideoRoute) -> VideoRoute:
+        palette = None
+        report = on_progress
+        if isinstance(config, GifVideoConfig) and two_pass(config):
+            first = build_palette_command(
+                input_path, config, duration=info.duration or 0.0, threads=threads, ffmpeg=ffmpeg, limits=limits
+            )
+            palette = run_ffmpeg(
+                first,
+                capture_stdout=True,
+                progress_total=expected,
+                on_progress=scaled(on_progress, 0.0, PALETTE_SHARE),
+                stage=PALETTE_STAGE,
+            )
+            if not palette:
+                raise ProcessingError("ffmpeg built no palette: no frames were decoded")
+            report = scaled(on_progress, PALETTE_SHARE, 1 - PALETTE_SHARE)
         with atomic_output(output_path, scratch_dir) as temp:
             cmd = build_convert_command(
                 input_path,
@@ -437,12 +561,15 @@ def convert(
                 config,
                 duration=info.duration or 0.0,
                 threads=threads,
-                ffmpeg=ffmpeg_binary(),
+                ffmpeg=ffmpeg,
                 route=route,
                 limits=limits,
                 source=info,
+                palette=palette,
             )
-            run_ffmpeg(cmd, progress_total=expected, on_progress=on_progress, stage="encoding")
+            run_ffmpeg(cmd, progress_total=expected, on_progress=report, stage="encoding")
+            if config.start_seconds > 0 and not animated:
+                _require_video(temp, input_path, config.start_seconds, ffmpeg, "convert")
         return route
 
     _log_opus_cap(config, info)
@@ -452,6 +579,12 @@ def convert(
     except BinaryNotFoundError:
         raise
     except ProcessingError as e:
+        if animated and config.start_seconds > 0:
+            assert isinstance(config, (GifVideoConfig, WebpVideoConfig))
+            if refusal := _nothing_from(input_path, config.start_seconds, ffmpeg, "convert"):
+                raise refusal from e
+            if not _frames_after(input_path, config.start_seconds, ffmpeg, fps=config.fps):
+                raise _too_close_to_the_end(config.start_seconds, config.fps) from e
         if planned == "encode":
             raise
         logger.info(f"Copying into MP4 failed, re-encoding instead: {str(e).splitlines()[0]}")
@@ -583,14 +716,22 @@ def trim(
 
     An accurate cut longer than ``limits.max_video_seconds`` raises InvalidOptionsError, or
     MediaTooLongError when it runs to the end of a longer video. Copies have no length limit.
+    A start time after the video's last frame (inside the probed length, for example where the
+    audio runs on past the picture) raises InvalidOptionsError, and nothing is written; a copy
+    would otherwise hold only the frames before it, from the keyframe.
     """
     limits = resolve_limits(limits)
     limits.check(config)
     info = _probe_video(input_path)
     assert info.duration is not None
+    _check_start(config.start_seconds, info.duration)
     copy = isinstance(config, CopyTrimConfig)
     if copy:
         check_copy_compatible(info, config.container, config.metadata)
+    ffmpeg = ffmpeg_binary()
+    start = config.start_seconds
+    if copy and start > 0 and not _frames_after(input_path, start, ffmpeg, copied=True):
+        raise _after_last_frame(start, "cut")
     threads = 1 if copy else resolve_max_workers(max_workers)
     _log_opus_cap(config, info)
     subtitles = [stream.codec for stream in info.streams if stream.type == "subtitle"]
@@ -601,7 +742,7 @@ def trim(
             config,
             duration=info.duration,
             threads=threads,
-            ffmpeg=ffmpeg_binary(),
+            ffmpeg=ffmpeg,
             subtitles=subtitles,
             limits=limits,
             source=info,
@@ -609,9 +750,11 @@ def trim(
         if copy:
             run_ffmpeg(cmd)
         else:
-            remaining = info.duration - config.start_seconds
+            remaining = info.duration - start
             expected = min(config.length or remaining, remaining)
             run_ffmpeg(cmd, progress_total=expected, on_progress=on_progress, stage="encoding")
+        if start > 0:
+            _require_video(temp, input_path, start, ffmpeg, "cut")
     if on_progress:
         on_progress(1.0, "done")
 

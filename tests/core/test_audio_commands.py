@@ -125,4 +125,10 @@ def test_audio_has_no_length_limit_by_default():
 def test_start_past_end_names_the_source_kind():
     with pytest.raises(InvalidOptionsError) as e:
         build_convert_command("in", "out", Mp3AudioConfig(start_seconds=50), duration=30.0, source_kind="video")
-    assert e.value.user_message == "The start time (50s) is past the end of the video (30s)."
+    assert e.value.user_message == "The start time (50s) is at or past the end of the video (30s)."
+
+
+def test_a_start_past_the_end_shows_the_length_to_the_millisecond():
+    with pytest.raises(InvalidOptionsError) as e:
+        build_convert_command("in", "out", Mp3AudioConfig(start_seconds=4), duration=3.523, source_kind="video")
+    assert e.value.user_message == "The start time (4s) is at or past the end of the video (3.523s)."

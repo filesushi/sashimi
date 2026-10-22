@@ -16,10 +16,8 @@ from sashimi.config import (
     Mp3AudioConfig,
 )
 from sashimi.config._limits import duration_text, megabytes, megapixels, resolve_limits
-from sashimi.core.probe import MediaInfo
 from sashimi.core.sheets.static import check_sheet_size
 from sashimi.errors import InvalidOptionsError, MediaTooLargeError
-from sashimi.video import gif_frame_bytes
 
 
 @pytest.mark.parametrize(
@@ -84,19 +82,6 @@ def test_each_length_limit_checks_only_its_own_outputs():
     Limits(max_audio_seconds=5).check(VIDEO_PREVIEW.from_params({"samples": 10}, target="gif"))
     with pytest.raises(InvalidOptionsError):
         Limits(max_gif_seconds=5).check(VIDEO_PREVIEW.from_params({"samples": 3}, target="gif"))
-
-
-def _video(width, height, duration=60.0):
-    return MediaInfo(container="matroska", duration=duration, width=width, height=height, has_video=True)
-
-
-def test_gif_frame_memory_is_counted_like_the_other_frame_budgets():
-    config = VIDEO_CONVERT.from_params({}, target="gif")
-    assert gif_frame_bytes(_video(1280, 720), config) == 120 * 480 * 270 * 3
-    small = VIDEO_CONVERT.from_params({"duration_seconds": 30, "fps": 30, "max_width": 640}, target="gif")
-    assert gif_frame_bytes(_video(320, 240, duration=10.0), small) == 300 * 320 * 240 * 3
-    late = VIDEO_CONVERT.from_params({"start_seconds": 55}, target="gif")
-    assert gif_frame_bytes(_video(1280, 720), late) == 60 * 480 * 270 * 3
 
 
 def test_sheet_size_is_checked_against_the_format_and_the_limit():

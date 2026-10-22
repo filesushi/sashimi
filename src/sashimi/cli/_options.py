@@ -556,8 +556,7 @@ MaxFrameBytes = Annotated[
     option(
         "--max-frame-bytes",
         metavar="SIZE",
-        help="Memory for the video frames a GIF, GIF preview or animated sheet holds at once, e.g. 4G, "
-        "or none [default: 1G].",
+        help="Memory for the clips an animated sheet holds at once, e.g. 4G, or none [default: 1G].",
         panel=LIMITS,
     ),
 ]

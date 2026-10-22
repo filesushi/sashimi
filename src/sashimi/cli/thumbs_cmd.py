@@ -336,7 +336,6 @@ def preview_cmd(
         Optional[str], _option("--quality", "-q", help="WebP quality: 75, 75% or 0.75 [default: 75].", panel=PREVIEW)
     ] = None,
     no_loop: Annotated[bool, _option("--no-loop", help="Play once instead of looping.", panel=PREVIEW)] = False,
-    max_frame_bytes: opt.MaxFrameBytes = None,
 ):
     """
     Make a short preview of each video: [bold]--samples[/bold] clips of [bold]--clip-length[/bold]
@@ -350,7 +349,7 @@ def preview_cmd(
     from sashimi.config import VIDEO_PREVIEW
 
     opt.single_file_or_fail(paths, output)
-    limits = _limits.resolve(max_frame_bytes=max_frame_bytes)
+    limits = _limits.resolve()
     suffixes = {".webp": "webp", ".gif": "gif"}
     fmt = opt.format_from_output(output_format.value if output_format else None, output, suffixes) or "webp"
     model = VIDEO_PREVIEW.model_for(target=fmt)

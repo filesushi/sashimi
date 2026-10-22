@@ -19,14 +19,20 @@ from sashimi.errors import InvalidOptionsError, MediaTooLongError
 from sashimi.core.probe import MediaInfo, StreamInfo
 from sashimi.video import (
     build_convert_command,
+    build_palette_command,
     build_transform_command,
     build_trim_command,
     check_copy_compatible,
     plan_mp4_route,
+    two_pass,
 )
 
 COMMON = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-filter_threads", "2"]
 FORMATS = "3g2,3gp,aac,asf,avi,flac,flv,gif,m4a,matroska,mj2,mov,mp3,mp4,mpeg,mpegts,ogg,wav,webm"
+FRAME_PROGRESS = (
+    "metadata=mode=add:key=sashimi_progress:value=1,metadata=mode=print:key=sashimi_progress:file=pipe\\\\:2:direct=1"
+)
+"""Prints each frame's time on stderr: the palette pass's progress."""
 PROGRESS = ["-progress", "pipe:1", "-nostats", "-protocol_whitelist", "file", "-format_whitelist", FORMATS]
 GIF_FILTER = (
     "fps={fps},scale='min({w},iw)':-2:flags=lanczos,split[a][b];"
@@ -41,9 +47,11 @@ FILESUSHI = Limits(max_video_seconds=600, max_gif_seconds=30)
 """FileSushi's limits: 10 minutes of video, 30 s GIFs."""
 
 
-def build(target, duration=103.0, limits=None, **params):
+def build(target, duration=103.0, limits=None, palette=None, **params):
     config = VIDEO_CONVERT.from_params(params, target=target)
-    return build_convert_command("in.blob", "out.tmp", config, duration=duration, threads=2, limits=limits)
+    return build_convert_command(
+        "in.blob", "out.tmp", config, duration=duration, threads=2, limits=limits, palette=palette
+    )
 
 
 def test_gif_defaults():
@@ -59,6 +67,47 @@ def test_gif_with_options_puts_seek_and_length_before_input():
     i = cmd.index("-i")
     assert cmd[i - 4 : i] == ["-ss", "12.5", "-t", "4"]
     assert cmd[cmd.index("-vf") + 1] == GIF_FILTER.format(fps=8, w=320)
+
+
+def test_gif_palette_pass():
+    config = VIDEO_CONVERT.from_params({"start_seconds": 12.5, "palette_mode": "full"}, target="gif")
+    assert build_palette_command("in.blob", config, duration=103.0, threads=2) == [
+        *COMMON, *PROGRESS[3:], "-threads", "2",
+        "-ss", "12.5", "-t", "10", "-i", "file:in.blob", "-an",
+        "-vf", f"fps=12,scale='min(480,iw)':-2:flags=lanczos,{FRAME_PROGRESS},palettegen=stats_mode=full",
+        "-frames:v", "1", "-fflags", "+bitexact", "-f", "image2pipe", "-c:v", "png", "pipe:1",
+    ]  # fmt: skip
+
+
+def test_gif_encode_pass_reads_the_palette_inline():
+    assert build("gif", palette=b"\x89PNG") == [
+        *COMMON, *PROGRESS, "-threads", "2", "-t", "10", "-i", "file:in.blob",
+        "-protocol_whitelist", "data", "-format_whitelist", "png_pipe", "-f", "png_pipe",
+        "-i", "data:image/png;base64,iVBORw==",
+        "-filter_complex",
+        "[0:v]fps=12,scale='min(480,iw)':-2:flags=lanczos[frames];[frames][1:v]"
+        "paletteuse=dither=bayer:bayer_scale=4[gif]",
+        "-map", "[gif]", "-loop", "0", "-an",
+        "-threads", "2", "-fflags", "+bitexact", "-f", "gif", "file:out.tmp",
+    ]  # fmt: skip
+
+
+def test_a_palette_per_frame_takes_one_pass():
+    assert two_pass(VIDEO_CONVERT.from_params({}, target="gif"))
+    assert two_pass(VIDEO_CONVERT.from_params({"palette_mode": "full"}, target="gif"))
+    single = VIDEO_CONVERT.from_params({"palette_mode": "single"}, target="gif")
+    assert not two_pass(single)
+    assert build("gif", palette_mode="single", palette=b"\x89PNG") == build("gif", palette_mode="single")
+    assert build("webp", palette=b"\x89PNG") == build("webp")
+
+
+def test_the_palette_pass_checks_like_the_encode_pass():
+    config = VIDEO_CONVERT.from_params({"start_seconds": 200}, target="gif")
+    with pytest.raises(InvalidOptionsError):
+        build_palette_command("in.blob", config, duration=103.0, threads=2)
+    long = VIDEO_CONVERT.from_params({"duration_seconds": 40}, target="gif")
+    with pytest.raises(InvalidOptionsError):
+        build_palette_command("in.blob", long, duration=103.0, threads=2, limits=FILESUSHI)
 
 
 def test_animated_webp_defaults():
@@ -115,7 +164,14 @@ def test_probed_length_minus_start_is_the_limit_without_a_duration():
 def test_start_past_end_is_a_user_error():
     with pytest.raises(InvalidOptionsError) as e:
         build("mp4", duration=103.0, start_seconds=200)
-    assert e.value.user_message == "The start time (200s) is past the end of the video (103s)."
+    assert e.value.user_message == "The start time (200s) is at or past the end of the video (103s)."
+
+
+@pytest.mark.parametrize("start, duration, shown", [(4, 3.523, "3.523"), (4, 4.0, "4"), (5, 4.9996, "5")])
+def test_a_start_past_the_end_shows_the_length_to_the_millisecond(start, duration, shown):
+    with pytest.raises(InvalidOptionsError) as e:
+        build("mp4", duration=duration, start_seconds=start)
+    assert e.value.user_message == f"The start time ({start}s) is at or past the end of the video ({shown}s)."
 
 
 @pytest.mark.parametrize(
@@ -263,7 +319,7 @@ def test_copy_trim_has_no_length_limit_and_checks_the_start():
     VIDEO_TRIM.from_params({"end_seconds": 7200}, container="mkv")
     with pytest.raises(InvalidOptionsError) as e:
         build_trim_command("a", "b", CopyTrimConfig(container="mkv", start_seconds=50), duration=40.0)
-    assert e.value.user_message == "The start time (50s) is past the end of the video (40s)."
+    assert e.value.user_message == "The start time (50s) is at or past the end of the video (40s)."
 
 
 @pytest.mark.parametrize(

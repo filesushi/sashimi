@@ -190,7 +190,7 @@ LIMIT_NOTES = {
     "--max-sheet-pixels": format_limit("max_sheet_pixels", L.max_sheet_pixels),
 }
 for command, flags in {
-    "convert": ("--max-pixels", "--max-frame-bytes"),
+    "convert": ("--max-pixels",),
     "resize": ("--max-pixels",),
     "favicon": ("--max-pixels",),
     "edit": ("--max-pixels", "--max-animation-bytes"),
@@ -198,7 +198,6 @@ for command, flags in {
     "frames": ("--max-pixels", "--max-animation-bytes"),
     "strip": ("--max-pixels",),
     "thumbs": ("--max-sheet-pixels", "--max-frame-bytes"),
-    "preview": ("--max-frame-bytes",),
 }.items():
     EXPECTED[command].update({flag: LIMIT_NOTES[flag] for flag in flags})
 for notes in EXPECTED.values():

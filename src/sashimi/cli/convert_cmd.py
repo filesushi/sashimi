@@ -220,7 +220,6 @@ def convert_cmd(
     bit_depth: opt.BitDepth = None,
     flac_level: opt.FlacLevel = None,
     max_pixels: opt.MaxPixels = None,
-    max_frame_bytes: opt.MaxFrameBytes = None,
 ):
     """
     Convert images, videos and audio. Each file is handled by its type:
@@ -252,7 +251,7 @@ def convert_cmd(
     opt.single_file_or_fail(paths, output)
     from sashimi.cli import _limits
 
-    limits = _limits.resolve(max_pixels=max_pixels, max_frame_bytes=max_frame_bytes)
+    limits = _limits.resolve(max_pixels=max_pixels)
 
     from sashimi.api._batch import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
     from sashimi.api.convert import convert_files_generator, own_extensions

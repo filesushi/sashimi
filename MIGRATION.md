@@ -87,13 +87,14 @@ define your own, or read `Limits()`'s defaults. `max_pixels=` is now `limits=` o
 `image.convert`, `to_ico`, `favicon_pack`, `edit`, `select_frames`, `frame_strip` and
 `frames_info`. The config models keep only format limits as bounds, so code that read a length,
 width, grid or speed bound from `model_fields` (`annotated_types.Le`) finds none; set your own in
-your forms. GIFs made from a video now count against `max_frame_bytes` (1 GiB by default); pass
-`max_frame_bytes=None` to convert them with no memory budget, as 0.5 did. The refusals that state
+your forms. `max_frame_bytes` now guards only an animated sheet's clips: GIFs made from a video
+and GIF previews build their palette in a first pass and hold a few frames at a time, so a GIF
+preview 0.5 refused over 400 MiB of frames now succeeds, whatever the limit. The refusals that state
 a limit read differently (they now give the number in force); the length ones read as before
 when the limit is the same.
 
 On the command line, the limits a desktop user can meet have flags: `--max-pixels 200M`,
-`--max-frame-bytes 4G`, `--max-animation-bytes 4G`, `--max-sheet-pixels 200M`, or `none` to turn
+`--max-frame-bytes 4G` (animated sheets), `--max-animation-bytes 4G`, `--max-sheet-pixels 200M`, or `none` to turn
 one off. Every limit, lengths included, can be set in `sashimi.toml`:
 
 ```sh

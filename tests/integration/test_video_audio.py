@@ -93,7 +93,7 @@ def test_user_errors(video_blob, junk_blob, tmp_path):
     assert e.value.user_message == "This file doesn't look like a video we can read."
     with pytest.raises(InvalidOptionsError) as e:
         video.convert(video_blob, tmp_path / "r", GifVideoConfig(start_seconds=60))
-    assert e.value.user_message == "The start time (60s) is past the end of the video (6s)."
+    assert e.value.user_message == "The start time (60s) is at or past the end of the video (6.023s)."
     assert not (tmp_path / "r").exists() and leftovers(tmp_path) == []
 
 

@@ -24,12 +24,20 @@ from sashimi.core._ffmpeg import (
     ffmpeg_binary,
     file_arg,
     fmt_seconds,
+    holds_packets,
     run_ffmpeg,
 )
 from sashimi.core._mediameta import first_stream, metadata_args, opus_kbps
 from sashimi.core._resources import resolve_max_workers
 from sashimi.core.probe import AUDIO_CONTAINERS, VIDEO_CONTAINERS, MediaInfo, probe
-from sashimi.errors import InvalidOptionsError, MediaTooLongError, NoAudioTrackError, UnsupportedMediaError
+from sashimi.errors import (
+    BinaryNotFoundError,
+    InvalidOptionsError,
+    MediaTooLongError,
+    NoAudioTrackError,
+    ProcessingError,
+    UnsupportedMediaError,
+)
 
 __all__ = ["build_convert_command", "convert", "output_channels"]
 
@@ -52,7 +60,7 @@ def _length(config: AudioConvertConfig, duration: float, kind: str, limit: float
     """The ``-t`` value: the requested length, or the rest of the source plus the tolerance, within `limit`."""
     if config.start_seconds >= duration:
         raise InvalidOptionsError(
-            f"The start time ({config.start_seconds:g}s) is past the end of the {kind} ({duration:.0f}s)."
+            f"The start time ({config.start_seconds:g}s) is at or past the end of the {kind} ({fmt_seconds(duration)}s)."
         )
     if config.duration_seconds is not None:
         return config.duration_seconds
@@ -63,6 +71,33 @@ def _length(config: AudioConvertConfig, duration: float, kind: str, limit: float
         )
     rest = duration - config.start_seconds + DURATION_TOLERANCE_SECONDS
     return rest if limit is None else min(rest, limit)
+
+
+def _samples_after(input_path: PathLike, start: float, ffmpeg: str) -> bool:
+    """Whether the first audio track has any sound at or after `start`; True when that can't be told."""
+    cmd = [ffmpeg, *base_args(1), *INPUT_PROTOCOLS, "-ss", fmt_seconds(start), "-i", file_arg(input_path)]
+    cmd += ["-map", "0:a:0", "-vn", "-sn", "-dn", "-frames:a", "1", "-f", "s16le", "pipe:1"]
+    try:
+        return bool(run_ffmpeg(cmd, capture_stdout=True))
+    except BinaryNotFoundError:
+        raise
+    except ProcessingError:
+        return True
+
+
+def _require_audio(output: PathLike, input_path: PathLike, start: float, ffmpeg: str) -> None:
+    """
+    Raises unless `output` holds audio: InvalidOptionsError when the input's audio ends before
+    `start`, else ProcessingError.
+    """
+    if holds_packets(output, "audio"):
+        return
+    if not _samples_after(input_path, start, ffmpeg):
+        raise InvalidOptionsError(
+            f"The start time ({start:g}s) is after the end of the audio, so there's nothing to convert.",
+            detail="no audio after the start time",
+        )
+    raise ProcessingError(f"ffmpeg wrote no audio from {start:g}s")
 
 
 def build_convert_command(
@@ -165,8 +200,10 @@ def convert(
 
     Raises NoAudioTrackError for a video without audio. A clip longer than
     ``limits.max_audio_seconds`` raises InvalidOptionsError before the file is read, and a whole
-    file longer than it MediaTooLongError. One ffmpeg process runs, using at most `max_workers`
-    threads per stage (audio encoders are mostly single-threaded).
+    file longer than it MediaTooLongError. A start time after the end of the audio (inside the
+    probed length, for example where a video's picture runs on past its sound) raises
+    InvalidOptionsError, and nothing is written. One ffmpeg process runs, using at most
+    `max_workers` threads per stage (audio encoders are mostly single-threaded).
     """
     limits = resolve_limits(limits)
     limits.check(config)
@@ -181,6 +218,7 @@ def convert(
         capped = opus_kbps(config.bitrate_kbps, channels)
         if capped < config.bitrate_kbps:
             logger.info(f"Opus allows at most {capped} kb/s for {channels} channel(s); using {capped} kb/s.")
+    ffmpeg = ffmpeg_binary()
     with atomic_output(output_path, scratch_dir) as temp:
         cmd = build_convert_command(
             input_path,
@@ -188,11 +226,13 @@ def convert(
             config,
             duration=info.duration,
             threads=threads,
-            ffmpeg=ffmpeg_binary(),
+            ffmpeg=ffmpeg,
             source_kind=kind,
             limits=limits,
             source=info,
         )
         run_ffmpeg(cmd, progress_total=expected, on_progress=on_progress, stage="encoding")
+        if config.start_seconds > 0:
+            _require_audio(temp, input_path, config.start_seconds, ffmpeg)
     if on_progress:
         on_progress(1.0, "done")

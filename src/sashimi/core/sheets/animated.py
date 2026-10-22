@@ -22,13 +22,22 @@ from sashimi.core._ffmpeg import (
     fmt_seconds,
     run_ffmpeg,
 )
+from sashimi.core._palette import (
+    PALETTE_SHARE,
+    PALETTE_STAGE,
+    one_pass,
+    palette_input,
+    palette_output,
+    palette_use,
+    scaled,
+)
 from sashimi.core._resources import resolve_max_workers
 from sashimi.core.sheets._layout import SheetLayout, check_tiles, clip_starts, plan_layout
 from sashimi.core.sheets._render import HeaderStyle, format_duration, load_font, padded_label, render_header, stamp
 from sashimi.core.sheets.static import NO_FRAMES, check_sheet_size, header_lines, optional_path, probe_sheet_source
 from sashimi.errors import BinaryNotFoundError, InvalidOptionsError, ProcessingError, UnsupportedMediaError
 
-__all__ = ["render_animated", "build_clip_command", "build_encode_command"]
+__all__ = ["render_animated", "build_clip_command", "build_encode_command", "build_palette_command"]
 
 logger = logging.getLogger("sashimi")
 
@@ -36,6 +45,7 @@ TOO_SHORT_FOR_ANIMATED = "This video is too short for an animated contact sheet.
 MIN_ANIMATED_SECONDS = 1.0
 LABEL_PADDING = 4
 TOO_BIG_TO_RENDER = "These settings would make the animated sheet too large to render"
+_PALETTEUSE = "dither=bayer:bayer_scale=4"
 
 
 def build_clip_command(
@@ -69,37 +79,31 @@ def build_clip_command(
     ]
 
 
+def _raw_input(width: int, height: int, fps: int) -> list[str]:
+    return ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}", "-framerate", str(fps), "-i", "pipe:0"]
+
+
 def build_encode_command(
-    output_path: PathLike, config: AnimatedSheetConfig, width: int, height: int, threads: int, ffmpeg: str = "ffmpeg"
+    output_path: PathLike,
+    config: AnimatedSheetConfig,
+    width: int,
+    height: int,
+    threads: int,
+    ffmpeg: str = "ffmpeg",
+    palette: bytes | None = None,
 ) -> list[str]:
-    """Encodes raw RGB frames from stdin into the final GIF or WebP. Pure."""
-    cmd = [
-        ffmpeg,
-        *base_args(threads),
-        "-progress",
-        "pipe:1",
-        "-nostats",
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "rgb24",
-        "-s",
-        f"{width}x{height}",
-        "-framerate",
-        str(config.fps),
-        "-i",
-        "pipe:0",
-    ]
+    """
+    Encodes raw RGB frames from stdin into the final GIF or WebP. Pure. A GIF reads `palette`,
+    the PNG :func:`build_palette_command`'s command writes, as a second input; without it, it
+    builds the palette itself, holding every frame until the end.
+    """
+    cmd = [ffmpeg, *base_args(threads), "-progress", "pipe:1", "-nostats", *_raw_input(width, height, config.fps)]
     if isinstance(config, AnimatedGifSheetConfig):
-        cmd += [
-            "-vf",
-            "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4",
-            "-loop",
-            "0" if config.loop else "-1",
-            *OUTPUT_FLAGS,
-            "-f",
-            "gif",
-        ]
+        if palette is not None:
+            cmd += [*palette_input(palette), *palette_use("", _PALETTEUSE)]
+        else:
+            cmd += ["-vf", one_pass("", "diff", _PALETTEUSE)]
+        cmd += ["-loop", "0" if config.loop else "-1", *OUTPUT_FLAGS, "-f", "gif"]
     else:
         cmd += [
             "-c:v",
@@ -117,6 +121,14 @@ def build_encode_command(
             "webp",
         ]
     return [*cmd, file_arg(output_path)]
+
+
+def build_palette_command(
+    config: AnimatedGifSheetConfig, width: int, height: int, threads: int, ffmpeg: str = "ffmpeg"
+) -> list[str]:
+    """A GIF sheet's first pass: the palette of the frames on stdin, as one PNG on stdout. Pure."""
+    cmd = [ffmpeg, *base_args(threads), *_raw_input(width, height, config.fps)]
+    return [*cmd, *palette_output("", "diff")]
 
 
 def _grab_clip(cmd: list[str], frame_bytes: int) -> list[bytes] | None:
@@ -150,8 +162,10 @@ def render_animated(
 
     Clips are decoded by up to `max_workers` single-threaded ffmpeg processes at once (default
     min(4, CPUs)), then composited in Python and encoded by one ffmpeg process using
-    `max_workers` threads; ``max_workers=2`` stays near 20 threads in total. Decoded frames are
-    held in memory (at most ``limits.max_frame_bytes``) and nothing but the output is written to disk.
+    `max_workers` threads; ``max_workers=2`` stays near 20 threads in total. The clips' decoded
+    frames are held in memory (at most ``limits.max_frame_bytes``) and nothing but the output is
+    written to disk. A GIF is encoded in two passes over the same frames, the first building the
+    palette, so the encoder never holds every frame as well.
 
     A video shorter than one clip (but at least a second long) gets a single tile of the whole video.
     """
@@ -242,17 +256,27 @@ def render_animated(
                 canvas.paste(tile, (x, header_h + y))
             yield canvas.tobytes()
 
-    def report(fraction: float, stage: str) -> None:
-        if on_progress:
-            on_progress(0.5 + 0.5 * fraction, stage)
+    total = frames_per_clip / config.fps
+    palette = None
+    encode_start = 0.5
+    if isinstance(config, AnimatedGifSheetConfig):
+        palette = run_ffmpeg(
+            build_palette_command(config, sheet_w, sheet_h, workers, ffmpeg),
+            stdin_chunks=composited_frames(),
+            capture_stdout=True,
+            progress_total=total,
+            on_progress=scaled(on_progress, 0.5, 0.5 * PALETTE_SHARE),
+            stage=PALETTE_STAGE,
+        )
+        encode_start += 0.5 * PALETTE_SHARE
 
     with atomic_output(output_path, scratch_dir) as temp:
-        cmd = build_encode_command(temp, config, sheet_w, sheet_h, workers, ffmpeg)
+        cmd = build_encode_command(temp, config, sheet_w, sheet_h, workers, ffmpeg, palette)
         run_ffmpeg(
             cmd,
             stdin_chunks=composited_frames(),
-            progress_total=frames_per_clip / config.fps,
-            on_progress=report if on_progress else None,
+            progress_total=total,
+            on_progress=scaled(on_progress, encode_start, 1.0 - encode_start),
             stage="encoding",
         )
     if on_progress:

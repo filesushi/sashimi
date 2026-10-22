@@ -5,8 +5,10 @@ sashimi 0.6.0, its first PyPI release (distribution `sashimi-convert`). The seco
 image editing, frame selection and the faster "to MP4" (§1 items 9-11, §13); the third made every
 limit the caller's to set and fixed two bugs (§1 items 14-17, §14); the fourth replaced
 `keep_exif` with one `metadata` setting on every output, added reading and removing metadata, and
-fixed the last known bugs (§1 items 18-23, §15). The release isn't published yet: the owner builds
-and uploads it by hand. Until then, a wheel built from sashimi's tree at 0.6.0 is the same code.
+fixed the last known bugs (§1 items 18-23, §15). A fifth update (2026-10-22) makes GIFs in two
+passes, so their memory no longer grows with their length, and lifts the GIF frame budget (§1
+item 24, §16). The release isn't published yet: the owner builds and uploads it by hand. Until
+then, a wheel built from sashimi's tree at 0.6.0 is the same code.
 
 **Start with §1 items 14 and 18.** sashimi no longer enforces FileSushi's limits (10-minute
 videos, 30-second GIFs, …) unless FileSushi passes them, and `tool_params.py` fails to import until
@@ -244,7 +246,7 @@ images with a colour profile, now converted to sRGB (§1 item 21).
    | `max_audio_seconds` | `3600` | audio conversion and extraction (clip or whole file) | none | `MAX_AUDIO_SECONDS` |
    | `max_gif_seconds` | `30` | a GIF or animated WebP from a video, and a preview's clips together | none | `MAX_GIF_SECONDS` |
    | `max_preview_clips` | `10` | a preview's `samples` | none | `MAX_PREVIEW_SAMPLES` |
-   | `max_frame_bytes` | `400 * 1024 * 1024` | decoded frames held at once (width × height × 3 × frames): animated sheets and GIF previews, **and now GIFs made from a video** | 1 GiB | `MAX_FRAME_BYTES` |
+   | `max_frame_bytes` | `400 * 1024 * 1024` | decoded frames held at once (width × height × 3 × frames): an animated sheet's clips only (GIFs and GIF previews no longer need it, §16) | 1 GiB | `MAX_FRAME_BYTES` |
    | `max_animation_bytes` | `256 * 1024 * 1024` | decoded frames of an animated GIF/WebP being edited (width × height × 4 × frames): edit, frames, frame strip | 1 GiB | `MAX_ANIMATION_BYTES` |
    | `max_sheet_pixels` | `64_000_000` | a contact sheet's pixels | 64,000,000 | `MAX_SHEET_PIXELS` (pass it anyway, so it doesn't follow sashimi's default) |
 
@@ -252,17 +254,12 @@ images with a colour profile, now converted to sRGB (§1 item 21).
    max_gif_seconds=30, max_preview_clips=10, max_frame_bytes=400 * 1024 * 1024,
    max_animation_bytes=256 * 1024 * 1024, max_sheet_pixels=64_000_000)`.
 
-   **GIFs made from a video are the one exception.** They had no frame budget before (only the
-   30 s cap), but ffmpeg holds every frame of a GIF until it has built the palette (measured: 10 s
-   → 162 MB, 40 s → 365 MB of RSS at 480 px and 12 fps), so 0.6.0 checks them against
-   `max_frame_bytes` too. To keep accepting every GIF the form allows (30 s at 30 fps and 800 px,
-   the widest choice, holds about 1.3 GB of frames), pass
-   `LIMITS.model_copy(update={"max_frame_bytes": None})` for `video-to-gif` jobs. With `LIMITS`
-   itself, GIFs over 400 MiB of frames (e.g. 30 s at 30 fps and 640 px: 593 MB) are refused with
-   `InvalidOptionsError` "These settings would make the GIF too large to render: its frames would
-   take 593 MB of memory, and the limit is 400 MB. Use a smaller width, a lower frame rate or a
-   shorter length." instead of risking the worker's memory limit. Which to use is the owner's
-   call (inbox).
+   **GIFs made from a video and GIF previews have no frame budget any more (2026-10-22, §16).**
+   They are made in two passes, the first building the palette, so they hold a few frames at a
+   time whatever their length, and `max_frame_bytes` doesn't apply to them. `VIDEO_GIF_LIMITS`
+   can simply be `LIMITS`, and the 400 MiB budget no longer refuses a GIF or a GIF preview. What
+   bounds a GIF now is time, not memory: size `max_gif_seconds`, the form's width and frame rate,
+   and the job's timeout by §16's measurements.
 
    **b. The worker** (`docker/workers/scripts/sashimi_worker.py`, checked 2026-10-20): `max_pixels=`
    is gone from every function, so the three calls that pass it (`:118`, `:143`, `:150`) raise
@@ -448,6 +445,43 @@ images with a colour profile, now converted to sRGB (§1 item 21).
      pixels compared) and `tests/integration/test_metadata_media.py` (every video and audio route
      × mode, and the stream-copy removal with its decoded streams compared).
 
+24. **GIFs no longer need a memory budget (2026-10-22).** GIFs made from a video, GIF previews
+    and animated GIF sheets build their palette in a first pass and encode in a second (§16), so
+    they hold a few frames at a time whatever their length, and the output is byte-identical to
+    before. What FileSushi can change:
+    - **`VIDEO_GIF_LIMITS`** (`src/filesushi/configs/limits.py`, and its copy in
+      `docker/workers/scripts/sashimi_worker.py:108`, checked 2026-10-22) no longer needs to
+      differ from `LIMITS`, and `MAX_FRAME_BYTES` no longer refuses any GIF or GIF preview; it
+      guards only animated contact sheets. Keep it for those, or raise it.
+    - **Longer and wider GIFs** (the owner's goal, 2026-10-22: 60 s and 1920 px, like
+      ezgif.com) are now a question of time, not memory. Measured on two CPUs with
+      `max_workers=2`, like the `video-to-gif` worker (`nano_cpus=2_000_000_000`, `mem_limit="1g"`,
+      `timeout_seconds=300`), from a 1080p H.264 source (whole process tree, peak RSS):
+
+      | GIF | Before (one pass) | Now (two passes) |
+      |---|---|---|
+      | 10 s, 480 px, 12 fps (defaults; 480p source) | 197 MB, 2.5 s | 130 MB, 2.9 s |
+      | 30 s, 800 px, 30 fps (today's widest form choice) | 1539 MB, 25 s: over the 1 GiB worker | 208 MB, 30 s |
+      | 60 s, 1280 px, 20 fps | (about 3.3 GB of frames) | 273 MB, 73 s |
+      | 60 s, 1920 px, 15 fps | (about 5.6 GB of frames) | 178 MB, 50 s |
+      | 60 s, 1920 px, 30 fps | (about 11 GB of frames) | 182 MB, 100 s |
+
+      So `max_gif_seconds=60` with widths up to 1920 px fits the current 1 GiB worker and 300 s
+      timeout with room to spare; the time grows with length × frame rate × pixels, and the
+      encode is about two-thirds of it. The output's size grows the same way (a 60 s, 1920 px,
+      30 fps GIF of a busy test pattern is 235 MB; at 15 fps, 123 MB), which may be the real limit
+      for a download.
+    - **GIF previews** need no frame budget either: 10 clips of 3 s at 1080p and 25 fps peaked at
+      6.4 GB before and 509 MB now. A default GIF preview takes about 60% longer than before
+      (5.8 s → 9.3 s on a 1080p source), because its clips are decoded twice; memory fell from
+      339 to 205 MB.
+    - **A start time after the video's last frame, or after the sound ends, is refused on every
+      route** (§7, 2026-10-22). It was a `ProcessingError` for a GIF or animated WebP, and a
+      "success" with no picture or no sound for MP4, WebM, trims and audio. Nothing to change:
+      the worker already shows `InvalidOptionsError.user_message`, and nothing is written.
+    - Nothing else changes: the same functions, configs and outputs. Progress callbacks see a
+      first stage, "analysing", for the first third.
+
 ## 2. What sashimi now pins for FileSushi
 
 `tests/core/test_filesushi_contract.py` (2026-10-19) pins the behaviour FileSushi relies on
@@ -593,7 +627,7 @@ and batch function takes `limits=`, and `None` means `Limits()`.
 | Field | Type | Bounds | Default | Description |
 |---|---|---|---|---|
 | `max_pixels` | int or None | > 0 | `64000000` | Images with more pixels than this are refused before they are decoded (conversions, icons, edits, frames). |
-| `max_frame_bytes` | int or None | > 0 | `1073741824` | Video frames held in memory at once, at width x height x 3 bytes each: an animated contact sheet's clips, and every frame of a GIF made from a video or of a GIF preview (a GIF's palette is built from all of them). |
+| `max_frame_bytes` | int or None | > 0 | `1073741824` | Video frames held in memory at once, at width x height x 3 bytes each: an animated contact sheet's clips, which are composited from memory. GIFs made from a video and GIF previews build their palette in a first pass, hold a few frames at a time, and don't count against it. |
 | `max_animation_bytes` | int or None | > 0 | `1073741824` | The frames of an animated GIF or WebP being edited, at width x height x 4 bytes each (edits, frame selection, frame strips). |
 | `max_sheet_pixels` | int or None | > 0 | `64000000` | The largest contact sheet, in pixels. |
 | `max_video_seconds` | float or None | > 0 | `None` | The longest video that is re-encoded or copied into an MP4 (to WebM or MP4, rotate and flip, accurate cuts). Lossless cuts and remuxes have no limit. |
@@ -1245,7 +1279,6 @@ LIMITS = Limits(
     max_preview_clips=10, max_frame_bytes=400 * 1024 * 1024, max_animation_bytes=256 * 1024 * 1024,
     max_sheet_pixels=64_000_000,
 )
-GIF_LIMITS = LIMITS.model_copy(update={"max_frame_bytes": None})
 
 def run_tool(tool_id, src, dst, params, job):
     target = str(job["target_format"]).lower()
@@ -1267,8 +1300,7 @@ def run_tool(tool_id, src, dst, params, job):
         layout = sashimi.image.frame_strip(src, dst, FrameStripConfig.from_params(params), limits=LIMITS)
         job_result = {"frame_strip": layout.model_dump(), "frames": sashimi.image.frames_info(src, limits=LIMITS).model_dump()}
     elif tool_id in VIDEO_TOOLS:
-        limits = GIF_LIMITS if target == "gif" else LIMITS
-        route = sashimi.video.convert(src, dst, VIDEO_CONVERT.from_params(params, target=target), limits=limits)
+        route = sashimi.video.convert(src, dst, VIDEO_CONVERT.from_params(params, target=target), limits=LIMITS)
     elif tool_id in PREVIEW_TOOLS:
         sashimi.video.preview(src, dst, VIDEO_PREVIEW.from_params(params, target=target), limits=LIMITS)
     elif tool_id in TRANSFORM_TOOLS:
@@ -1282,8 +1314,8 @@ def run_tool(tool_id, src, dst, params, job):
                               display_name=job.get("filename_clean"), limits=LIMITS)
 ```
 
-`LIMITS` and `GIF_LIMITS` are §1 item 14's (`GIF_LIMITS` keeps today's GIFs; use `LIMITS` for
-them too if the owner prefers a frame budget for GIFs).
+`LIMITS` is §1 item 14's. GIFs need no limits of their own since the two-pass round (§16): the
+frame budget no longer applies to them.
 
 `FAVICON_PACK_TOOLS` and `PREVIEW_TOOLS` are the two optional new tools (§1 items 7-8), and
 `EDIT_TOOLS`, `FRAMES_TOOLS` and `FRAME_STRIP_TOOLS` the editors (§1 items 10-11); the rest is
@@ -1343,8 +1375,12 @@ field that refused it; the length refusals read exactly as before at FileSushi's
 | `MediaTooLargeError` | an image over `max_pixels` (was "This image is too large to process.") | This image is too large to process: it has 30 megapixels (6000x5000), and the limit is 24. |
 | `MediaTooLargeError` | an image over Pillow's own limit (about 179 MP) while `max_pixels` is lower | This image is too large to process: it has more than 179 megapixels, and the limit is 24. |
 | `MediaTooLargeError` | an animation over `max_animation_bytes` (was "This animation is too large to edit. Try …") | This animation is too large to edit: its frames would take 300 MB of memory, and the limit is 256 MB. Try one with fewer frames or smaller pictures. |
-| `InvalidOptionsError` | a GIF made from a video whose frames exceed `max_frame_bytes` (new; only when FileSushi passes a frame budget for GIFs) | These settings would make the GIF too large to render: its frames would take 593 MB of memory, and the limit is 400 MB. Use a smaller width, a lower frame rate or a shorter length. |
-| `InvalidOptionsError` | a GIF preview over `max_frame_bytes` | These settings would make the preview too large to render as a GIF: its frames would take 593 MB of memory, and the limit is 400 MB. Use a smaller size, a lower frame rate, or fewer or shorter clips. |
+| `InvalidOptionsError` | `video.convert` (every target) with a start time inside the probed length but after the video's last frame, including where only the audio runs on (new, 2026-10-22: a GIF or animated WebP raised `ProcessingError`, an MP4 or WebM "succeeded" with no picture) | The start time (4.97s) is after the video's last frame, so there's nothing to convert. |
+| `InvalidOptionsError` | `video.trim`, lossless or accurate, likewise (new, 2026-10-22: an accurate cut "succeeded" with no picture, a lossless one held only the frames before the start) | The start time (4.97s) is after the video's last frame, so there's nothing to cut. |
+| `InvalidOptionsError` | a GIF or animated WebP whose start time is inside the video's last frame, which leaves no frame at its frame rate (new, 2026-10-22: was a `ProcessingError`; MP4 and WebM get the one frame) | The start time (4.96s) is too close to the end of the video: it leaves less than one frame at 12 fps, so there's nothing to convert. |
+| `InvalidOptionsError` | `video.convert` or `video.trim` with a start time ffmpeg can't decode a frame from though frames follow (seen with an MPEG-TS with B-frames) (new, 2026-10-22: an empty MP4 or WebM, or a `ProcessingError`) | No frame of the video could be read from the start time (5s), so there's nothing to convert. Try an earlier start. ("… nothing to cut. …" for trims) |
+| `InvalidOptionsError` | `audio.convert` with a start time inside the probed length but after the sound ends, for example in a video whose picture runs on past its sound (new, 2026-10-22: "succeeded" with an empty file) | The start time (4s) is after the end of the audio, so there's nothing to convert. |
+| `InvalidOptionsError` | a start time at or after the probed end, from any video or audio function (changed, 2026-10-22: "is past the end of the video (4s)", the length rounded to whole seconds) | The start time (4s) is at or past the end of the video (3.523s). ("… of the audio …" for audio sources) |
 | `InvalidOptionsError` | an animated sheet over `max_frame_bytes` | These settings would make the animated sheet too large to render: its frames would take 500 MB of memory, and the limit is 400 MB. Use a smaller width, a lower frame rate or shorter clips. |
 | `MediaTooLargeError` | a sheet over `max_sheet_pixels` (was "These settings would make the contact sheet too large. Use fewer rows or a smaller width.") | These settings would make the contact sheet too large: it would have 72 megapixels (8000x9000), and the limit is 64. Use fewer rows or a smaller width. (animated sheets: "… the animated sheet too large to render: it would have …") |
 | `MediaTooLargeError` | a WebP sheet wider or taller than 16,383 px, a JPEG one than 65,500 (no `.limit`: a format limit) | These settings would make the contact sheet too large for WebP, which can be at most 16383 pixels on a side (2560x20000). Use fewer rows or a smaller width. |
@@ -1692,7 +1728,8 @@ should be possible to run it at higher settings."
    ffmpeg's RSS is flat with length for MP4, WebM and animated WebP). The frame budgets rose from
    400 and 256 MiB because those were set for FileSushi's 1.5 GB workers; at 1 GiB a WebP edit
    peaks near 1.2 GB.
-4. **GIFs made from a video got a frame budget.** The brief expected GIF length to protect
+4. **(Superseded on 2026-10-22, §16: GIFs and GIF previews are made in two passes and have no
+   frame budget.)** **GIFs made from a video got a frame budget.** The brief expected GIF length to protect
    nothing, but ffmpeg keeps every frame of a GIF until its palette is built (§1 item 14), so with
    no length cap a long GIF could exhaust memory. They now count against `max_frame_bytes`, like
    GIF previews already did. This is the one place a default can refuse something the old limits
@@ -1757,3 +1794,82 @@ partial removal", "capability with permissive defaults", and all three choices (
 10. **Bit-exact outputs record no creation time**, even with `keep`: ffmpeg's `+bitexact`, which
     makes outputs repeatable, also stops MP4, MOV and Matroska writing it. Dates in tags (e.g. MP4
     `date`) are kept.
+
+## 16. Decisions from the two-pass GIF round (2026-10-22)
+
+The owner wants FileSushi's video-to-GIF to match or beat ezgif.com, up to 60 s and 1920 px
+(2026-10-22). The one-pass palette graph held every frame until the end, so GIF length was a
+memory question; now it is only a question of time.
+
+1. **Two passes wherever a palette is built from every frame:** video to GIF with `palette_mode`
+   `diff` (the default) or `full`, GIF previews, and animated GIF sheets. Pass 1 runs the same
+   frames through `palettegen` and writes one PNG to stdout; pass 2 reads it as a second input
+   and runs `paletteuse`. The output is byte-identical to the one-pass graph for every mode and
+   dither (tested, and checked on 480p and 1080p sources up to 60 s).
+2. **`palette_mode="single"` stays one pass:** a palette per frame never held the frames (212 MB
+   for 5 s and for 20 s of 1080p), so a second decode would only cost time.
+3. **No palette file.** The palette goes to Python over stdout and back as a `data:` URI input
+   (about 1 KB), so nothing is written next to the user's files or in the scratch directory,
+   nothing can be left behind on failure or cancellation, and stdin stays free for the routes
+   that pipe frames in (previews, sheets). This differs from the brief, which expected a file in
+   the scratch directory: no file at all meets its aims more simply and also works with no
+   scratch directory.
+4. **Progress:** the first pass is the first third of the progress, as the stage "analysing".
+   `-progress` reports nothing until an output writes, and `palettegen` writes only at the end,
+   so pass 1 prints each frame's time to stderr through ffmpeg's `metadata` filter and sashimi
+   reads that. Measured, pass 1 takes 15-40% of the time.
+5. **`max_frame_bytes` guards only animated sheets,** whose clips are held in Python to be
+   composited. Animated GIF sheets are two-pass too, so ffmpeg no longer holds a second copy of
+   the frames (1920 px, 3 s clips: 774 → 558 MB). `video.gif_frame_bytes` (new in 0.6.0, never
+   released) is removed, and `--max-frame-bytes` is only on `thumbs`.
+6. **Time:** decoding twice costs little for video to GIF (480 px: about +0.3 s; 1080p at
+   1920 px: faster than before, which spent its time holding gigabytes), but a GIF preview's
+   clips are seeked and decoded twice: about 60% longer at the defaults.
+7. **Found while checking: a start time after the last frame.** A GIF or animated WebP starting
+   between a video's last frame and its probed end failed with `ProcessingError`; it is now
+   `InvalidOptionsError` (§7). WebM and MP4 with such a start still "succeeded" with an output
+   holding no video frames (an audio-only 0.05 s MP4); fixed on every route in the next round
+   (§17).
+
+## 17. Decisions from the late-start round (2026-10-22)
+
+1. **Every route refuses a start after the last frame or the end of the sound,** and writes
+   nothing (§7): `video.convert` to every target, `video.trim` lossless and accurate (so
+   `extract` too), and `audio.convert` from video or audio. A video target is refused where
+   only the audio runs on past the picture (the strategy agent's recommendation: the user asked
+   for video), and audio where only the picture runs on. Each still works where the other
+   stream has ended: an MP4 from a video whose sound stopped earlier is an MP4 without audio,
+   as before.
+2. **How it's checked: the output, not the source, for re-encodes.** An up-front check has to
+   seek and decode up to a keyframe interval for every job with a start time: measured 0.15 s
+   with 1 s keyframes, and 1.1 s (4 threads) to 2.2 s (1 thread) on a 1080p source with 10 s
+   keyframes, against about 4 s for the 5 s MP4, WebM or GIF itself. So a re-encode with a start
+   time checks its own output instead (one `ffprobe` reading up to the first packet: 0.13 s on
+   a quiet machine, 0.15-0.25 s on a loaded one, whatever the file's size; audio outputs
+   likewise), and only an empty output looks at
+   the source, to tell "nothing after the start" (`InvalidOptionsError`) from an ffmpeg failure
+   (`ProcessingError`). GIF and animated WebP already fail in ffmpeg when they get no frames,
+   and ask the same question then.
+3. **Lossless cuts check the source first,** because a copy always holds the frames from the
+   keyframe before the start, so its output never comes out empty: it reads packets without
+   decoding (`-c copy -copypriorss 0 -copyinkf`: 0.15 s quiet, about 0.25 s loaded, whatever
+   the keyframe interval) and refuses before anything is written. Before, a lossless cut from 4.97 s of a
+   5 s video with one keyframe "succeeded" with the whole 5 s.
+4. **Found while checking: a GIF or animated WebP starting inside the last frame** (from 4.96 s
+   of a 5 s, 30 fps video, whose last frame starts at 4.967 s) failed with `ProcessingError`:
+   ffmpeg keeps that frame, but resampled to 12 fps it leaves none. MP4 and WebM get the one
+   frame. It is now `InvalidOptionsError` "The start time (4.96s) is too close to the end of the
+   video: it leaves less than one frame at 12 fps, so there's nothing to convert."
+5. **Found while checking: a start ffmpeg can't decode from.** In an MPEG-TS with B-frames and
+   a keyframe every 2 s (`-bf 3 -g 50`), ffmpeg 8.1 seeking to 5 s decodes nothing, though
+   frames run to 5.96 s; from 4 s it works. That gave an empty MP4 or WebM, or a failed GIF. When
+   the output is empty and packets follow the start but none decodes, the refusal says so: "No
+   frame of the video could be read from the start time (5s), so there's nothing to convert.
+   Try an earlier start." sashimi doesn't work around ffmpeg's seek there.
+6. **Found while checking: the length in "past the end" was rounded.** "The start time (4s)
+   is past the end of the video (4s)." came from a 3.52 s file. It now reads "The start time (4s)
+   is at or past the end of the video (3.523s)." (video and audio; `InvalidOptionsError` as
+   before, raised by the builders too).
+7. **Nothing else changes:** the command builders' arguments, and so every ffmpeg command and
+   every output, are as before. Starts one frame before the last work on every route, variable frame
+   rates and stream copies included (`tests/integration/test_late_start.py`).

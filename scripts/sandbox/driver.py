@@ -62,8 +62,8 @@ FILESUSHI = Limits(
     max_sheet_pixels=64_000_000,
 )
 """The limits FileSushi passes (docs/FILESUSHI_HANDBACK.md §1), so each job behaves as it does there."""
-FILESUSHI_GIF = FILESUSHI.model_copy(update={"max_frame_bytes": None})
-"""FileSushi's limits for a GIF made from a video, which had no frame budget before 0.6.0."""
+LONG_GIF = FILESUSHI.model_copy(update={"max_gif_seconds": 60})
+"""FileSushi's limits with 60-second GIFs, to match ezgif.com (owner, 2026-10-22)."""
 
 
 def route(expected, convert):
@@ -132,7 +132,7 @@ JOBS = {
     "video-to-gif": (
         "gif",
         lambda s, d: video.convert(
-            s, d, VIDEO_CONVERT.from_params({}, target="gif"), max_workers=WORKERS, limits=FILESUSHI_GIF
+            s, d, VIDEO_CONVERT.from_params({}, target="gif"), max_workers=WORKERS, limits=FILESUSHI
         ),
         "gif",
     ),
@@ -348,7 +348,7 @@ JOBS = {
     "video-to-gif-over-limit": (
         "gif",
         lambda s, d: video.convert(
-            s, d, VIDEO_CONVERT.from_params({"duration_seconds": 40}, target="gif"), limits=FILESUSHI_GIF
+            s, d, VIDEO_CONVERT.from_params({"duration_seconds": 40}, target="gif"), limits=FILESUSHI
         ),
         "user-error",
     ),
@@ -359,7 +359,18 @@ JOBS = {
             d,
             VIDEO_CONVERT.from_params({"duration_seconds": 40}, target="gif"),
             max_workers=WORKERS,
-            limits=FILESUSHI_GIF.model_copy(update={"max_gif_seconds": 60}),
+            limits=LONG_GIF,
+        ),
+        "gif",
+    ),
+    "video-to-gif-60s-full-size": (
+        "gif",
+        lambda s, d: video.convert(
+            s,
+            d,
+            VIDEO_CONVERT.from_params({"duration_seconds": 60, "fps": 30, "max_width": 1920}, target="gif"),
+            max_workers=WORKERS,
+            limits=LONG_GIF,
         ),
         "gif",
     ),
@@ -482,6 +493,9 @@ def validate(output: pathlib.Path, expected: str) -> str:
     assert expected in info.container_names, f"expected {expected}, got {info.container}"
     dims = f" {info.width}x{info.height}" if info.width else ""
     return f"{info.container.split(',')[0]}{dims} {info.duration or 0:.1f}s {','.join(info.codecs)}"
+
+
+JOBS["video-to-gif-60s-1080p"] = JOBS["video-to-gif-60s-full-size"]
 
 
 def main() -> int:

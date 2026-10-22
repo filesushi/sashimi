@@ -82,7 +82,7 @@ lengths have none by default.
   | Field | Default | Limits | Was |
   |---|---|---|---|
   | `max_pixels` | 64,000,000 | images, by decoded pixels | `max_pixels=` argument, 64 MP |
-  | `max_frame_bytes` | 1 GiB | video frames held at once: animated sheets, GIF previews and (new) GIFs made from a video | `MAX_FRAME_BYTES`, 400 MiB |
+  | `max_frame_bytes` | 1 GiB | video frames held at once: an animated sheet's clips (GIF previews no longer need it; see Changed) | `MAX_FRAME_BYTES`, 400 MiB |
   | `max_animation_bytes` | 1 GiB | frames of an animated GIF or WebP being edited | `MAX_ANIMATION_BYTES`, 256 MiB |
   | `max_sheet_pixels` | 64,000,000 | contact sheets | `MAX_SHEET_PIXELS` |
   | `max_video_seconds` | none | WebM/MP4 conversions (re-encodes and MP4 copies), rotate and flip, accurate cuts | `MAX_VIDEO_SECONDS`, 600 |
@@ -121,11 +121,6 @@ lengths have none by default.
   writer ignores it, so it never changed an output; `webp_method` is WebP's effort setting.
   Passing `optimize` for WebP now raises "Unknown option: optimize.", and the CLI warns that
   `--optimize` doesn't apply to WebP.
-- **GIFs made from a video count against `max_frame_bytes`.** ffmpeg keeps every frame of a GIF
-  until its palette is built, so with no length limit a GIF needs a memory budget. A GIF whose
-  frames (width × height × 3 × frames, `video.gif_frame_bytes`) exceed it raises
-  `InvalidOptionsError` before ffmpeg runs. At the default 1 GiB this refuses GIFs the old 30 s
-  cap allowed only above about 1 GiB of frames (30 s at 1280 px and 15 fps or more).
 - **Refusal messages state the limit**, so these read differently: "This image is too large to
   process." (now "…: it has 30 megapixels (6000x5000), and the limit is 24."), "This animation
   is too large to edit. …", and the preview, animated sheet and contact sheet size refusals. The
@@ -337,6 +332,10 @@ lengths have none by default.
   `<stem>.stripped.<ext>`), `sashimi metadata <file>` (`--json`), and `--metadata` on `convert`,
   `resize`, `rotate`, `edit`, `frames`, `extract` and `remux`. Batch: `sashimi.api.strip_files(_generator)`
   and `STRIP_EXTENSIONS`, and `metadata=` on `extract(_generator)` and `remux_files(_generator)`.
+- `video.build_palette_command`, `video.build_preview_palette_command` and `video.two_pass`, and
+  `palette=` on `video.build_convert_command` and `video.build_preview_commands`, for callers
+  that run the two passes themselves; without `palette=`, the builders give the one-pass command,
+  which makes the same GIF.
 - `sashimi.config.MetadataMode`, `METADATA_MODES` and `OPUS_MAX_KBPS_PER_CHANNEL`;
   `sashimi.image.to_srgb`; `sashimi.audio.output_channels`.
 - `frames_info` reads animated PNGs' frame count, frame durations and loop count from their
@@ -345,10 +344,10 @@ lengths have none by default.
 - **`sashimi.config.Limits`** (see Breaking): `Limits(...)`, `Limits.from_params(params)`
   (numbers or strings; `None`, `""` or `"none"` turns a limit off), `Limits.unlimited()` and
   `limits.check(config)`. Importable without Pillow or ffmpeg, like the rest of `sashimi.config`.
-  Also `UserInputError.limit`, `video.gif_frame_bytes`, `WEBP_MAX_SIDE`, `JPEG_MAX_SIDE`,
+  Also `UserInputError.limit`, `WEBP_MAX_SIDE`, `JPEG_MAX_SIDE`,
   `GIF_MAX_SIDE`, `MAX_ANIMATION_FPS` and `FLAC_MAX_SAMPLE_RATE`.
 - **Limits on the command line:** `--max-pixels` (`convert`, `resize`, `favicon`, `edit`,
-  `frames`), `--max-frame-bytes` (`convert`, `thumbs`, `preview`), `--max-animation-bytes`
+  `frames`), `--max-frame-bytes` (`thumbs`, for animated sheets), `--max-animation-bytes`
   (`edit`, `frames`) and `--max-sheet-pixels` (`thumbs`), taking `200M` (pixels), `4G` or `512M`
   (bytes), or `none`; and a `[limits]` section in `sashimi.toml` for every limit, including the
   lengths (`sashimi config set limits.max_video_seconds 2h`). Flags win over the files.
@@ -557,6 +556,21 @@ lengths have none by default.
 
 ### Changed
 
+- **GIFs are made in two passes, so their memory no longer grows with their length.** A GIF's
+  palette is built from all its frames, and the one-pass graph (`split`, `palettegen`,
+  `paletteuse`) held every decoded frame until the end: 2.6 GB for 10 s of 1080p at 30 fps. GIFs
+  made from a video (`palette_mode` `diff` or `full`), GIF previews and animated GIF sheets now
+  build the palette in a first pass and encode with it in a second; the palette passes between
+  them in memory, as a `data:` input, so no palette file is ever written. Outputs are
+  byte-identical to before. A 60 s, 1920 px, 30 fps GIF of a 1080p video peaks under 200 MB
+  (about 100 s on two CPUs); GIFs at 480 px take about the same time as before, and a default GIF
+  preview takes about 60% longer (its clips are decoded twice). `palette_mode="single"` (a palette
+  per frame) never held the frames and stays one pass. Progress shows the first pass as the first
+  third, "analysing".
+- **GIFs made from a video and GIF previews no longer count against `max_frame_bytes`**, which
+  now guards only an animated sheet's clips. 0.5.1 refused GIF previews over 400 MiB of frames;
+  they now succeed. `--max-frame-bytes` is now only on `thumbs` (it was also on `convert` and
+  `preview`).
 - Every batch report (and the CLI's `--json`) has a top-level `dry_run` (false unless it was a
   dry run), after `command`; it was only in `flatten`'s.
 - `convert` says in its message when an MP4 was copied: "Converted to clip.mp4 (video and audio
@@ -589,7 +603,10 @@ lengths have none by default.
   options that don't pick the model.
 - `scripts/check.sh` changes nothing: it runs `ruff format --check`, uses the locked dependencies
   without re-locking (`uv run --frozen`), and gives each Python version its own environment under
-  `.venvs/`, leaving `.venv` and `uv.lock` alone. It also lints `scripts/`.
+  `.venvs/`, leaving `.venv` and `uv.lock` alone. It also lints `scripts/`. By default it runs the
+  tests on Python 3.14 only and prints just the failures and the summary; `sh scripts/check.sh
+  full` runs them on every supported version (3.11-3.14), verbosely. Any other argument is
+  refused.
 - The CLI no longer writes `~/.sashimi/sashimi.toml` on first use. Only `sashimi config set`
   creates a settings file, holding just the values you set. The old full template pinned
   that version's defaults, so later changes to built-in defaults never reached you. Existing
@@ -628,6 +645,34 @@ lengths have none by default.
 
 ### Fixed
 
+- **A start time after the last frame, or after the sound ends, is refused on every route,**
+  and nothing is written. A start inside a file's probed length but after its last video frame
+  (4.97 s into a 5 s, 30 fps video, whose last frame starts at 4.967 s, or anywhere the sound
+  runs on past the picture) gave an MP4, WebM or accurate cut that "succeeded" with no picture
+  (a 0.05 s audio-only MP4), a lossless cut holding only the frames before the start (the whole
+  video, for one with a single keyframe), and a GIF or animated WebP that failed with a
+  `ProcessingError` ("Error writing trailer"). Each now raises `InvalidOptionsError`: "The start
+  time (4.97s) is after the video's last frame, so there's nothing to convert." (`video.convert`)
+  or "… nothing to cut." (`video.trim`, `extract`). Audio from a start after the sound ends (a
+  video whose picture runs on past its sound) "succeeded" with an empty MP3, M4A, OGG, WAV or
+  FLAC; it now raises `InvalidOptionsError`: "The start time (4s) is after the end of the audio,
+  so there's nothing to convert." A video target still works where only the sound has ended
+  (an MP4 without audio), and audio where only the picture has. Re-encodes check their own
+  output (one `ffprobe` read up to its first packet) and look at the source only when it is
+  empty; lossless cuts check the source first, reading packets without decoding. Starts before
+  the last frame are unaffected, variable frame rates and stream copies included.
+- **A GIF or animated WebP starting inside the video's last frame** (from 4.96 s of that video)
+  failed with a `ProcessingError`: ffmpeg keeps the frame, but at 12 fps it leaves none. It now
+  raises `InvalidOptionsError`: "The start time (4.96s) is too close to the end of the video: it
+  leaves less than one frame at 12 fps, so there's nothing to convert."
+- **A start time ffmpeg can't decode from** (in an MPEG-TS with B-frames, a seek can land where
+  no frame can be decoded until the end, though frames follow) made an empty MP4 or WebM, or
+  failed. It now raises `InvalidOptionsError`: "No frame of the video could be read from the
+  start time (5s), so there's nothing to convert. Try an earlier start."
+- **"The start time (4s) is past the end of the video (4s)."** The refusal of a start at or
+  after the probed end rounded the length to whole seconds, so a 3.52 s file read as 4 s. It now
+  shows the length to the millisecond: "The start time (4s) is at or past the end of the video
+  (3.523s)." (video and audio).
 - **`keep_exif=False` didn't remove everything.** Before it was replaced by `metadata`, it left
   the source's XMP, IPTC, Photoshop and description tags in TIFF to TIFF conversions without
   `auto_orient` (Pillow copies a TIFF's tags when nothing transforms the picture), and with

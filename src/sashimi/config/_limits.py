@@ -117,7 +117,7 @@ class Limits(BaseModel):
     max_pixels: _Count = DEFAULT_MAX_PIXELS
     """Images with more pixels than this are refused before they are decoded (conversions, icons, edits, frames)."""
     max_frame_bytes: _Count = 1024 * MIB
-    """Video frames held in memory at once, at width x height x 3 bytes each: an animated contact sheet's clips, and every frame of a GIF made from a video or of a GIF preview (a GIF's palette is built from all of them)."""
+    """Video frames held in memory at once, at width x height x 3 bytes each: an animated contact sheet's clips, which are composited from memory. GIFs made from a video and GIF previews build their palette in a first pass, hold a few frames at a time, and don't count against it."""
     max_animation_bytes: _Count = 1024 * MIB
     """The frames of an animated GIF or WebP being edited, at width x height x 4 bytes each (edits, frame selection, frame strips)."""
     max_sheet_pixels: _Count = 64_000_000
