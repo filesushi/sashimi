@@ -97,7 +97,10 @@ def extract_cmd(
     """
     final_start, final_end = start or start_arg, end or end_arg
     if final_start is None and final_end is None and duration is None:
-        fail("Give a start time, an end time or a --duration, e.g. [cyan]sashimi extract clip.mp4 1m30s 2m[/cyan].")
+        fail(
+            "Give a start time, an end time or a --duration, e.g. [cyan]sashimi extract clip.mp4 1m30s 2m[/cyan].",
+            markup=True,
+        )
     opt.single_file_or_fail([path], output)
     encoder_flags = {"--crf": crf, "--preset": preset, "--speed": speed, "--audio-bitrate": audio_bitrate}
     encoder_flags["--mute"] = mute or None
@@ -106,12 +109,11 @@ def extract_cmd(
 
     from sashimi.api.extract import extract_generator
     from sashimi.cli import _limits
-    from sashimi.errors import UserInputError
 
     limits = _limits.resolve()
     naming = opt.naming_args("extract", output_name, output)
     runner = BatchRunner("extract", "Extract", json_output, limit_output, dry_run=dry_run, yes=yes or force)
-    try:
+    with refusals():
         gen = extract_generator(
             path,
             final_start,
@@ -135,8 +137,6 @@ def extract_cmd(
             limits=limits,
             **naming,
         )
-    except UserInputError as e:
-        fail(e.user_message)
     runner.run(gen, [path])
 
 

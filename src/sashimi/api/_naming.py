@@ -6,6 +6,7 @@ Output name patterns: their syntax and fields, each command's default, how ``{ou
 chosen, and the checks every planned name passes. The policy itself is in :mod:`sashimi.api._batch`.
 """
 
+import os
 import pathlib
 import re
 import string
@@ -68,6 +69,7 @@ _DRIVE = re.compile(r"^[A-Za-z]:")
 _ELSEWHERE = "a pattern's folders are inside each input's folder; to write somewhere else, set output_dir."
 _RESERVED = frozenset({"CON", "PRN", "AUX", "NUL"} | {f"{p}{n}" for p in ("COM", "LPT") for n in "123456789"})
 MAX_NAME_LENGTH = 255
+"""The longest file or folder name, in UTF-8 bytes: the limit on Linux and macOS, and stricter than Windows' 255 UTF-16 units."""
 
 
 def default_output_name(command: str) -> str:
@@ -205,9 +207,10 @@ class NameTemplate:
     def literal_extension(self) -> str | None:
         """The extension the pattern spells out after its last field (``jpeg`` for ``{input_name}.jpeg``), if any."""
         literal, field = self._pieces[-1]
-        if field is not None or "." not in literal:
+        name = literal.rpartition("/")[2]
+        if field is not None or "." not in name:
             return None
-        return literal.rpartition(".")[2] or None
+        return name.rpartition(".")[2] or None
 
     def described(self) -> str:
         """The pattern and where it was set, for messages: ``{input_stem}.jpg (--output-name)``."""
@@ -256,17 +259,27 @@ def _check_part(part: str, source: pathlib.PurePath, what: str) -> None:
         raise NameRefused(f"{part} can't be used as a {what} name on Windows.")
     if part.endswith((" ", ".")):
         raise NameRefused(f"{part!r} ends in a space or a dot, which Windows removes.")
-    if len(part.encode("utf-8")) > MAX_NAME_LENGTH or len(part.encode("utf-16-le")) // 2 > MAX_NAME_LENGTH:
-        raise NameRefused(
-            f"The output {what} name for {source.name} would be longer than {MAX_NAME_LENGTH} characters."
-        )
+    too_long = length_problem(part, source, what)
+    if too_long:
+        raise NameRefused(too_long)
+
+
+def length_problem(part: str, source: pathlib.PurePath, what: str = "file") -> str | None:
+    """Why `part` is too long to be a file or folder name (see :data:`MAX_NAME_LENGTH`), or None."""
+    size = len(os.fsencode(part))
+    if size <= MAX_NAME_LENGTH:
+        return None
+    return (
+        f"The output {what} name for {source.name} would be {size} bytes long; "
+        f"{what} names can be at most {MAX_NAME_LENGTH} bytes (UTF-8)."
+    )
 
 
 def check_name(name: str, source: pathlib.PurePath, fmt: OutputFormat) -> None:
     """
     Raises :class:`NameRefused` unless `name` is a usable output name for `source` in format
     `fmt`: a file name, after any folders (``sheets/clip.mp4.jpeg``), each valid on Windows and
-    POSIX (except for characters the input's own name already has) and at most 255 characters,
+    POSIX (except for characters the input's own name already has) and at most 255 bytes (UTF-8),
     the file name ending in one of the format's extensions (``.jpg`` or ``.jpeg`` for JPEG).
     """
     *folders, file_name = name.split("/")

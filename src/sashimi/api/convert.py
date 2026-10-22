@@ -5,7 +5,7 @@
 
 import pathlib
 from collections.abc import Callable, Iterable, Sequence
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from sashimi.api._batch import (
     AUDIO_EXTENSIONS,
@@ -46,11 +46,9 @@ __all__ = [
 ]
 
 Target = Literal["jpeg", "png", "webp", "gif", "bmp", "tiff", "ico", "webm", "mp4", "mp3", "m4a", "wav", "ogg", "flac"]
-TARGET_SUFFIX = {
-    "jpeg": ".jpg", "png": ".png", "webp": ".webp", "gif": ".gif", "bmp": ".bmp", "tiff": ".tif", "ico": ".ico",
-    "webm": ".webm", "mp4": ".mp4", "mp3": ".mp3", "m4a": ".m4a", "wav": ".wav", "ogg": ".ogg", "flac": ".flac",
-}  # fmt: skip
-_SAME_FORMAT = {"jpeg": {".jpg", ".jpeg"}, "tiff": {".tif", ".tiff"}, "ogg": {".ogg", ".opus", ".oga"}}
+TARGET_SUFFIX = {target: f".{EXTENSIONS[target][0]}" for target in get_args(Target)}
+_STILL_CONVERTED = frozenset({".m4v"})
+"""Extensions of a target's format that converting to it still takes: an .m4v is converted to an .mp4."""
 IMAGE_TARGETS = frozenset(IMAGE_CONVERT.targets) | {"ico"}
 VIDEO_TARGETS = frozenset(VIDEO_CONVERT.targets)
 AUDIO_TARGETS = frozenset(AUDIO_CONVERT.targets)
@@ -64,8 +62,9 @@ ROUTE_MESSAGES = {
 Processor = Callable[[pathlib.Path, pathlib.Path, Callable[[float, str], None] | None], None]
 
 
-def _kind(path: pathlib.Path) -> str | None:
-    return kind_of(path)
+def own_extensions(target: str) -> frozenset[str]:
+    """The extensions of files already in `target`'s format, which converting to it leaves alone."""
+    return frozenset(f".{ext}" for ext in EXTENSIONS[target]) - _STILL_CONVERTED
 
 
 def _source_extensions(target: str) -> list[str]:
@@ -79,7 +78,7 @@ def _source_extensions(target: str) -> list[str]:
             candidates.append(".gif")
     if target in AUDIO_TARGETS:
         candidates += VIDEO_EXTENSIONS + AUDIO_EXTENSIONS
-    own = _SAME_FORMAT.get(target, {TARGET_SUFFIX[target]})
+    own = own_extensions(target)
     return sorted({ext for ext in candidates if ext not in own})
 
 
@@ -173,8 +172,7 @@ def convert_files_generator(
             raise UnsupportedMediaError(f"Can't convert {src.suffix or 'this file'} to {target.upper()}.")
         return None
 
-    suffix = TARGET_SUFFIX[target]
-    own_format = _SAME_FORMAT.get(target, {suffix})
+    own_format = own_extensions(target)
     check_output_ext(output_ext, (target,))
     spelled = output_ext or (typed.lower() if typed.lower() in EXTENSIONS.get(target, ()) else None)
     fmt = output_format(target, typed=spelled)
@@ -236,7 +234,7 @@ def convert_images_generator(
 ) -> Batch:
     """Image-only conversion: every image found is converted to `config.target`."""
     if extensions is None:
-        own = _SAME_FORMAT.get(config.target, {TARGET_SUFFIX[config.target]})
+        own = own_extensions(config.target)
         extensions = [ext for ext in IMAGE_EXTENSIONS if ext not in own]
     return convert_files_generator(
         paths,

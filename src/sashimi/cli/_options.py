@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import pathlib
 from enum import Enum
 from typing import Annotated, Any, NoReturn, Optional
@@ -107,9 +108,24 @@ def reflow(text: str | None) -> str | None:
 
 
 class KeptCommand(TyperCommand):
-    """A processing command whose ``--help`` shows what its sashimi.toml section keeps for ``--output-name`` and ``--output-dir``."""
+    """
+    A processing command whose ``--help`` shows what its sashimi.toml section keeps for ``--output-name`` and
+    ``--output-dir``, and whose arguments as typed are kept while it runs (:func:`typed_command`).
+    """
 
     SECTIONS = {"trim": "extract"}
+    ARGS = "sashimi.args"
+
+    def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
+        ctx.meta[self.ARGS] = list(args)
+        return super().parse_args(ctx, args)
+
+    def invoke(self, ctx: Any) -> Any:
+        token = _TYPED.set((ctx.info_name, ctx.meta.get(self.ARGS)))
+        try:
+            return super().invoke(ctx)
+        finally:
+            _TYPED.reset(token)
 
     def toml_notes(self, ctx: Any, raw: dict[str, Any]) -> dict[str, str]:
         """Flag to the sashimi.toml value that replaces its built-in default."""
@@ -141,6 +157,19 @@ class KeptCommand(TyperCommand):
         finally:
             for param, help in original.items():
                 setattr(param, "help", help)  # noqa: B010
+
+
+_TYPED: contextvars.ContextVar[tuple[str | None, list[str] | None] | None] = contextvars.ContextVar(
+    "sashimi_typed", default=None
+)
+
+
+def typed_command() -> tuple[str, list[str]] | None:
+    """The running command's name and its arguments as typed, for messages that suggest a command; None outside one."""
+    typed = _TYPED.get()
+    if typed is None or not typed[0] or typed[1] is None:
+        return None
+    return typed[0], typed[1]
 
 
 def option(*names: str, help: str, panel: str | None = None, **kwargs: Any) -> Any:
@@ -212,7 +241,7 @@ def output_dir_args(
         return {"output_dir": None}
     if not isinstance(kept, str) or not kept.strip() or "\0" in kept:
         origin = settings.output_name_origin(section, "output_dir")
-        fail(escape(f'{origin} must be a folder in quotes, e.g. "sheets".'))
+        fail(f'{origin} must be a folder in quotes, e.g. "sheets".')
     return {"output_dir": pathlib.Path(kept).expanduser()}
 
 
@@ -264,13 +293,13 @@ def naming_args(section: str, output_name: str | None, output: pathlib.Path | No
 
     def parse(command: str, text: Any, origin: str) -> NameTemplate:
         if not isinstance(text, str):
-            fail(escape(f'{origin} must be a pattern in quotes, e.g. "{{input_name}}.jpeg".'))
+            fail(f'{origin} must be a pattern in quotes, e.g. "{{input_name}}.jpeg".')
         try:
             template = NameTemplate(text, origin)
         except InvalidOptionsError as e:
-            fail(escape(f"{origin}: {e.user_message}"))
+            fail(f"{origin}: {e.user_message}")
         if command not in ROLES and "role" in template.fields:
-            fail(escape(f"{origin}: {command} outputs have no role, so the pattern can't use {{role}}."))
+            fail(f"{origin}: {command} outputs have no role, so the pattern can't use {{role}}.")
         return template
 
     chosen = None
@@ -640,9 +669,7 @@ def format_from_output(given: str | None, output: pathlib.Path | None, formats: 
 
 
 def _refuse(message: str) -> NoReturn:
-    from rich.markup import escape
-
-    fail(escape(message))
+    fail(message)
 
 
 def _kind_of_path(text: str) -> str:

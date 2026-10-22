@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Annotated, Any, NoReturn, Optional
 
 import typer
 
+from sashimi.cli import _options as opt
 from sashimi.cli._output import console, fail
 
 if TYPE_CHECKING:
@@ -40,12 +41,12 @@ class Operation(str, Enum):
 
 ProjectScope = Annotated[
     bool,
-    typer.Option(
+    opt.option(
         "--project",
         "-p",
         help="Use the project file instead of your own settings: the sashimi.toml that applies in this folder "
-        "([cyan]sashimi config path[/cyan] shows it), created here if there is none. It's used only when you run sashimi in "
-        "its folder or a folder inside it.",
+        "([cyan]sashimi config path[/cyan] shows it), created here if there is none. It's used only when you run "
+        "sashimi in its folder or a folder inside it.",
     ),
 ]
 
@@ -64,19 +65,22 @@ def _where(path: Any) -> str:
 
 
 def _settings_error(error: Exception) -> NoReturn:
-    from rich.markup import escape
-
-    fail(escape(str(error)))
+    fail(str(error))
 
 
-def _parse_value(text: str) -> Any:
-    """TOML literal if it parses (42, 2.5, true, "auto", [".mp4"]), otherwise a plain string."""
+def _parse_value(text: str, *, as_text: bool = False) -> Any:
+    """
+    TOML literal if it parses (42, 2.5, true, "auto", [".mp4"]), otherwise a plain string. With
+    `as_text` the value is always a string: 2024, 2024-10-21 and true stay as typed, and quotes
+    around a value are removed.
+    """
     import tomllib
 
     try:
-        return tomllib.loads(f"v = {text}")["v"]
+        parsed = tomllib.loads(f"v = {text}")["v"]
     except tomllib.TOMLDecodeError:
         return text
+    return text if as_text and not isinstance(parsed, str) else parsed
 
 
 def _split_key(key: str) -> tuple[str, str]:
@@ -103,18 +107,16 @@ def _check(section: str, option: str, value: Any) -> None:
             fail(f"{section}.output_dir must be a folder, e.g. sheets or /home/me/sheets.")
         return
     if option == "output_name":
-        from rich.markup import escape
-
         from sashimi.api._naming import ROLES, NameTemplate
 
         if not isinstance(value, str):
-            fail(escape(f"{section}.output_name must be a pattern, e.g. '{{input_name}}.jpeg'."))
+            fail(f"{section}.output_name must be a pattern, e.g. '{{input_name}}.jpeg'.")
         try:
             template = NameTemplate(value)
         except InvalidOptionsError as e:
-            fail(escape(f"{section}.output_name: {e.user_message}"))
+            fail(f"{section}.output_name: {e.user_message}")
         if section not in ROLES and "role" in template.fields:
-            fail(escape(f"{section}.output_name: {section} outputs have no role, so the pattern can't use {{role}}."))
+            fail(f"{section}.output_name: {section} outputs have no role, so the pattern can't use {{role}}.")
         return
     if section == "limits":
         from sashimi.cli._limits import parse
@@ -221,7 +223,7 @@ def set_(
     from sashimi.cli import settings
 
     section, option = _split_key(key)
-    parsed = _parse_value(value)
+    parsed = _parse_value(value, as_text=option in settings.OUTPUT_KEYS or option in settings.PATH_KEYS)
     _check(section, option, parsed)
     try:
         written = settings.set_config_value(section, option, parsed, scope=_scope(project))

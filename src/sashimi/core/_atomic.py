@@ -15,11 +15,14 @@ PathLike = str | os.PathLike[str]
 _TEMP_ATTEMPTS = 100
 
 
-def _create_temp(temp_dir: pathlib.Path, name: str) -> pathlib.Path:
-    """Creates an empty, uniquely named file with mode 0666 minus the umask, like any newly created file."""
+def _create_temp(temp_dir: pathlib.Path) -> pathlib.Path:
+    """
+    Creates an empty, uniquely named file with mode 0666 minus the umask, like any newly created
+    file. The name is short, so any output name the filesystem allows can be written.
+    """
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     for _ in range(_TEMP_ATTEMPTS):
-        path = temp_dir / f".{name}.{secrets.token_hex(6)}.partial"
+        path = temp_dir / f".sashimi-{secrets.token_hex(6)}.partial"
         try:
             os.close(os.open(path, flags, 0o666))
         except FileExistsError:
@@ -42,7 +45,7 @@ def atomic_output(output_path: PathLike, scratch_dir: PathLike | None = None) ->
     """
     output = pathlib.Path(output_path)
     temp_dir = pathlib.Path(scratch_dir) if scratch_dir is not None else output.parent
-    temp_path = _create_temp(temp_dir, output.name)
+    temp_path = _create_temp(temp_dir)
     try:
         yield temp_path
         try:

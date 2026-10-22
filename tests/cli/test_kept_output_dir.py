@@ -234,7 +234,7 @@ def test_config_keeps_shows_and_removes_an_output_dir(tmp_path):
     assert "sashimi.toml: ./turned" in help_text
     assert runner.invoke(app, ["config", "unset", "thumbs.output_dir"]).exit_code == 0
     assert "sheets" not in (tmp_path / "home" / "sashimi.toml").read_text()
-    refused = runner.invoke(app, ["config", "set", "rotate.output_dir", "3"])
+    refused = runner.invoke(app, ["config", "set", "rotate.output_dir", " "])
     assert refused.exit_code == 2 and "must be a folder" in refused.stderr
 
 

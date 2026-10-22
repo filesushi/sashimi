@@ -223,6 +223,10 @@ images with a colour profile, now converted to sRGB (§1 item 21).
      leave out their own earlier outputs, `BatchPlan.already_done` and the report's
      `already_done`) is CLI and batch API only: core, `sashimi.config` and every output's bytes
      are unchanged.
+   - the clash hint (2026-10-22: `BatchPlan.folder_clash`, the report's `folder_clash`, and one
+     line under the CLI's results when `--output-dir` gathers files of one name from different
+     folders) is CLI and batch API only: core, `sashimi.config` and every output's bytes are
+     unchanged.
 14. **Limits are now FileSushi's to set (required; owner, 2026-10-20: "all limits should be config
    driven … The sashimi defaults don't need to be aligned with filesushi at all, sashimi just needs
    to be configurable").** sashimi enforces only the limits its caller passes, in one

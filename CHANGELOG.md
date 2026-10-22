@@ -454,8 +454,8 @@ lengths have none by default.
   `{role}` for a conversion, or a literal extension of another format when every output has one
   format), and each planned name before anything runs: it must end in an extension of the
   output's format (`{input_name}.jpeg` for a JPEG sheet, not `{input_name}.png`), be valid on
-  Windows and POSIX, and be at most 255 characters; a name that fails is that file's `error`
-  result. `NameTemplate(text, origin)` carries where a pattern was set, for messages.
+  Windows and POSIX, and be at most 255 bytes in UTF-8 (the limit on Linux and macOS, and
+  stricter than Windows'); a name that fails is that file's `error` result, in a dry run too. `NameTemplate(text, origin)` carries where a pattern was set, for messages.
   `sashimi.api` exports `NameTemplate`, `default_output_name(command)`, `Batch`, `BatchPlan` and
   `PlannedFile`, as well as `build_report`, `YieldType`, `plan_flatten` and `FlattenPlan`.
 - **`sashimi.api.rotate_files(_generator)(paths, rotate=90, flip="none", *, output_format=None,
@@ -478,6 +478,25 @@ lengths have none by default.
 - **`-y/--yes`** on every processing command and on `flatten`.
 - The JSON report (and every batch function's report) gains `kinds`, `routes`,
   `outputs_left_out` (`[{"file", "made_from"}]`) and `clash_note`.
+- **A hint when `--output-dir` makes files from different folders clash.** A named file goes
+  straight into the output folder, and so do the files of each named folder, so `sashimi resize
+  photos/* -w 800 --output-dir out` (a shell glob names `photos/x.jpg` and the folder
+  `photos/sub`, which holds another `x.jpg`) skips both `x.jpg`s. The results now end with one
+  line saying why and, when searching the folder that holds them all would take exactly the same
+  files, the command that keeps each folder's layout: "2 files from different folders were
+  skipped because they'd meet in out. To keep each folder's layout there, name the folder that
+  holds them, with -r: sashimi resize photos -r -w 800 --output-dir out". Otherwise (`sashimi
+  resize a b` in a folder that holds more than `a` and `b`) it says to give each folder its own
+  `--output-dir`, and that naming the folder holding both wouldn't process the same files. It
+  works with `-n` and with a kept `output_dir`, and isn't shown for clashes a pattern made on its
+  own or for names that differ only in case. A clash with both causes (`a/x.jpg`, `a/x.png` and
+  `b/x.jpg` under `{input_stem}.{output_ext}`) ends with both lines: the pattern's line now
+  counts every clash in which the pattern gave different names one output, where before it
+  counted only clashes in which every name differed, so such a clash had no closing line at
+  all. The suggested command is printed on a line of its own and never wrapped, so it can be
+  copied whole. The batch API has it as `BatchPlan.folder_clash` (a
+  `FolderClash`: the files, the output folder, the folder that holds them all, and `same_files`),
+  and the report as `folder_clash` (`{"files", "output_dir", "holder", "same_files"}` or `null`).
 - `sashimi flatten --dry-run` (`-n`) and `--json`.
 - **Shell completion:** `sashimi --install-completion` sets it up for the shell you run it from
   (bash, zsh, fish or PowerShell), and `--show-completion` prints the script instead.
@@ -684,6 +703,34 @@ lengths have none by default.
 - **`flatten` removed empty subfolders without asking** when there was nothing to move; it now
   asks whenever it would change anything, and its help says that folders that were empty already
   are removed too.
+- **Long names passed the dry run, then failed:** outputs were staged as `.{name}.{random}.staged`
+  and written through `.{that}.{random}.partial`, so a name over about 212 bytes (a 230-character
+  name, or 75 Chinese characters) was planned as "Would write" and then failed with "File name too
+  long". Staged and temporary files now have short names of their own (`.sashimi-{random}.staged`,
+  `.sashimi-{random}.partial`), so every name the plan accepts is written, and the limit is
+  counted in UTF-8 bytes, as Linux and macOS count it: a name over 255 bytes is refused in the
+  plan, naming the limit. `-o` names are checked the same way.
+- **Where an output went under `--output-dir` depended on what else was named:** with
+  `photos/x.jpg` and `photos/sub/x.jpg`, `sashimi resize photos -r --output-dir out` wrote
+  `out/x.jpg…` and `out/sub/x.jpg…`, but `sashimi resize photos photos/* -r --output-dir out`
+  (a shell glob names the subfolder too) planned both as `out/x.jpg…` and skipped both as a
+  clash. Each file now keeps its folders below the outermost folder given that holds it.
+- **`strip` ignored the `[limits]` in `sashimi.toml`**, refusing images over the default 64 MP
+  whatever was set; it now uses them, and has `--max-pixels` like the other image commands.
+- **`rotate`, `extract` and `thumbs` lost bracketed text in errors** (`--output-name '[draft]
+  {input_name}.jpeg'` was shown as ` {input_name}.jpeg`): every CLI error is now printed as plain
+  text, so no message can lose text to Rich markup.
+- **`sashimi config set resize.output_dir 2024` was refused**, as were `2024-10-21` and `true`,
+  read as a number, a date and a yes/no value. Folder, pattern, font and emoji settings now keep
+  the text as typed (quotes around it are removed).
+- **`sashimi config defaults rotate png` said rotate has no PNG output,** and `config defaults
+  rotate` showed only the video options. It now shows the image options rotate takes
+  (`--quality`, `--metadata`) for each image format. `config defaults remux mkv` now shows the
+  `--metadata` option for each container instead of refusing.
+- **A dot in a pattern's folder was read as the extension:** `--output-name
+  '{input_stem}.d/sheet'` for a JPEG was refused as ending in `.d/sheet`; the extension is now
+  taken from the file name only, so the message says that `sheet` must end in `.jpeg` or `.jpg`.
+- Planning a large search with `--output-dir` inside it is faster (4,000 files: 2.0 s to 0.3 s).
 
 ## 0.5.0 — 2026-10-12
 

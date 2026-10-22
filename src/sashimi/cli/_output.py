@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import pathlib
 import time
 from collections.abc import Iterable, Iterator
@@ -41,8 +42,9 @@ def display_path(path: pathlib.Path) -> str:
         return str(path)
 
 
-def fail(message: str, code: int = 2) -> NoReturn:
-    err_console.print(f"[bold red]Error:[/bold red] {message}")
+def fail(message: str, code: int = 2, *, markup: bool = False) -> NoReturn:
+    """Prints `message` as an error and exits with `code`. The message is plain text unless `markup`."""
+    err_console.print(f"[bold red]Error:[/bold red] {message if markup else escape(message)}")
     raise typer.Exit(code=code)
 
 
@@ -54,7 +56,7 @@ def refusals() -> Iterator[None]:
     try:
         yield
     except UserInputError as e:
-        fail(escape(e.user_message))
+        fail(e.user_message)
 
 
 def exit_on_invalid_options(err: ValidationError, flags: dict[str, str]) -> NoReturn:
@@ -66,11 +68,11 @@ def exit_on_invalid_options(err: ValidationError, flags: dict[str, str]) -> NoRe
             continue
         seen.add(field)
         if detail["type"] == "sashimi_sentence":
-            err_console.print(f"[bold red]Error:[/bold red] {detail['msg']}")
+            err_console.print(f"[bold red]Error:[/bold red] {escape(detail['msg'])}")
             continue
         flag = flags.get(field)
         name = f"{flag} ({field})" if flag else field
-        err_console.print(f"[bold red]Invalid value for {name}:[/bold red] {detail['msg']}")
+        err_console.print(f"[bold red]Invalid value for {escape(name)}:[/bold red] {escape(detail['msg'])}")
     raise typer.Exit(code=2)
 
 
@@ -172,7 +174,7 @@ class BatchRunner:
         try:
             plan = generator.plan()
         except UserInputError as e:
-            fail(escape(e.user_message))
+            fail(e.user_message)
         if not (plan.searched and plan.mixed):
             return plan
         roots = [path for path in self._inputs if path.is_dir()]
@@ -193,8 +195,8 @@ class BatchRunner:
             return plan
         if not _stdin_is_terminal():
             fail(
-                escape(f"{where} {plan.describe()}, which {self.command} handles differently. ")
-                + f"Pass -y to {escape(doing)}, or run in a terminal to be asked."
+                f"{where} {plan.describe()}, which {self.command} handles differently. "
+                f"Pass -y to {doing}, or run in a terminal to be asked."
             )
         if not typer.confirm(question, default=False, err=True):
             err_console.print("Nothing was changed.")
@@ -213,7 +215,7 @@ class BatchRunner:
         try:
             first = next(generator, 0)
         except UserInputError as e:
-            fail(escape(e.user_message))
+            fail(e.user_message)
         total_files = first if isinstance(first, int) else 0
         started: set[pathlib.Path] = set()
 
@@ -355,6 +357,69 @@ class BatchRunner:
             )
         if plan.clash_note:
             console.print(f"[yellow]{escape(plan.clash_note)}[/yellow]")
+        if plan.folder_clash is not None:
+            note, command = self._folder_note(plan)
+            console.print(f"[yellow]{escape(note)}[/yellow]")
+            if command is not None:
+                console.print(f"  {escape(command)}", soft_wrap=True, highlight=False)
+
+    def _folder_note(self, plan: Any) -> tuple[str, str | None]:
+        """
+        Says that files from different folders met in the output folder, and how to keep each folder's layout,
+        with the command that does it (printed on a line of its own, never wrapped, so it can be copied whole).
+        """
+        clash = plan.folder_clash
+        where = display_path(clash.output_dir)
+        head = (
+            f"Files from different folders also meet in {where}."
+            if plan.clash_note
+            else f"{len(clash.files)} files from different folders were skipped because they'd meet in {where}."
+        )
+        apart = "To keep them apart, run each folder on its own with its own --output-dir."
+        if clash.holder is None:
+            return f"{head} {apart}", None
+        holder = str(clash.holder)
+        if clash.same_files is False:
+            return (
+                f"{head} {apart} Naming {holder} with -r would keep each folder's layout too, but it wouldn't "
+                "process the same files (-n shows which it would).",
+                None,
+            )
+        if clash.same_files is None:
+            return (
+                f"{head} {apart} Naming {holder} with -r would keep each folder's layout too; -n shows what else it "
+                "would process.",
+                None,
+            )
+        command = self._rerun(clash.holder, plan.recursive)
+        if command is None:
+            how = "instead" if plan.recursive else "with -r instead"
+            return f"{head} To keep each folder's layout there, run the command on {holder} {how}.", None
+        how = " instead" if plan.recursive else ", with -r"
+        return f"{head} To keep each folder's layout there, name the folder that holds them{how}:", command
+
+    def _rerun(self, holder: pathlib.Path, recursive: bool) -> str | None:
+        """The command as typed, with `holder` (and ``-r``) in place of the paths; None when that can't be told."""
+        from sashimi.cli._options import _example, typed_command
+
+        typed = typed_command()
+        if typed is None:
+            return None
+        name, args = typed
+        inputs = list(self._inputs)
+        matched = [index for index, arg in enumerate(args) if arg and pathlib.Path(arg) in inputs]
+        if not matched or sorted(pathlib.Path(args[index]) for index in matched) != sorted(inputs):
+            return None
+        word = str(holder)
+        if word.startswith("-"):
+            word = os.path.join(".", word)
+        words = [arg for index, arg in enumerate(args) if index not in matched[1:]]
+        first = matched[0]
+        words[first] = word
+        if not recursive:
+            dashes = words.index("--") if "--" in words else len(words)
+            words.insert(first + 1 if first < dashes else dashes, "-r")
+        return _example(name, *words)
 
     def _print_summary(self, results: list, summary: dict[str, Any], clashed: set[pathlib.Path]) -> None:
         from rich.panel import Panel

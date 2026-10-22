@@ -104,6 +104,7 @@ def strip_cmd(
     dry_run: opt.DryRun = False,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
+    max_pixels: opt.MaxPixels = None,
 ):
     """
     Remove metadata (camera, dates, GPS, titles, comments) from images, videos and audio without
@@ -114,8 +115,10 @@ def strip_cmd(
     is kept. A folder of both images and videos or audio asks first unless -y.
     """
     from sashimi.api.strip import strip_files_generator
+    from sashimi.cli import _limits
 
     opt.single_file_or_fail(paths, output)
+    limits = _limits.resolve(max_pixels=max_pixels)
     chosen = opt.enum_value(mode) or "remove_all"
     runner = BatchRunner(
         "strip",
@@ -138,6 +141,7 @@ def strip_cmd(
             output=output,
             **opt.output_dir_args("strip", output_dir, no_output_dir, output),
             dry_run=dry_run,
+            limits=limits,
             **naming,
         )
     runner.run(gen, paths)

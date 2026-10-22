@@ -18,7 +18,9 @@ import shutil
 import pytest
 
 from sashimi import api
+from sashimi.api._naming import EXTENSIONS, MAX_NAME_LENGTH
 from sashimi.config import CONTACT_SHEET, IMAGE_EDIT, IMAGE_FRAMES, IMAGE_RESIZE
+from sashimi.core._atomic import atomic_output
 
 FIXTURE = (
     "photo.jpg", "photo.png", "IMG 01.JPEG", "anim.gif", "anim.webp", "clip.mp4", "clip.mkv", "song.mp3",
@@ -100,28 +102,33 @@ PATTERN_CASES = [(command, kind) for command in COMMANDS for kind in patterns(co
 
 
 def made(src, dst, *args, **kwargs):
-    pathlib.Path(dst).write_bytes(b"made from " + pathlib.Path(src).name.encode())
+    with atomic_output(dst) as temp:
+        temp.write_bytes(b"made from " + pathlib.Path(src).name.encode())
 
 
 @pytest.fixture(autouse=True)
 def stub_processing(monkeypatch):
-    for module, name in (
-        ("sashimi.core.image", "convert"),
-        ("sashimi.core.image", "to_ico"),
-        ("sashimi.core.video", "convert"),
-        ("sashimi.core.audio", "convert"),
-        ("sashimi.core.edit", "edit"),
-        ("sashimi.core.edit", "select_frames"),
-        ("sashimi.api.resize", "convert"),
-        ("sashimi.api.transform", "transform"),
-        ("sashimi.api.extract", "trim"),
-        ("sashimi.api.remux", "trim"),
-        ("sashimi.api.strip", "strip"),
-        ("sashimi.api.thumbs", "render"),
-        ("sashimi.api.preview", "preview"),
-        ("sashimi.api.favicon", "favicon_pack"),
-    ):
-        monkeypatch.setattr(importlib.import_module(module), name, made)
+    stubbed = [
+        (importlib.import_module(module), name)
+        for module, name in (
+            ("sashimi.core.image", "convert"),
+            ("sashimi.core.image", "to_ico"),
+            ("sashimi.core.video", "convert"),
+            ("sashimi.core.audio", "convert"),
+            ("sashimi.core.edit", "edit"),
+            ("sashimi.core.edit", "select_frames"),
+            ("sashimi.api.resize", "convert"),
+            ("sashimi.api.transform", "transform"),
+            ("sashimi.api.extract", "trim"),
+            ("sashimi.api.remux", "trim"),
+            ("sashimi.api.strip", "strip"),
+            ("sashimi.api.thumbs", "render"),
+            ("sashimi.api.preview", "preview"),
+            ("sashimi.api.favicon", "favicon_pack"),
+        )
+    ]
+    for module, name in stubbed:
+        monkeypatch.setattr(module, name, made)
     extract = importlib.import_module("sashimi.api.extract")
     monkeypatch.setattr(extract, "_clip_message", lambda config, source, output: "Extracted to {name}")
 
@@ -359,3 +366,107 @@ def test_a_deleted_originals_outputs_are_processed_like_any_file(tmp_path):
     results = run("resize", root)
     assert [(source.name, status) for source, status, _, _ in results] == [("photo.png.webp", "success")]
     shutil.rmtree(root)
+
+
+def first_taken(tmp_path, command):
+    """A fixture file `command` takes, and how many bytes longer its output's name is."""
+    for name in FIXTURE:
+        source = folder(tmp_path / "probe" / command, [name]) / name
+        items = COMMANDS[command][1](source).plan().files
+        if items and items[0].action == "write":
+            return name, len(items[0].output.name.encode()) - len(name.encode())
+    raise AssertionError(command)
+
+
+def long_stems(room):
+    """Stems that fill `room` bytes: ASCII, and three-byte CJK characters."""
+    return ["a" * room, "写" * (room // 3) + "a" * (room % 3)]
+
+
+@pytest.mark.parametrize("command", sorted(COMMANDS))
+def test_a_name_the_dry_run_accepts_is_written(tmp_path, command):
+    name, extra = first_taken(tmp_path, command)
+    suffix = pathlib.PurePath(name).suffix
+    root = folder(tmp_path / "files", [stem + suffix for stem in long_stems(MAX_NAME_LENGTH - extra - len(suffix))])
+    planned = run(command, root, dry_run=True)
+    assert [status for _, status, _, _ in planned] == ["success", "success"], planned
+    results = run(command, root)
+    assert [status for _, status, _, _ in results] == ["success", "success"], results
+    assert all(len(out.name.encode()) == MAX_NAME_LENGTH and out.is_file() for _, _, _, out in results)
+    assert not [path for path in root.iterdir() if path.name.startswith(".")]
+
+
+@pytest.mark.parametrize("command", sorted(COMMANDS))
+def test_a_name_too_long_to_write_is_refused_in_the_dry_run(tmp_path, command):
+    name, extra = first_taken(tmp_path, command)
+    suffix = pathlib.PurePath(name).suffix
+    room = MAX_NAME_LENGTH - extra - len(suffix) + 1
+    root = folder(tmp_path / "files", ["a" * room + suffix, "写" * -(-room // 3) + suffix])
+    before = snapshot(root)
+    for dry_run in (True, False):
+        results = run(command, root, dry_run=dry_run)
+        assert [status for _, status, _, _ in results] == ["error", "error"], results
+        assert all(f"at most {MAX_NAME_LENGTH} bytes" in message for _, _, message, _ in results)
+    assert snapshot(root) == before
+
+
+def outputs(command, paths, out):
+    return {
+        str(item.source.absolute()): item.output.absolute()
+        for item in COMMANDS[command][1](paths, output_dir=out, recursive=True).plan().files
+        if item.output is not None
+    }
+
+
+@pytest.mark.parametrize("command", sorted(COMMANDS))
+def test_naming_a_path_inside_a_named_folder_moves_no_output(tmp_path, command):
+    root = folder(tmp_path / "files")
+    folder(root / "sub")
+    folder(root / "sub" / "deeper", ["photo.jpg", "clip.mp4"])
+    out = tmp_path / "out"
+    alone = outputs(command, root, out)
+    assert alone, command
+    for paths in ([root, root / "sub"], [root, *sorted(root.iterdir())], [root / "sub" / "deeper", root]):
+        found = outputs(command, paths, out)
+        assert found == alone, (command, paths, set(found.items()) ^ set(alone.items()))
+
+
+@pytest.mark.parametrize("target", sorted(EXTENSIONS.keys() - {"zip", "mkv", "mov"}))
+def test_converts_formats_agree_with_the_names_formats(tmp_path, target):
+    from sashimi.api.convert import TARGET_SUFFIX, own_extensions
+
+    assert TARGET_SUFFIX[target] == f".{EXTENSIONS[target][0]}"
+    for extension in EXTENSIONS[target]:
+        source = tmp_path / f"x.{extension}"
+        source.write_bytes(b"x")
+        plan = api.convert_files_generator(source, target).plan()
+        if extension == "m4v":
+            assert [item.action for item in plan.files] == ["write"]
+        else:
+            assert plan.already_done == (source,) and f".{extension}" in own_extensions(target)
+
+
+@pytest.mark.parametrize("recursive", [False, True])
+@pytest.mark.parametrize("command, kind", PATTERN_CASES)
+def test_the_folder_a_clash_hint_names_takes_the_same_files_and_parts_them(tmp_path, command, kind, recursive):
+    root = folder(tmp_path / "files")
+    folder(root / "sub")
+    if recursive:
+        folder(root / "sub" / "deeper", ["photo.jpg", "clip.mp4"])
+    out = tmp_path / "out"
+    pattern = patterns(command)[kind]
+    make = COMMANDS[command][1]
+    glob = make(sorted(root.iterdir()), output_name=pattern, output_dir=out, recursive=recursive).plan()
+    clash = glob.folder_clash
+    assert clash is not None, command
+    assert clash.holder == root and clash.same_files is True
+    assert set(clash.files) <= {item.source for item in glob.clashes}
+    whole = make([clash.holder], output_name=pattern, output_dir=out, recursive=True).plan()
+    assert {item.source for item in whole.files} == {item.source for item in glob.files}
+    assert whole.folder_clash is None
+    in_one_folder = set()
+    for parent in {item.source.parent for item in glob.files}:
+        alone = make([parent], output_name=pattern, output_dir=out / parent.relative_to(root)).plan()
+        in_one_folder |= {item.source for item in alone.clashes}
+    assert {item.source for item in whole.clashes} == in_one_folder
+    assert len({item.output for item in whole.to_process}) == len(whole.to_process)

@@ -50,6 +50,13 @@ EXTRACT_FLAGS = {
 }
 CLI_DEFAULTS = {"rotate": {"rotate": 90}}
 """Commands whose CLI default differs from the model's, by operation and field."""
+SHOWN_FIELDS = {
+    "rotate": frozenset(
+        {"rotate", "flip", "quality", "metadata", "crf", "preset", "speed", "audio_bitrate_kbps", "mute"}
+    ),
+    "remux": frozenset({"metadata"}),
+}
+"""Commands that set only some of their models' fields: the fields they take (the rest keep the model's defaults)."""
 _ROLE = re.compile(r":\w+:`~?([^`]+)`")
 
 
@@ -174,7 +181,12 @@ def models_for(operation: str, fmt: str | None = None) -> list[tuple[str, type[B
     elif operation == "resize":
         add(config.IMAGE_RESIZE, "Resized images")
     elif operation == "rotate":
+        add(config.IMAGE_EDIT, "Rotated images")
         add(config.VIDEO_TRANSFORM, "Rotated videos")
+    elif operation == "remux":
+        for container in config.VIDEO_TRIM.targets:
+            if fmt in (None, container):
+                found.append((f"Remuxed videos → {container.upper()}", config.CopyTrimConfig))
     elif operation == "favicon":
         if fmt in (None, "zip"):
             found.append(("Images → favicon pack (ZIP)", config.FaviconPackConfig))
@@ -359,8 +371,9 @@ def rows(operation: str, model: type[BaseModel], overrides: dict[str, Any] | Non
     flags = flags_for(operation)
     cli_defaults = CLI_DEFAULTS.get(operation, {})
     found = []
+    shown = SHOWN_FIELDS.get(operation)
     for name, field in model.model_fields.items():
-        if name in DISCRIMINATORS:
+        if name in DISCRIMINATORS or (shown is not None and name not in shown):
             continue
         row = {
             "field": name,

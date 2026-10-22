@@ -478,3 +478,291 @@ def test_a_conversions_suggested_short_pattern_works(tmp_path):
     short = "{input_stem}.{output_ext}"
     assert f"{short} gives short names" in shown["description"]
     sashimi("convert", ".", "webp", "--output-name", short, "-n")
+
+
+PROCESSING = {
+    "convert": ("sashimi.api.convert", "convert_files_generator", ["convert", "photo.png", "webp"]),
+    "remux": ("sashimi.api.remux", "remux_files_generator", ["remux", "clip.mp4"]),
+    "resize": ("sashimi.api.resize", "resize_images_generator", ["resize", "photo.png", "-w", "4"]),
+    "rotate": ("sashimi.api.transform", "rotate_files_generator", ["rotate", "photo.png", "90"]),
+    "extract": ("sashimi.api.extract", "extract_generator", ["extract", "clip.mp4", "1", "2"]),
+    "edit": ("sashimi.api.edit", "edit_images_generator", ["edit", "photo.png", "--rotate", "90"]),
+    "frames": ("sashimi.api.edit", "edit_frames_generator", ["frames", "photo.png", "--speed", "2"]),
+    "strip": ("sashimi.api.strip", "strip_files_generator", ["strip", "photo.png"]),
+    "thumbs": ("sashimi.api.thumbs", "make_thumbs_generator", ["thumbs", "clip.mp4"]),
+    "animated_thumbs": ("sashimi.api.thumbs", "make_thumbs_generator", ["thumbs", "clip.mp4", "--animated"]),
+    "preview": ("sashimi.api.preview", "make_previews_generator", ["preview", "clip.mp4"]),
+    "favicon": ("sashimi.api.favicon", "make_favicon_packs_generator", ["favicon", "photo.png"]),
+}
+"""Every processing command: where its batch function is, and a run of it."""
+
+
+def test_every_processing_command_is_listed():
+    from sashimi.api._naming import COMMANDS
+
+    assert set(PROCESSING) == set(COMMANDS)
+
+
+def capture(monkeypatch, command, effect):
+    module, name, args = PROCESSING[command]
+    seen = {}
+
+    def batch(*arguments, **kwargs):
+        seen.update(kwargs)
+        return effect()
+
+    monkeypatch.setattr(importlib.import_module(module), name, batch)
+    Image.new("RGB", (8, 8), "red").save("photo.png")
+    pathlib.Path("clip.mp4").write_bytes(b"video")
+    return args, seen
+
+
+@pytest.mark.parametrize("command", sorted(PROCESSING))
+def test_every_processing_command_runs_with_the_limits_in_sashimi_toml(tmp_path, monkeypatch, command):
+    sashimi("config", "set", "limits.max_pixels", "1234")
+    args, seen = capture(monkeypatch, command, lambda: iter([0]))
+    runner.invoke(app, args)
+    assert seen.get("limits") is not None and seen["limits"].max_pixels == 1234, command
+
+
+def test_strip_keeps_to_the_pixel_limit_in_sashimi_toml(tmp_path):
+    Image.new("RGB", (20, 20), "red").save(tmp_path / "photo.png")
+    sashimi("config", "set", "limits.max_pixels", "100")
+    result = runner.invoke(app, ["strip", "photo.png", "--json"])
+    assert json.loads(result.stdout)["results"][0]["status"] == "error"
+    assert files(tmp_path) == ["photo.png"]
+
+
+@pytest.mark.parametrize("command", sorted(PROCESSING))
+def test_every_processing_commands_refusals_keep_bracketed_text(tmp_path, monkeypatch, command):
+    from sashimi.errors import InvalidOptionsError
+
+    def refuse():
+        raise InvalidOptionsError("The pattern [draft] {input_name}.jpeg can't be used.")
+
+    args, _ = capture(monkeypatch, command, refuse)
+    result = runner.invoke(app, args)
+    assert result.exit_code == 2, (command, result.output)
+    assert "[draft] {input_name}.jpeg" in " ".join(result.stderr.split()), command
+
+
+def test_rotate_refusals_keep_bracketed_text(tmp_path):
+    Image.new("RGB", (8, 8), "red").save(tmp_path / "p.png")
+    result = runner.invoke(
+        app, ["rotate", "p.png", "90", "--output-format", "png", "--output-name", "[draft] {input_name}.jpeg"]
+    )
+    assert result.exit_code == 2 and "[draft] {input_name}.jpeg" in " ".join(result.stderr.split())
+
+
+def test_thumbs_settings_errors_keep_bracketed_text(tmp_path, monkeypatch):
+    from sashimi.errors import InvalidOptionsError
+
+    def refuse(*args, **kwargs):
+        raise InvalidOptionsError("The setting [x] can't be used.")
+
+    (tmp_path / "clip.mp4").write_bytes(b"video")
+    monkeypatch.setattr(settings, "resolve_sheet", refuse)
+    result = runner.invoke(app, ["thumbs", "clip.mp4"])
+    assert result.exit_code == 2 and "[x]" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "key", ["resize.output_dir", "thumbs.output_dir", "thumbs.emoji_dir", "thumbs.header_font_path"]
+)
+@pytest.mark.parametrize(
+    "value, kept", [("2024", "2024"), ("2024-10-21", "2024-10-21"), ("true", "true"), ('"2024"', "2024")]
+)
+def test_config_set_keeps_folder_and_file_names_as_typed(tmp_path, key, value, kept):
+    sashimi("config", "set", key, value)
+    section, option = key.split(".")
+    shown = json.loads(sashimi("config", "show", "--json").stdout)["settings"]
+    assert shown[section][option] == kept
+
+
+def test_a_kept_output_folder_named_like_a_year_is_used(tmp_path):
+    Image.new("RGB", (8, 8), "red").save(tmp_path / "photo.png")
+    sashimi("config", "set", "resize.output_dir", "2024")
+    sashimi("resize", "photo.png", "-w", "4")
+    assert files(tmp_path / "2024") == ["photo.png.resized.png"]
+
+
+def output_formats():
+    import typer
+
+    found = []
+    for name, command in typer.main.get_command(app).commands.items():  # type: ignore[attr-defined]
+        if command.hidden:
+            continue
+        for param in command.params:
+            if "--output-format" in (param.opts or []):
+                found += [(name, choice) for choice in param.type.choices]
+    return found
+
+
+@pytest.mark.parametrize("command, fmt", output_formats())
+def test_config_defaults_takes_every_format_a_command_writes(tmp_path, command, fmt):
+    sashimi("config", "defaults", command, fmt)
+
+
+def test_config_defaults_rotate_shows_only_the_image_options_rotate_has(tmp_path):
+    tables = json.loads(sashimi("config", "defaults", "rotate", "jpeg", "--json").stdout)
+    fields = {field["field"]: field for table in tables[1:] for field in table["fields"]}
+    assert set(fields) == {"rotate", "flip", "metadata", "quality"}
+    assert fields["quality"]["default"] == 92 and fields["rotate"]["default"] == 90
+
+
+def test_a_dot_in_a_patterns_folder_is_not_the_extension(tmp_path):
+    Image.new("RGB", (8, 8), "red").save(tmp_path / "q.png")
+    result = runner.invoke(app, ["convert", "q.png", "jpeg", "--output-name", "{input_stem}.d/sheet", "--json"])
+    message = json.loads(result.stdout)["results"][0]["message"]
+    assert message == "sheet must end in .jpeg or .jpg, since the output is JPEG."
+
+
+def tree(tmp_path):
+    for folder in ("photos", "photos/sub"):
+        (tmp_path / folder).mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (8, 8), "red").save(tmp_path / folder / "x.jpg")
+
+
+@pytest.mark.parametrize("extra", [["photos/sub"], ["photos/x.jpg", "photos/sub"]])
+def test_naming_a_subfolder_too_doesnt_move_outputs(tmp_path, extra):
+    tree(tmp_path)
+    alone = written(report("resize", "photos", "-r", "-w", "4", "--output-dir", "out1", "-n"))
+    glob = written(report("resize", "photos", *extra, "-r", "-w", "4", "--output-dir", "out1", "-n"))
+    assert (
+        alone
+        == glob
+        == [("photos/sub/x.jpg", "out1/sub/x.jpg.resized.jpg"), ("photos/x.jpg", "out1/x.jpg.resized.jpg")]
+    )
+
+
+@pytest.mark.parametrize("stem", ["a" * 230, "写" * 75, "写" * 80])
+def test_a_long_name_the_dry_run_accepts_is_written(tmp_path, stem):
+    Image.new("RGB", (8, 8), "red").save(tmp_path / f"{stem}.png")
+    planned = json.loads(runner.invoke(app, ["strip", f"{stem}.png", "-n", "--json"]).stdout)["results"][0]
+    result = runner.invoke(app, ["strip", f"{stem}.png", "--json"])
+    done = json.loads(result.stdout)["results"][0]
+    assert planned["status"] == done["status"], (planned, done)
+    if done["status"] == "success":
+        assert (tmp_path / f"{stem}.png.stripped.png").is_file()
+    else:
+        assert "255 bytes" in planned["message"]
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".")]
+
+
+def photos(tmp_path, *names):
+    for name in names:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (8, 8), "red").save(tmp_path / name)
+
+
+def shell_glob(folder):
+    return sorted(str(p) for p in pathlib.Path(folder).iterdir() if not p.name.startswith("."))
+
+
+def plain(*args):
+    result = runner.invoke(app, list(args), env={"COLUMNS": "400"}, terminal_width=400)
+    return result, " ".join(result.stdout.split())
+
+
+def test_a_glob_into_one_output_folder_says_how_to_keep_the_layout(tmp_path):
+    photos(tmp_path, "photos/x.jpg", "photos/y.jpg", "photos/sub/x.jpg")
+    for dry in ([], ["-n"]):
+        result, text = plain("resize", *shell_glob("photos"), "-w", "4", "--output-dir", "out", *dry)
+        assert result.exit_code == 1
+        assert (
+            "2 files from different folders were skipped because they'd meet in out. To keep each folder's layout "
+            "there, name the folder that holds them, with -r: "
+            f"sashimi resize photos -r -w 4 --output-dir out{' -n' if dry else ''}"
+        ) in text
+        assert "-f" not in text.split("To keep")[1]
+    sashimi("resize", "photos", "-r", "-w", "4", "--output-dir", "out")
+    assert sorted(str(p.relative_to(tmp_path / "out")) for p in (tmp_path / "out").rglob("*.jpg")) == [
+        "sub/x.jpg.resized.jpg",
+        "x.jpg.resized.jpg",
+        "y.jpg.resized.jpg",
+    ]
+
+
+def test_the_hint_keeps_options_where_they_were_and_quotes_the_folder(tmp_path):
+    photos(tmp_path, "my photos/x.jpg", "my photos/sub/x.jpg")
+    _, text = plain("resize", "-w", "4", *shell_glob("my photos"), "--output-dir", "out", "-n")
+    assert "with -r: sashimi resize -w 4 'my photos' -r --output-dir out -n" in text
+
+
+def test_the_hint_for_convert_keeps_the_format_last(tmp_path):
+    photos(tmp_path, "photos/x.jpg", "photos/sub/x.jpg")
+    _, text = plain("convert", *shell_glob("photos"), "webp", "--output-dir", "out", "-n")
+    assert "with -r: sashimi convert photos -r webp --output-dir out -n" in text
+
+
+def test_a_recursive_run_is_not_told_to_add_r(tmp_path):
+    photos(tmp_path, "photos/x.jpg", "photos/sub/x.jpg", "photos/sub/deeper/z.jpg")
+    _, text = plain("resize", *shell_glob("photos"), "-r", "-w", "4", "--output-dir", "out", "-n")
+    assert "name the folder that holds them instead: sashimi resize photos -r -w 4 --output-dir out -n" in text
+
+
+def test_two_folders_get_a_command_only_when_the_folder_holding_both_holds_nothing_more(tmp_path):
+    photos(tmp_path, "a/x.jpg", "b/x.jpg")
+    _, text = plain("resize", "a", "b", "-w", "4", "--output-dir", "out", "-n")
+    assert "with -r: sashimi resize . -r -w 4 --output-dir out -n" in text
+    photos(tmp_path, "c/z.jpg")
+    _, text = plain("resize", "a", "b", "-w", "4", "--output-dir", "out", "-n")
+    assert "2 files from different folders were skipped because they'd meet in out." in text
+    assert (
+        "To keep them apart, run each folder on its own with its own --output-dir. Naming . with -r would keep "
+        "each folder's layout too, but it wouldn't process the same files (-n shows which it would)."
+    ) in text
+    assert "sashimi resize ." not in text
+
+
+def test_a_kept_output_folder_gets_the_hint_without_the_flag(tmp_path):
+    photos(tmp_path, "photos/x.jpg", "photos/sub/x.jpg")
+    sashimi("config", "set", "resize.output_dir", "out")
+    _, text = plain("resize", *shell_glob("photos"), "-w", "4", "-n")
+    assert "they'd meet in out. To keep each folder's layout there, name the folder that holds them, with -r: " in text
+    assert "sashimi resize photos -r -w 4 -n" in text
+
+
+def test_the_json_report_has_the_folder_clash(tmp_path):
+    photos(tmp_path, "photos/x.jpg", "photos/sub/x.jpg")
+    result = runner.invoke(app, ["resize", *shell_glob("photos"), "-w", "4", "--output-dir", "out", "-n", "--json"])
+    assert json.loads(result.stdout)["folder_clash"] == {
+        "files": ["photos/sub/x.jpg", "photos/x.jpg"],
+        "output_dir": "out",
+        "holder": "photos",
+        "same_files": True,
+    }
+
+
+def test_no_folder_hint_for_a_pattern_clash_a_case_clash_or_no_output_folder(tmp_path):
+    photos(tmp_path, "a/x.jpg", "b/x.png")
+    _, text = plain(
+        "convert", "a", "b", "webp", "--output-dir", "out", "--output-name", "{input_stem}.{output_ext}", "-n"
+    )
+    assert "because the pattern" in text and "different folders" not in text
+    photos(tmp_path, "c/x.jpg", "d/x.jpg")
+    _, text = plain("resize", "c", "d", "-w", "4", "-n")
+    assert "different folders" not in text and "Skipped" not in text
+    photos(tmp_path, "e/x.jpg", "e/X.jpg")
+    if len(list((tmp_path / "e").iterdir())) == 2:
+        _, text = plain("resize", "e", "-w", "4", "--output-dir", "out", "-n")
+        assert "Windows and macOS" in text and "different folders" not in text
+
+
+def test_the_suggested_command_is_one_line_however_narrow_the_terminal(tmp_path):
+    photos(tmp_path, "photos/x.jpg", "photos/sub/x.jpg")
+    args = ["resize", *shell_glob("photos"), "-w", "4", "--output-dir", "out", "-n"]
+    result = runner.invoke(app, args, env={"COLUMNS": "40"}, terminal_width=40)
+    assert "  sashimi resize photos -r -w 4 --output-dir out -n" in result.stdout.splitlines()
+
+
+def test_a_clash_with_both_causes_ends_with_both_lines(tmp_path):
+    photos(tmp_path, "a/x.jpg", "a/x.png", "b/x.jpg")
+    args = ["convert", "a", "b", "webp", "--output-dir", "out", "--output-name", "{input_stem}.{output_ext}", "-n"]
+    _, text = plain(*args)
+    assert "3 files were skipped because the pattern {input_stem}.{output_ext} (--output-name)" in text
+    assert (
+        "Files from different folders also meet in out. To keep each folder's layout there, name the folder that "
+        "holds them, with -r: sashimi convert . -r webp --output-dir out --output-name '{input_stem}.{output_ext}' -n"
+    ) in text

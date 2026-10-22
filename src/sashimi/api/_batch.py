@@ -30,14 +30,15 @@ Output naming policy, used by every batch function:
   sheets), which must name the output's format: when every output has one format, a pattern
   that doesn't is refused before anything runs, and otherwise that file gets an ``error``.
 - Every name is checked before anything runs: a single file name (no ``/`` or ``\\``), valid on
-  Windows and POSIX, at most 255 characters, and ending in an extension of the output's format.
+  Windows and POSIX, at most 255 bytes (UTF-8), and ending in an extension of the output's format.
   A name that fails is that file's ``error`` result.
 - A pattern may start with folders, which are inside each input's own folder:
   ``sheets/{input_name}.jpeg`` writes ``Show/S01/sheets/clip.mkv.jpeg`` for ``Show/S01/clip.mkv``,
   wherever the batch runs from. Folders are created as needed.
 - Outputs go into each input's folder, or under ``output_dir`` (one folder, relative to the
-  current folder unless absolute, keeping the folders below a directory that was searched, with
-  the pattern's folders below that), or to the single ``output`` path given for a single input,
+  current folder unless absolute, keeping the folders below the outermost directory given that
+  holds the input, so naming a folder inside another changes nothing, with the pattern's folders
+  below that), or to the single ``output`` path given for a single input,
   which replaces the pattern and must end in an extension of the output's format.
 - Messages name an output by its file name when it's next to its input, and otherwise by its
   path as built from the caller's own paths (``sheets/clip.mkv.jpeg``), so it can be found.
@@ -68,14 +69,19 @@ Planning and writing:
   written to the same file (compared as a case-insensitive filesystem would), each gets a
   ``skipped`` result naming the other inputs and the shared name, with or without ``force``.
   When the pattern caused it, :attr:`BatchPlan.clash_note` names the pattern and where it was
-  set, once.
+  set, once. When ``output_dir`` caused it, by gathering files from different folders into one
+  (a shell glob names a folder's files and its subfolders, and each goes straight into
+  ``output_dir``), :attr:`BatchPlan.folder_clash` names the folder that holds them all and
+  whether searching it, recursively, would take exactly the same files, which keeps each
+  folder's layout. A clash with both causes gets both.
 - **An existing output is ``exists``** and left alone unless ``force``. The message says what
   sashimi knows: the input itself (a pattern that writes in place), another input, a name a
   pattern gives originals too, or an earlier output. Without ``force`` the output is moved into
   place only if the name is still free, so a file created meanwhile is never replaced.
 - **``force`` replaces whatever is there,** the input itself included (an in-place edit), and
   every replacement is reported. Outputs are written to a staged file first and moved into
-  place, so a failure leaves the original as it was. When an output replaces another input of
+  place, so a failure leaves the original as it was. The staged file has a short name of its
+  own, so any name the plan accepts can be written. When an output replaces another input of
   the same run, that input is processed first.
 - With ``dry_run`` nothing is processed or written: each file's result says what would be
   written (``success``, "Would write …" or "Would replace …") or why not (``exists``,
@@ -91,8 +97,8 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 
 from sashimi.api._kinds import AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, count_text, kind_of, unsupported
-from sashimi.api._naming import NameRefused, NameTemplate, Naming, endings
-from sashimi.api._outputs import own_outputs
+from sashimi.api._naming import NameRefused, NameTemplate, Naming, endings, length_problem
+from sashimi.api._outputs import own_outputs, path_key, rendered_names
 from sashimi.errors import InvalidOptionsError, MediaTooShortError, ProcessingError, UnsupportedMediaError
 from sashimi.errors import UserInputError
 
@@ -102,6 +108,7 @@ __all__ = [
     "VIDEO_EXTENSIONS",
     "Batch",
     "BatchPlan",
+    "FolderClash",
     "PlannedFile",
     "run_batch",
 ]
@@ -148,6 +155,27 @@ class PlannedFile:
 
 
 @dataclass(frozen=True)
+class FolderClash:
+    """
+    Files skipped only because ``output_dir`` gathers files from different folders into one: a
+    named file goes straight into ``output_dir``, and so do the files of each named folder, so
+    ``photos/x.jpg`` and ``photos/sub/x.jpg``, named as a shell's ``photos/*`` names them, would
+    share a name there. Searching one folder that holds them keeps each folder's layout below
+    ``output_dir`` instead. `files` are the files skipped for this reason, `output_dir` the
+    folder as given, and `holder` the closest folder holding every path named (relative when
+    every path named was, else absolute; None when there is none, as across Windows drives).
+    `same_files` is True when searching `holder` with ``recursive=True`` would take exactly this
+    run's files, False when it would take others too or miss some, and None when it wasn't
+    checked because `holder` holds too much to search quickly.
+    """
+
+    files: tuple[pathlib.Path, ...]
+    output_dir: pathlib.Path
+    holder: pathlib.Path | None
+    same_files: bool | None
+
+
+@dataclass(frozen=True)
 class BatchPlan:
     """
     Everything a batch will do, worked out before anything is written: each input's
@@ -156,7 +184,9 @@ class BatchPlan:
     from. `searched` is True when a directory was searched. `template` is the pattern in use
     (None when ``output`` names the one output), and `default_template` whether it's the
     command's own. `clash_note` says once which pattern, and where it was set, gave inputs the
-    same output name; it's None when no clash was the pattern's doing. `in_output_dir` lists the
+    same output name; it's None when no clash was the pattern's doing. `folder_clash` describes the
+    clashes ``output_dir`` caused by gathering files from different folders into one
+    (:class:`FolderClash`), or is None. `in_output_dir` lists the
     files a search found inside ``output_dir``, which were left out. `accepts` says what the
     command works on ("videos"), and `recursive` whether subfolders were searched, so a caller
     can explain an empty plan. `already_done` lists the files named directly that were skipped
@@ -172,6 +202,7 @@ class BatchPlan:
     template: NameTemplate | None = None
     default_template: bool = True
     clash_note: str | None = None
+    folder_clash: FolderClash | None = None
     in_output_dir: tuple[pathlib.Path, ...] = ()
     accepts: str = ""
     recursive: bool = False
@@ -293,9 +324,7 @@ def classify(error: Exception) -> tuple[str, str]:
     return "error", f"Failed: {type(error).__name__}: {error}"
 
 
-def _key(path: pathlib.Path) -> str:
-    """Compares paths the way a case-insensitive filesystem would, so plans are safe on every OS."""
-    return os.path.normcase(os.path.abspath(path)).casefold()
+_key = path_key
 
 
 def _inside(path: pathlib.Path, folder: str) -> bool:
@@ -317,11 +346,13 @@ def shown(source: pathlib.Path, target: pathlib.Path) -> str:
 
 
 def _folder_for(file: pathlib.Path, roots: list[pathlib.Path], output_dir: pathlib.Path | None) -> pathlib.Path:
+    """`file`'s output folder: its own, or the one under `output_dir` for the first of `roots` (absolute) holding it."""
     if output_dir is None:
         return file.parent
+    folder = pathlib.Path(os.path.abspath(file.parent))
     for root in roots:
-        if file.is_relative_to(root):
-            return output_dir / file.parent.relative_to(root)
+        if folder.is_relative_to(root):
+            return output_dir / folder.relative_to(root)
     return output_dir
 
 
@@ -337,9 +368,13 @@ def _joined(labels: list[str]) -> str:
     return " and ".join(labels) if len(labels) <= 2 else ", ".join(labels[:-1]) + " and " + labels[-1]
 
 
-def _by_pattern(members: list[pathlib.Path], names: Naming) -> bool:
-    """True when the pattern, not the input names, gives `members` one output name."""
-    return not names.default and len({m.name.casefold() for m in members}) == len(members)
+def _by_pattern(members: list[pathlib.Path], names: Naming, *, every: bool = True) -> bool:
+    """
+    True when the pattern, not the input names, gives `members` one output name: every one of
+    them, or with `every` False, at least two (others may share a name from another folder).
+    """
+    differ = len({m.name.casefold() for m in members})
+    return not names.default and (differ == len(members) if every else differ > 1)
 
 
 def _clash_message(source: pathlib.Path, members: list[pathlib.Path], target: pathlib.Path, names: Naming) -> str:
@@ -352,6 +387,53 @@ def _clash_message(source: pathlib.Path, members: list[pathlib.Path], target: pa
     case = len({m.name.casefold() for m in members}) < len({m.name for m in members})
     where = ", one file on Windows and macOS" if case else ""
     return f"Clashes with {_joined(others)}: {every} would be written as {written}{where}."
+
+
+def _across(members: list[pathlib.Path]) -> bool:
+    """True when `members` come from more than one folder, so keeping the folders below ``output_dir`` would part some."""
+    return len({_key(m.parent) for m in members}) > 1
+
+
+HOLDER_SEARCH_LIMIT = 100_000
+"""The most entries :func:`_same_files` looks at before giving up."""
+
+
+def _holder(sources: list[pathlib.Path]) -> pathlib.Path | None:
+    """The closest folder holding every existing path in `sources`, relative when they all are."""
+    existing = [p for p in sources if p.exists()]
+    if not existing:
+        return None
+    folders = [os.path.abspath(p if p.is_dir() else p.parent) for p in existing]
+    try:
+        common = os.path.commonpath(folders)
+        return pathlib.Path(common if any(p.is_absolute() for p in existing) else os.path.relpath(common))
+    except ValueError:
+        return None
+
+
+def _same_files(
+    holder: pathlib.Path, found: list[pathlib.Path], extensions: Iterable[str], output_dir: pathlib.Path
+) -> bool | None:
+    """Whether searching `holder` recursively, with `output_dir`, would take exactly `found`; None past the search limit."""
+    wanted = {ext.lower() for ext in extensions}
+    expected = {os.path.abspath(f) for f in found}
+    outputs = os.path.abspath(output_dir)
+    seen: set[str] = set()
+    try:
+        for index, candidate in enumerate(holder.rglob("*")):
+            if index >= HOLDER_SEARCH_LIMIT:
+                return None
+            if not (candidate.is_file() and candidate.suffix.lower() in wanted):
+                continue
+            if _left_in_output_dir(candidate, [holder], set(), outputs):
+                continue
+            key = os.path.abspath(candidate)
+            if key not in expected:
+                return False
+            seen.add(key)
+    except OSError:
+        return None
+    return seen == expected
 
 
 def clash_note(count: int, template: NameTemplate) -> str:
@@ -369,16 +451,20 @@ def _targets(
     names: Naming,
     roots: Sequence[pathlib.Path],
     output_dir: pathlib.Path | None,
+    rendered: dict[pathlib.Path, str | NameRefused] | None = None,
 ) -> tuple[dict[pathlib.Path, pathlib.Path], dict[pathlib.Path, str]]:
     """Each input's planned output path, and the inputs whose name can't be used, with why."""
-    ordered_roots = sorted(roots, key=lambda r: len(r.parts), reverse=True)
+    outermost = sorted({pathlib.Path(os.path.abspath(root)) for root in roots}, key=lambda r: len(r.parts))
+    if rendered is None:
+        rendered = rendered_names(files, names)
     planned: dict[pathlib.Path, pathlib.Path] = {}
     refused: dict[pathlib.Path, str] = {}
     for source in files:
-        try:
-            planned[source] = _folder_for(source, ordered_roots, output_dir) / names.name_for(source)
-        except NameRefused as e:
-            refused[source] = e.message
+        name = rendered[source]
+        if isinstance(name, NameRefused):
+            refused[source] = name.message
+        else:
+            planned[source] = _folder_for(source, outermost, output_dir) / name
     return planned, refused
 
 
@@ -407,27 +493,32 @@ def _plan_outputs(
     roots: Sequence[pathlib.Path],
     output: pathlib.Path | None,
     output_dir: pathlib.Path | None,
-) -> tuple[dict[pathlib.Path, pathlib.Path | tuple[str, str]], int]:
+    rendered: dict[pathlib.Path, str | NameRefused] | None = None,
+) -> tuple[dict[pathlib.Path, pathlib.Path | tuple[str, str]], int, list[pathlib.Path]]:
+    """Like :func:`plan_outputs`, plus how many files the pattern made clash and the files ``output_dir`` made clash."""
     if output is not None:
         if len(files) > 1:
             raise InvalidOptionsError("An output file name can only be given for a single input file.")
-        return {source: _checked_output(source, output, names) for source in files}, 0
-    planned, refused = _targets(files, names, roots, output_dir)
+        return {source: _checked_output(source, output, names) for source in files}, 0, []
+    planned, refused = _targets(files, names, roots, output_dir, rendered)
     result: dict[pathlib.Path, pathlib.Path | tuple[str, str]] = {s: ("error", m) for s, m in refused.items()}
     groups: dict[str, list[pathlib.Path]] = {}
     for source, target in planned.items():
         groups.setdefault(_key(target), []).append(source)
     by_pattern = 0
+    crossed: list[pathlib.Path] = []
     for members in groups.values():
         members.sort()
-        if len(members) > 1 and _by_pattern(members, names):
+        if len(members) > 1 and _by_pattern(members, names, every=False):
             by_pattern += len(members)
+        if len(members) > 1 and output_dir is not None and _across(members) and not _by_pattern(members, names):
+            crossed += members
         for source in members:
             if len(members) > 1:
                 result[source] = ("skipped", _clash_message(source, members, planned[members[0]], names))
             else:
                 result[source] = planned[source]
-    return {source: result[source] for source in files}, by_pattern
+    return {source: result[source] for source in files}, by_pattern, sorted(crossed)
 
 
 def _checked_output(source: pathlib.Path, output: pathlib.Path, names: Naming) -> pathlib.Path | tuple[str, str]:
@@ -438,6 +529,9 @@ def _checked_output(source: pathlib.Path, output: pathlib.Path, names: Naming) -
         return ("error", e.message)
     if output.suffix[1:].lower() not in fmt.accepted:
         return ("error", f"{output.name} must end in {endings(fmt)}, since the output is {fmt.label}.")
+    too_long = length_problem(output.name, source)
+    if too_long:
+        return ("error", too_long)
     return output
 
 
@@ -544,16 +638,29 @@ def _plan(
     if out_dir is not None and output is None:
         outputs = os.path.abspath(out_dir)
         in_output_dir = [f for f in files if _left_in_output_dir(f, roots, named, outputs)]
-        files = [f for f in files if f not in set(in_output_dir)]
+        found_there = set(in_output_dir)
+        files = [f for f in files if f not in found_there]
+    searched_files = files
     left_out: list[tuple[pathlib.Path, pathlib.Path]] = []
+    rendered = None
     if output is None:
-        made = own_outputs(files, names)
+        rendered = rendered_names(files, names)
+        made = own_outputs(files, names, rendered)
         left_out = [(f, made[f]) for f in files if f in made]
-        dropped = {f for f, _ in left_out}
-        files = [f for f in files if f not in dropped]
-    target_for, by_pattern = _plan_outputs(
-        files, names, roots=roots, output=pathlib.Path(output) if output is not None else None, output_dir=out_dir
+        files = [f for f in files if f not in made]
+    target_for, by_pattern, crossed = _plan_outputs(
+        files,
+        names,
+        roots=roots,
+        output=pathlib.Path(output) if output is not None else None,
+        output_dir=out_dir,
+        rendered=rendered,
     )
+    folder_clash = None
+    if crossed and out_dir is not None:
+        holder = _holder(sources)
+        same = _same_files(holder, searched_files, extensions, out_dir) if holder is not None else None
+        folder_clash = FolderClash(tuple(crossed), out_dir, holder, same)
     inputs = {_key(f) for f in files}
     items: list[PlannedFile] = []
     for source in files:
@@ -584,6 +691,7 @@ def _plan(
         template=names.template if output is None else None,
         default_template=names.default,
         clash_note=clash_note(by_pattern, names.template) if by_pattern else None,
+        folder_clash=folder_clash,
         in_output_dir=tuple(in_output_dir),
         accepts=accepts,
         recursive=recursive,
@@ -622,9 +730,10 @@ def _write(
     """
     Runs `process` into a staged file next to `output`, then moves it into place: over whatever
     is there with `force` (the input itself included), else only if `output` is still free.
-    Returns whether the output was written, and `process`'s message.
+    The staged file's name is short, whatever `output`'s is. Returns whether the output was
+    written, and `process`'s message.
     """
-    staged = output.with_name(f".{output.name}.{secrets.token_hex(6)}.staged")
+    staged = output.with_name(f".sashimi-{secrets.token_hex(6)}.staged")
     try:
         message = process(source, staged, progress)
         if force:

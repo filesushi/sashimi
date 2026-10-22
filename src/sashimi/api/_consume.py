@@ -13,6 +13,18 @@ REPORT_SCHEMA = 1
 STATUSES = ("success", "error", "exists", "skipped")
 
 
+def _folder_clash(plan: BatchPlan) -> dict[str, Any] | None:
+    clash = plan.folder_clash
+    if clash is None:
+        return None
+    return {
+        "files": [str(f) for f in clash.files],
+        "output_dir": str(clash.output_dir),
+        "holder": str(clash.holder) if clash.holder is not None else None,
+        "same_files": clash.same_files,
+    }
+
+
 def build_report(
     command: str,
     total_found: int,
@@ -31,6 +43,7 @@ def build_report(
          "outputs_left_out": [{"file", "made_from"}, ...], "in_output_dir": ["...", ...],
          "already_done": ["...", ...],
          "clash_note": "..." or null,
+         "folder_clash": {"files": [...], "output_dir", "holder", "same_files"} or null,
          "summary": {"total_found", "success", "exists", "skipped", "errors", "time_taken_seconds", "avg_time_seconds"},
          "results": [{"file", "status", "message", "output"}, ...]}
 
@@ -39,8 +52,11 @@ def build_report(
     ``outputs_left_out`` lists the command's own earlier outputs the run left out,
     each with the file it was made from, ``in_output_dir`` the files found inside ``output_dir``
     and left out, ``already_done`` the files named directly that are already what the command
-    makes (``Already JPEG``; skipped, but not a problem), and ``clash_note`` names the pattern that gave inputs
-    one output name, and where it was set. `extra` keys are added at the top level (``flatten`` adds
+    makes (``Already JPEG``; skipped, but not a problem), ``clash_note`` names the pattern that gave inputs
+    one output name, and where it was set, and ``folder_clash`` (:class:`~sashimi.api.FolderClash`) lists the
+    files skipped because ``output_dir`` gathered them from different folders, with the folder that holds
+    them all and whether searching it recursively would take the same files (``null`` when it wasn't
+    checked). `extra` keys are added at the top level (``flatten`` adds
     ``renamed`` and ``removed_dirs``).
     """
     rows = list(results)
@@ -60,6 +76,7 @@ def build_report(
                 "in_output_dir": [str(f) for f in plan.in_output_dir],
                 "already_done": [str(f) for f in plan.already_done],
                 "clash_note": plan.clash_note,
+                "folder_clash": _folder_clash(plan),
             }
             if plan is not None
             else {}

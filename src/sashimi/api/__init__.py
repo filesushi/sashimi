@@ -37,7 +37,8 @@ Output naming, the same for every function here (the full policy is in ``_batch`
   ``make_thumbs`` converts the sheets);
 - two inputs that would be written to the same file are both ``skipped``, never renamed, each
   message naming the other file and the shared name, and ``plan().clash_note`` naming the
-  pattern and where it was set; an existing output is reported as ``exists`` and kept unless
+  pattern and where it was set (or ``plan().folder_clash`` naming the folder that holds files
+  ``output_dir`` gathered from different folders); an existing output is reported as ``exists`` and kept unless
   ``force``, which replaces whatever is there, the input itself included, and says so. Without
   ``force`` nothing is ever replaced, even a file that appears while the batch runs;
 - ``dry_run=True`` plans every output and reports what would be written, replaced or refused,
@@ -68,7 +69,7 @@ if TYPE_CHECKING:
         to_jpeg,
         to_png,
     )
-    from ._batch import Batch, BatchPlan, PlannedFile, YieldType
+    from ._batch import Batch, BatchPlan, FolderClash, PlannedFile, YieldType
     from ._naming import NameTemplate, default_output_name
     from ._consume import build_report
     from .edit import edit_frames, edit_frames_generator, edit_images, edit_images_generator
@@ -86,6 +87,7 @@ _EXPORTS = {
     "YieldType": "._batch",
     "Batch": "._batch",
     "BatchPlan": "._batch",
+    "FolderClash": "._batch",
     "PlannedFile": "._batch",
     "NameTemplate": "._naming",
     "default_output_name": "._naming",

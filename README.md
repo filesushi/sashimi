@@ -267,7 +267,7 @@ taking a number with a unit, or `none` for no limit:
 
 | Flag | Commands | Default | Example |
 |---|---|---|---|
-| `--max-pixels` | `convert`, `resize`, `rotate`, `favicon`, `edit`, `frames` | 64M | `sashimi convert scan.tif jpeg --max-pixels 300M` |
+| `--max-pixels` | `convert`, `resize`, `rotate`, `favicon`, `edit`, `frames`, `strip` | 64M | `sashimi convert scan.tif jpeg --max-pixels 300M` |
 | `--max-frame-bytes` | `convert` (GIFs), `thumbs` (animated), `preview` (GIF) | 1G | `sashimi convert talk.mp4 gif -d 60 --max-frame-bytes 4G` |
 | `--max-animation-bytes` | `rotate`, `edit`, `frames` | 1G | `sashimi edit big.gif --rotate 90 --max-animation-bytes none` |
 | `--max-sheet-pixels` | `thumbs` | 64M | `sashimi thumbs film.mkv --cols 10 --rows 20 --max-sheet-pixels 200M` |
@@ -345,7 +345,16 @@ rotated, saved as PNG" is `photo.jpg.rotated.png`. Conversions have no role, so 
   absolute one as given, a relative one (`sheets` and `./sheets` alike) inside the folder you run
   sashimi from. The subfolders of a directory you passed are kept below it, and a pattern's
   folders below those: `sashimi thumbs Show -r --output-dir /srv/sheets` with the pattern above
-  writes `/srv/sheets/S01/sheets/ep1.mkv.jpeg`. Files a search finds already inside `DIR` aren't
+  writes `/srv/sheets/S01/sheets/ep1.mkv.jpeg`. When you also name a folder or file inside one
+  you passed (as `sashimi thumbs Show Show/* -r` does), the outermost folder counts, so the
+  outputs go where they would without it. A file you name goes straight into `DIR`, and so do
+  the files of each folder you name, so files from different folders can meet there: with
+  `photos/x.jpg` and `photos/sub/x.jpg`, `sashimi resize photos/* -w 800 --output-dir out` (the
+  shell names `photos/x.jpg` and the folder `photos/sub`) skips both `x.jpg`s as a clash, and a
+  line at the end says how to keep each folder's layout: here, `sashimi resize photos -r -w 800
+  --output-dir out`, which writes `out/x.jpg.resized.jpg` and `out/sub/x.jpg.resized.jpg`. It
+  gives that command only when it would process the same files, and otherwise suggests giving
+  each folder its own `--output-dir`. Files a search finds already inside `DIR` aren't
   processed (a line under the results says so), unless `DIR` holds the folder you searched.
 - **Keep an output folder with `sashimi config set <command>.output_dir DIR`** (`~` is your home
   folder; `animated_thumbs.output_dir` for animated sheets). It means what the flag means, so a
@@ -380,12 +389,14 @@ rotated, saved as PNG" is `photo.jpg.rotated.png`. Conversions have no role, so 
   `video.mp4.jpeg`. `sashimi config set thumbs.output_name '{input_name}.jpeg'` keeps it, for
   every later run, wherever you run sashimi (`--project` for runs in that folder only).
 - **Two outputs with one name are both skipped,** never renamed. This only happens with a
-  pattern of your own (`{input_stem}.{output_ext}` gives `x.mp4` for both `x.mkv` and `x.mov`)
-  or with names that differ only in case, which are one file on Windows and macOS. Each result
-  says which other file it clashes with and the name they'd share ("Clashes with x.mov: both
-  would be named x.mp4."), and one line at the end names the pattern, where you set it (the
-  flag, or the `sashimi.toml` file and section) and how to tell the files apart. `--force`
-  doesn't change this.
+  pattern of your own (`{input_stem}.{output_ext}` gives `x.mp4` for both `x.mkv` and `x.mov`),
+  with names that differ only in case, which are one file on Windows and macOS, or with
+  `--output-dir` (or a kept `output_dir`) gathering files of one name from different folders
+  (see `--output-dir` above). Each result says which other file it clashes with and the name
+  they'd share ("Clashes with x.mov: both would be named x.mp4."), and one line at the end names
+  the pattern, where you set it (the flag, or the `sashimi.toml` file and section) and how to
+  tell the files apart, and, for files from different folders, how to keep each folder's layout.
+  `--force` doesn't change this.
 - **An output that already exists is left alone** and reported as "Exists", with what sashimi
   knows about it: "Output already exists" for a name sashimi gives outputs, "it's the input" for
   a pattern that writes in place (`{input_name}`), and "sashimi can't tell whether an earlier run

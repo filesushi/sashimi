@@ -196,6 +196,7 @@ for command, flags in {
     "edit": ("--max-pixels", "--max-animation-bytes"),
     "rotate": ("--max-pixels", "--max-animation-bytes"),
     "frames": ("--max-pixels", "--max-animation-bytes"),
+    "strip": ("--max-pixels",),
     "thumbs": ("--max-sheet-pixels", "--max-frame-bytes"),
     "preview": ("--max-frame-bytes",),
 }.items():
@@ -299,12 +300,15 @@ def test_config_defaults_table():
 def test_config_defaults_json_lists_every_field():
     result = runner.invoke(app, ["config", "defaults", "rotate", "--json"])
     report = json.loads(result.stdout)
-    assert [section["model"] for section in report] == [None, "Mp4TransformConfig", "WebmTransformConfig"]
+    models = [section["model"] for section in report]
+    assert models[0] is None and models[-2:] == ["Mp4TransformConfig", "WebmTransformConfig"]
+    assert len(models) == 3 + len(config.IMAGE_EDIT.targets)
     names = {row["field"]: row["default"] for row in report[0]["fields"]}
     assert names == {"output_name": "{input_name}.{role}.{output_ext}", "output_dir": None}
-    rotate = next(row for row in report[1]["fields"] if row["field"] == "rotate")
+    mp4 = report[-2]["fields"]
+    rotate = next(row for row in mp4 if row["field"] == "rotate")
     assert (rotate["option"], rotate["default"], rotate["model_default"]) == ("angle", 90, 0)
-    crf = next(row for row in report[1]["fields"] if row["field"] == "crf")
+    crf = next(row for row in mp4 if row["field"] == "crf")
     assert (crf["default"], crf["accepted"]) == (23, "0-51")
     assert all(row["description"] for section in report for row in section["fields"])
 
@@ -337,16 +341,19 @@ def test_config_defaults_shows_each_commands_output_name(tmp_path):
         ("output_name", "{input_name}.{output_ext}", "{input_stem}.{output_ext}"),
         ("output_dir", None, None),
     ]
-    for command, default in (("remux", "{input_name}.{output_ext}"), ("strip", "{input_name}.{role}.{output_ext}")):
+    for command, default, more in (
+        ("remux", "{input_name}.{output_ext}", [f"Remuxed videos → {c.upper()}" for c in config.VIDEO_TRIM.targets]),
+        ("strip", "{input_name}.{role}.{output_ext}", []),
+    ):
         report = json.loads(runner.invoke(app, ["config", "defaults", command, "--json"]).stdout)
-        assert [section["title"] for section in report] == ["Output names and folder"]
+        assert [section["title"] for section in report] == ["Output names and folder", *more]
         assert report[0]["fields"][0]["default"] == default
     assert runner.invoke(app, ["config", "defaults", "strip", "mp4"]).exit_code == 2
 
 
 def test_config_defaults_unknown_format():
-    result = runner.invoke(app, ["config", "defaults", "rotate", "gif"])
-    assert result.exit_code == 2 and "mp4, webm" in result.stderr
+    result = runner.invoke(app, ["config", "defaults", "rotate", "mkv"])
+    assert result.exit_code == 2 and "bmp, gif, jpeg, mp4, png, tiff, webm, webp" in " ".join(result.stderr.split())
 
 
 @pytest.mark.parametrize(

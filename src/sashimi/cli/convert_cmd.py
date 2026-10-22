@@ -255,7 +255,7 @@ def convert_cmd(
     limits = _limits.resolve(max_pixels=max_pixels, max_frame_bytes=max_frame_bytes)
 
     from sashimi.api._batch import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
-    from sashimi.api.convert import TARGET_SUFFIX, convert_files_generator
+    from sashimi.api.convert import convert_files_generator, own_extensions
     from sashimi.config import AUDIO_CONVERT, IMAGE_CONVERT, VIDEO_CONVERT, IcoConfig
 
     start_s, duration_s = opt.parse_time(start, "--start"), opt.parse_time(duration, "--duration")
@@ -301,7 +301,7 @@ def convert_cmd(
                     f"[yellow]Warning: {FLAGS.get(field, field)} is invalid for videos ({detail['msg']}); "
                     "only images will be converted.[/yellow]"
                 )
-                extensions = [ext for ext in IMAGE_EXTENSIONS if ext != TARGET_SUFFIX[t]]
+                extensions = [ext for ext in IMAGE_EXTENSIONS if ext not in own_extensions(t)]
         else:
             configs[kind] = _validate(model, data)
 
@@ -564,9 +564,7 @@ def rotate_cmd(
         verb="rotate {every}",
     )
     naming = opt.naming_args("rotate", output_name, output)
-    from sashimi.errors import UserInputError
-
-    try:
+    with refusals():
         gen = rotate_files_generator(
             paths,
             turn,
@@ -584,8 +582,6 @@ def rotate_cmd(
             limits=limits,
             **naming,
         )
-    except UserInputError as e:
-        fail(e.user_message)
     runner.run(gen, paths)
 
 
