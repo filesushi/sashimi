@@ -242,7 +242,7 @@ def test_a_broken_kept_folder_stops_its_own_command(tmp_path):
     media(tmp_path / "videos", ("clip.mp4",))
     (tmp_path / "sashimi.toml").write_text("[thumbs]\noutput_dir = 3\n")
     settings.load_raw_config.cache_clear()
-    result = runner.invoke(app, ["thumbs", "videos"])
+    result = runner.invoke(app, ["thumbs", "videos"], env={"COLUMNS": "1000"})
     assert result.exit_code == 2
     assert f"output_dir in [thumbs] of {tmp_path / 'sashimi.toml'}" in " ".join(result.stderr.split())
     assert runner.invoke(app, ["resize", "videos", "-w", "8"]).exit_code == 0

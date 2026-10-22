@@ -47,7 +47,7 @@ def isolated(tmp_path, monkeypatch):
 
 
 def sashimi(*args):
-    result = runner.invoke(app, list(args))
+    result = runner.invoke(app, list(args), env={"COLUMNS": "1000"})
     assert result.exit_code == 0, result.output
     return result
 

@@ -362,7 +362,11 @@ def _media_muxer(input_path: PathLike, info: MediaInfo) -> str:
             head = f.read(64)
         return "webm" if b"webm" in head else "matroska"
     if "mov" in names:
-        brand = info.tags.get("major_brand", "").strip().lower()
+        with open(os.fspath(input_path), "rb") as f:
+            head = f.read(12)
+        brand = (
+            (head[8:12].decode("latin-1") if head[4:8] == b"ftyp" else info.tags.get("major_brand", "")).strip().lower()
+        )
         if brand == "qt":
             return "mov"
         if brand in ("m4a", "m4b"):

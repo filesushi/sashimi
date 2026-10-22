@@ -37,7 +37,6 @@ def test_get_user_config_path(fs):
 
 
 def test_find_project_config_path(fs):
-
     root_dir = "/fake_proj"
     sub_dir = "/fake_proj/nested"
     fs.create_dir(sub_dir)
@@ -66,7 +65,6 @@ def test_reading_settings_creates_no_files(fs):
 
 
 def test_load_config_file(fs):
-
     assert manager._load_config_file(pathlib.Path("/missing.toml")) == {}
 
     valid_path = pathlib.Path("/valid.toml")

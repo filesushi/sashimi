@@ -138,7 +138,7 @@ def test_a_broken_pattern_in_sashimi_toml_stops_only_its_own_command(tmp_path):
     touch(tmp_path, "a.mp4", "a.png")
     (tmp_path / "sashimi.toml").write_text('[thumbs]\noutput_name = "{nme}.jpg"\n')
     for args in (["thumbs", "a.mp4", "-n"], ["thumbs", ".", "-n"]):
-        result = runner.invoke(app, args)
+        result = runner.invoke(app, args, env={"COLUMNS": "1000"})
         assert result.exit_code == 2
         assert f"output_name in [thumbs] of {tmp_path / 'sashimi.toml'}" in " ".join(result.stderr.split())
         assert "{nme}" in result.stderr
@@ -377,6 +377,8 @@ def test_the_json_report_carries_the_clash_note(tmp_path):
 
 def test_a_case_only_clash_under_a_pattern_isnt_blamed_on_it(tmp_path):
     touch(tmp_path, "Clip.mp4", "clip.mp4")
+    if len(list(tmp_path.iterdir())) < 2:
+        pytest.skip("case-insensitive file system")
     result = runner.invoke(app, ["thumbs", ".", "-n", "--output-name", "{input_name}.jpeg"], env={"COLUMNS": "400"})
     out = " ".join(result.stdout.split())
     assert "Clashes with clip.mp4: both would be written as Clip.mp4.jpeg, one file on Windows and macOS." in out

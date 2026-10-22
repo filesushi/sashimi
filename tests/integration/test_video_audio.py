@@ -98,7 +98,6 @@ def test_user_errors(video_blob, junk_blob, tmp_path):
 
 
 def test_still_image_is_not_a_video(tmp_path):
-
     src = tmp_path / "original.blob"
     Image.new("RGB", (64, 64)).save(src, "PNG")
     with pytest.raises(UnsupportedMediaError):
