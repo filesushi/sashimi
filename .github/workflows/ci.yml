@@ -89,10 +89,11 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           for i in 1 2 3; do
-            brew install ffmpeg && break
+            brew install ffmpeg-full && break
             echo "brew install failed, retrying..."
             sleep 15
           done
+          echo "$(brew --prefix ffmpeg-full)/bin" >> "$GITHUB_PATH"
 
       - name: Show FFmpeg version
         shell: bash

@@ -20,6 +20,25 @@ HAS_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is n
 needs_ffmpeg = pytest.mark.skipif(not HAS_FFMPEG, reason="ffmpeg/ffprobe not installed")
 
 
+def _has_encoder(name: str) -> bool:
+    if not HAS_FFMPEG:
+        return True
+    result = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True, check=False)
+    return name in result.stdout.split()
+
+
+HAS_WEBP_ANIM = _has_encoder("libwebp_anim")
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if report.failed and not HAS_WEBP_ANIM and "Unknown encoder 'libwebp_anim'" in str(report.longrepr):
+        report.outcome = "skipped"
+        report.longrepr = (str(item.path), item.location[1] or 0, "Skipped: this ffmpeg has no libwebp_anim encoder")
+
+
 def _ffmpeg(*args: str) -> None:
     subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", *args], check=True)
 
