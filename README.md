@@ -1,19 +1,117 @@
-# sashimi
+<h1 align="center">sashimi</h1>
 
-File conversion and video contact sheets for apps and servers, built on FFmpeg and Pillow.
+<p align="center">
+  <strong>File conversion and video contact sheets for apps, servers and the command line, built on FFmpeg and Pillow.</strong>
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/sashimi-convert/"><img src="https://img.shields.io/pypi/v/sashimi-convert?color=e8590c" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/sashimi-convert/"><img src="https://img.shields.io/pypi/pyversions/sashimi-convert?color=e8590c" alt="Python versions"></a>
+  <a href="https://github.com/filesushi/sashimi/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-e8590c" alt="License: Apache 2.0"></a>
+  <br>
+  <a href="https://github.com/filesushi/sashimi/actions/workflows/ci.yml"><img src="https://github.com/filesushi/sashimi/actions/workflows/ci.yml/badge.svg" alt="Tests"></a>
+  <a href="https://codecov.io/gh/filesushi/sashimi"><img src="https://codecov.io/gh/filesushi/sashimi/graph/badge.svg" alt="Coverage"></a>
+  <a href="https://mypy-lang.org/"><img src="https://img.shields.io/badge/mypy-checked-e8590c" alt="Checked with mypy"></a>
+  <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff"></a>
+</p>
+
+**sashimi** converts images, video and audio, makes contact sheets and previews of videos, edits
+images and animations, and reads and removes metadata. It is a Python library and a `sashimi`
+command, and the conversion engine behind FileSushi, so it is built to run inside locked-down
+workers: explicit paths, atomic writes, typed errors, bounded threads, the limits you choose, and
+no network.
+
+### What it does
+
+* **Images:** convert between JPEG, PNG, WebP, GIF, BMP and TIFF (and read HEIC), resize, make
+  ICO files and complete favicon packs; rotate, flip, crop, and adjust brightness, contrast and
+  saturation to match CSS filters, on every frame of an animated GIF or WebP too.
+* **Video:** convert to GIF, animated WebP, WebM or MP4 (copying the streams when that gives the
+  same result), cut losslessly or frame-accurately, remux, rotate and flip, and make short
+  previews sampled from across a video.
+* **Audio:** extract from video, or convert, to MP3, M4A, WAV, OGG/Opus and FLAC.
+* **Contact sheets:** still (JPEG, PNG, WebP) or animated (WebP, GIF) grids of a video, with a
+  header and timestamps.
+* **Metadata:** see what a file holds, and remove all of it or just the location without
+  re-encoding; every output keeps or removes the source's metadata by one setting.
+* **Folders, safely:** the CLI names outputs predictably, never processes its own outputs, never
+  overwrites without `--force`, shows the plan with `--dry-run` and reports in JSON.
+
+## Contents
+
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Python library](#python-library): [embedding](#designed-to-be-embedded), [configs](#configs),
+  [limits](#limits), [metadata](#metadata), [editing images](#editing-images)
+- [Command line](#command-line): [settings files](#settings-files),
+  [limits](#limits-on-the-command-line), [where outputs go](#where-outputs-go),
+  [mixed folders](#folders-of-mixed-files), [scripting](#scripting-exit-codes-and---json)
+- [Development](#development)
+
+## Installation
+
+sashimi needs Python 3.11 or later and is on PyPI as **`sashimi-convert`** (the import name is
+`sashimi`):
 
 ```sh
-pip install sashimi-convert            # library: pydantic + Pillow
+pip install sashimi-convert            # the library: pydantic and Pillow
 pip install 'sashimi-convert[cli]'     # adds the `sashimi` command
+uv tool install 'sashimi-convert[cli]' # or install just the command, with uv
 ```
 
-The import name is `sashimi`. Video and audio work needs **`ffmpeg` and `ffprobe` on `PATH`**
-(or call `sashimi.set_ffmpeg_paths(...)`); image conversion needs only Pillow.
+| Extra | Adds |
+|---|---|
+| `[cli]` | the `sashimi` command (Typer, Rich, tomlkit) |
+| `[heif]` | reading HEIC/HEIF photos (pillow-heif) |
+| `[emoji]` | emoji in contact sheet headers, drawn from a local image folder (pilmoji; never downloads anything) |
 
-Optional extras: `[heif]` reads HEIC/HEIF photos (pillow-heif), `[emoji]` draws emoji in contact
-sheet headers from a local image folder (pilmoji; never downloads anything).
+Video and audio need **`ffmpeg` and `ffprobe` on `PATH`** (or call
+`sashimi.set_ffmpeg_paths(...)`); images need only Pillow. Install FFmpeg with your package
+manager (`apt install ffmpeg`, `brew install ffmpeg`) or from [ffmpeg.org](https://ffmpeg.org/download.html).
 
-## What it does
+sashimi is tested on Linux, macOS and Windows with Python 3.11 to 3.14. Before 1.0, minor
+versions may change the Python API; the [changelog](https://github.com/filesushi/sashimi/blob/main/CHANGELOG.md)
+lists every change and [MIGRATION.md](https://github.com/filesushi/sashimi/blob/main/MIGRATION.md)
+how to upgrade.
+
+## Quick start
+
+### From the command line
+
+```sh
+sashimi convert photos/ webp -q 80          # every image in photos/ to WebP, next to the originals
+sashimi resize *.jpg -w 1600                # shrink, keeping each format
+sashimi convert clip.mkv gif -s 1m30s -d 5  # a 5-second GIF from 1:30
+sashimi thumbs videos/ -r                   # a contact sheet next to each video
+sashimi strip photos/ --remove remove_location   # drop GPS and place names, without re-encoding
+sashimi convert photos/ webp -n             # --dry-run: see the plan first
+```
+
+Outputs are written next to their inputs and named after them (`photo.jpg` → `photo.jpg.webp`,
+`clip.mp4` → `clip.mp4.sheet.jpg`), and nothing is overwritten without `-f`. See
+[Command line](#command-line) for every command.
+
+### From Python
+
+```python
+import sashimi
+from sashimi.config import CONTACT_SHEET, IMAGE_RESIZE, VIDEO_CONVERT, Limits
+from sashimi.errors import UserInputError
+
+config = IMAGE_RESIZE.from_params({"max_width": 1600, "quality": 80}, target="webp")
+sashimi.image.convert("photo.png", "photo.webp", config)
+
+sheet = CONTACT_SHEET.from_params({"cols": 4}, target="jpeg")
+sashimi.sheets.render("film.mkv", "film.jpg", sheet)
+
+try:
+    clip = VIDEO_CONVERT.from_params({"start_seconds": 12, "duration_seconds": 45}, target="gif")
+    sashimi.video.convert("upload.blob", "clip.gif", clip, limits=Limits(max_gif_seconds=30))
+except UserInputError as e:
+    print(e.user_message)  # "GIFs can be at most 30 seconds long."
+```
+
+## Python library
 
 | Module | Contents |
 |---|---|
@@ -26,19 +124,7 @@ sheet headers from a local image folder (pilmoji; never downloads anything).
 | `sashimi` | `probe(path) -> MediaInfo` |
 | `sashimi.api` | batch helpers: discover files, name outputs, progress, reports |
 
-```python
-import sashimi
-from sashimi.config import VIDEO_CONVERT, Limits
-from sashimi.errors import UserInputError
-
-try:
-    config = VIDEO_CONVERT.from_params({"start_seconds": 12, "duration_seconds": 45}, target="gif")
-    sashimi.video.convert("upload.blob", "out/clip.gif", config, max_workers=2, limits=Limits(max_gif_seconds=30))
-except UserInputError as e:
-    print(e.user_message)  # "GIFs can be at most 30 seconds long."
-```
-
-## Designed to be embedded
+### Designed to be embedded
 
 The single-file functions in `sashimi.video`, `.audio`, `.image` and `.sheets` are built to run
 inside locked-down workers (read-only filesystems, no network, small process limits):
@@ -67,7 +153,7 @@ inside locked-down workers (read-only filesystems, no network, small process lim
   file`) and only run allowlisted demuxers (`-format_whitelist`), so containers such as HLS
   playlists are refused before anything parses them.
 
-## Configs
+### Configs
 
 `sashimi.config` has one model per operation and output format (`Mp4VideoConfig`,
 `WebpImageConfig`, `OggAudioConfig`, `AnimatedGifSheetConfig`, …), each holding only the options
@@ -84,7 +170,7 @@ unknown keys, treats `None` or a missing key as "use the default", and raises
 over 51. Field bounds are only ever format and codec limits like that one; the limits you choose
 are `Limits`.
 
-## Limits
+### Limits
 
 sashimi enforces only the limits you pass, as one `sashimi.config.Limits`:
 
@@ -114,7 +200,7 @@ of decoding the video twice; the output is the same as building the palette in o
 palette passes between them in memory, never as a file. A palette per frame (`palette_mode =
 "single"`) takes one pass.
 
-## Metadata
+### Metadata
 
 Every output that can carry the source's metadata has one `metadata` field, with the same values
 everywhere:
@@ -161,7 +247,7 @@ metadata.strip("upload.blob", "clean.bin", "remove_all")  # same format, nothing
 `strip` copies the compressed pixels byte for byte (JPEG, PNG, WebP, GIF, TIFF) and stream-copies
 video and audio (MKV, WebM, MP4, MOV, M4A, MP3, FLAC, OGG, WAV); an MPO keeps only its main picture.
 
-## Editing images
+### Editing images
 
 `sashimi.image.edit` applies a fixed order: the photo's EXIF orientation, then `rotate` and
 `flip`, then the crop box (in pixels of the rotated and flipped picture, as a viewer sees it),
@@ -486,25 +572,38 @@ output name, or is null. `flatten` adds `renamed` and `removed_dirs` instead. MP
 
 ## Development
 
+sashimi uses [uv](https://docs.astral.sh/uv/):
+
 ```sh
-uv sync                       # dev environment, including all extras
-sh scripts/check.sh           # ruff format --check, ruff check, mypy, pytest on Python 3.11-3.14
-sh scripts/sandbox_check.sh   # run every converter in a FileSushi-style locked-down container
+uv sync                         # dev environment, including all extras
+sh scripts/check.sh             # ruff format --check, ruff check, mypy, then pytest on Python 3.14
+sh scripts/check.sh full        # the same, then pytest on Python 3.11 to 3.14
+sh scripts/sandbox_check.sh     # every converter in a FileSushi-style locked-down container (needs Docker)
 ```
 
 `scripts/check.sh` doesn't change the tree: it uses the locked dependencies as they are
 (`uv run --frozen`) and runs each Python version in its own environment under `.venvs/`, so the
-`.venv` that `uv sync` made is left alone.
+`.venv` that `uv sync` made is left alone. The integration tests make their own media with
+FFmpeg and are skipped when it isn't installed.
 
 `scripts/sandbox_check.sh` builds a `python:3.14-alpine` worker image from the wheel (wheels only,
 `apk add ffmpeg`), then runs every converter under FileSushi's sandbox flags (`--network none
---read-only --pids-limit 128 --cpus 2 --memory 1g`) on an input named `original.blob`. Each job reports
-its time, peak memory and peak process/thread count, and fails if the output is invalid, anything is
-written outside `/vault/output` or left in `/tmp`, or a network call is attempted. `--skip-long` skips
-the two cases on a 10-minute 1080p video: the 300 MB animated-sheet budget and a 60-second, 1920 px GIF. The image is tagged `sashimi-sandbox-check`, or
-`$SASHIMI_SANDBOX_IMAGE` if set; remove it with `docker rmi` when you're done.
+--read-only --pids-limit 128 --cpus 2 --memory 1g`) on an input named `original.blob`. Each job
+reports its time, peak memory and peak process/thread count, and fails if the output is invalid,
+anything is written outside `/vault/output` or left in `/tmp`, or a network call is attempted.
+`--skip-long` skips the two cases on a 10-minute 1080p video: the 300 MB animated-sheet budget and
+a 60-second, 1920 px GIF. The image is tagged `sashimi-sandbox-check`, or `$SASHIMI_SANDBOX_IMAGE`
+if set; remove it with `docker rmi` when you're done.
+
+## Contributing
+
+Bug reports and ideas are welcome in the [issue tracker](https://github.com/filesushi/sashimi/issues).
+For a pull request, run `sh scripts/check.sh full` first; every source file starts with the
+project's two SPDX lines, and contributors may add themselves to
+[AUTHORS](https://github.com/filesushi/sashimi/blob/main/AUTHORS).
 
 ## License
 
-Copyright 2026 The FileSushi Authors, who are listed in `AUTHORS`. Licensed under the Apache
-License, Version 2.0; see `LICENSE`.
+Copyright 2026 The FileSushi Authors, who are listed in
+[AUTHORS](https://github.com/filesushi/sashimi/blob/main/AUTHORS). Licensed under the
+[Apache License, Version 2.0](https://github.com/filesushi/sashimi/blob/main/LICENSE).
