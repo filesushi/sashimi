@@ -45,15 +45,15 @@ def test_find_project_config_path(fs):
     assert manager.find_project_config_path() is None
 
     fs.create_file(f"{root_dir}/sashimi.toml")
-    assert manager.find_project_config_path() == pathlib.Path(f"{root_dir}/sashimi.toml")
+    assert manager.find_project_config_path() == pathlib.Path(f"{root_dir}/sashimi.toml").resolve()
 
     fs.create_file(f"{sub_dir}/.sashimi.toml")
-    assert manager.find_project_config_path() == pathlib.Path(f"{sub_dir}/.sashimi.toml")
+    assert manager.find_project_config_path() == pathlib.Path(f"{sub_dir}/.sashimi.toml").resolve()
 
     with patch("sashimi.cli.settings.get_user_config_path") as mock_global:
         mock_global.return_value = pathlib.Path(f"{sub_dir}/.sashimi.toml")
 
-        assert manager.find_project_config_path() == pathlib.Path(f"{root_dir}/sashimi.toml")
+        assert manager.find_project_config_path() == pathlib.Path(f"{root_dir}/sashimi.toml").resolve()
 
 
 def test_reading_settings_creates_no_files(fs):
@@ -88,7 +88,7 @@ def test_load_raw_config(fs):
     assert config["global"]["verbose"] == 1
     assert config["thumbs"]["cols"] == 10
     assert config["thumbs"]["rows"] == 8
-    assert path == pathlib.Path("/sashimi.toml")
+    assert path == pathlib.Path("/sashimi.toml").resolve()
 
 
 def test_set_config_value(fs):
@@ -101,7 +101,7 @@ def test_set_config_value(fs):
     assert user_path.read_text().startswith("# sashimi settings: your own defaults")
     assert not pathlib.Path("/sashimi.toml").exists()
 
-    assert manager.set_config_value("thumbs", "cols", 4, scope="project") == pathlib.Path("/sashimi.toml")
+    assert manager.set_config_value("thumbs", "cols", 4, scope="project") == pathlib.Path("/sashimi.toml").resolve()
     proj_path = pathlib.Path("/sashimi.toml")
     assert "cols = 4" in proj_path.read_text()
     assert proj_path.read_text().startswith("# sashimi settings for this folder")
@@ -118,7 +118,9 @@ def test_project_scope_writes_the_project_file_that_applies(fs):
     fs.create_dir("/proj/nested")
     fs.create_file("/proj/sashimi.toml", contents="[thumbs]\nrows = 2\n")
     os.chdir("/proj/nested")
-    assert manager.set_config_value("thumbs", "cols", 3, scope="project") == pathlib.Path("/proj/sashimi.toml")
+    assert (
+        manager.set_config_value("thumbs", "cols", 3, scope="project") == pathlib.Path("/proj/sashimi.toml").resolve()
+    )
     assert "rows = 2" in pathlib.Path("/proj/sashimi.toml").read_text()
     assert not pathlib.Path("/proj/nested/sashimi.toml").exists()
 

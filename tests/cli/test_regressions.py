@@ -61,7 +61,11 @@ def report(*args):
 
 
 def written(result):
-    return sorted((r["file"], r["output"]) for r in result["results"] if r["status"] == "success")
+    return sorted(
+        (pathlib.PurePath(r["file"]).as_posix(), pathlib.PurePath(r["output"]).as_posix())
+        for r in result["results"]
+        if r["status"] == "success"
+    )
 
 
 def test_convert_then_convert_converts_the_first_outputs_once(tmp_path):
@@ -677,7 +681,7 @@ def test_a_glob_into_one_output_folder_says_how_to_keep_the_layout(tmp_path):
         ) in text
         assert "-f" not in text.split("To keep")[1]
     sashimi("resize", "photos", "-r", "-w", "4", "--output-dir", "out")
-    assert sorted(str(p.relative_to(tmp_path / "out")) for p in (tmp_path / "out").rglob("*.jpg")) == [
+    assert sorted(p.relative_to(tmp_path / "out").as_posix() for p in (tmp_path / "out").rglob("*.jpg")) == [
         "sub/x.jpg.resized.jpg",
         "x.jpg.resized.jpg",
         "y.jpg.resized.jpg",
@@ -727,7 +731,9 @@ def test_a_kept_output_folder_gets_the_hint_without_the_flag(tmp_path):
 def test_the_json_report_has_the_folder_clash(tmp_path):
     photos(tmp_path, "photos/x.jpg", "photos/sub/x.jpg")
     result = runner.invoke(app, ["resize", *shell_glob("photos"), "-w", "4", "--output-dir", "out", "-n", "--json"])
-    assert json.loads(result.stdout)["folder_clash"] == {
+    clash = json.loads(result.stdout)["folder_clash"]
+    clash["files"] = [pathlib.PurePath(name).as_posix() for name in clash["files"]]
+    assert clash == {
         "files": ["photos/sub/x.jpg", "photos/x.jpg"],
         "output_dir": "out",
         "holder": "photos",
