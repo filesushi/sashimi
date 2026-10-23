@@ -4,6 +4,7 @@
 """Locating and running ffmpeg/ffprobe, with progress reporting and bounded threading."""
 
 import collections
+import errno
 import os
 import re
 import shlex
@@ -121,19 +122,24 @@ def _report_progress(raw: bytes, on_progress: ProgressCallback, total: float, st
         on_progress(min(1.0, done / total), stage)
 
 
+_CLOSED_PIPE_ERRNOS = (errno.EPIPE, errno.EINVAL)
+
+
 def _feed(stream: IO[bytes], chunks: Iterable[bytes], errors: list[BaseException]) -> None:
     try:
         for chunk in chunks:
             stream.write(chunk)
-    except BrokenPipeError:
-        pass
+    except OSError as e:
+        if e.errno not in _CLOSED_PIPE_ERRNOS:
+            errors.append(e)
     except BaseException as e:
         errors.append(e)
     finally:
         try:
             stream.close()
-        except BrokenPipeError:
-            pass
+        except OSError as e:
+            if e.errno not in _CLOSED_PIPE_ERRNOS:
+                errors.append(e)
 
 
 def stream_ffmpeg(cmd: list[str], chunk_size: int) -> Iterator[bytes]:
@@ -146,7 +152,7 @@ def stream_ffmpeg(cmd: list[str], chunk_size: int) -> Iterator[bytes]:
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError as e:
-        raise BinaryNotFoundError(f"Cannot run {cmd[0]!r}: {e}") from e
+        raise BinaryNotFoundError(f"Cannot run '{cmd[0]}': {e}") from e
     assert proc.stdout is not None and proc.stderr is not None
     stderr_tail: collections.deque = collections.deque(maxlen=40)
     drain = threading.Thread(target=_drain, args=(proc.stderr, stderr_tail), daemon=True)
@@ -199,7 +205,7 @@ def run_ffmpeg(
             stderr=subprocess.PIPE,
         )
     except OSError as e:
-        raise BinaryNotFoundError(f"Cannot run {cmd[0]!r}: {e}") from e
+        raise BinaryNotFoundError(f"Cannot run '{cmd[0]}': {e}") from e
 
     stderr_tail: collections.deque = collections.deque(maxlen=40)
     stdout_parts: list[bytes] = []

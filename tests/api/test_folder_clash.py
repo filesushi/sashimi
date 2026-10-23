@@ -157,7 +157,7 @@ def test_the_report_carries_the_folder_clash(here):
     config = lambda target: IMAGE_RESIZE.from_params(target=target, max_width=4)  # noqa: E731
     report = api.resize_images(glob("photos"), config, output_dir="out", dry_run=True)
     assert report["folder_clash"] == {
-        "files": ["photos/sub/x.jpg", "photos/x.jpg"],
+        "files": [os.path.join("photos", "sub", "x.jpg"), os.path.join("photos", "x.jpg")],
         "output_dir": "out",
         "holder": "photos",
         "same_files": True,

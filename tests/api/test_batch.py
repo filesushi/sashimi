@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pathlib
+import sys
 
 import pytest
 
@@ -163,6 +164,7 @@ def test_plan_outputs_names_three_or_more_inputs(tmp_path):
     ]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="A.png and a.png are one path on Windows")
 def test_plan_outputs_compares_names_case_insensitively(tmp_path):
     upper, lower = tmp_path / "A.png", tmp_path / "a.png"
     plan = _batch.plan_outputs([upper, lower], names(None))
