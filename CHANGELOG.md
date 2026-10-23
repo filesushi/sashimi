@@ -3,7 +3,7 @@
 sashimi follows [Semantic Versioning](https://semver.org/). Before 1.0, minor versions may break
 the Python API; every break is listed here. See [MIGRATION.md](MIGRATION.md) for upgrade steps.
 
-## 0.6.0 — unreleased
+## 0.6.0 — 2026-10-23
 
 The first release on PyPI, as **`sashimi-convert`**. Builds labelled 0.5.1 were shared privately
 but never published; 0.6.0 contains all of their changes, listed here too. It also brings over
