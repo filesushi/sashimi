@@ -217,3 +217,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Claude Code and FileSushi planning files (local only)
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+docs/FILESUSHI_HANDBACK.md

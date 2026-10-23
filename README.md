@@ -32,8 +32,9 @@ no network.
 * **Audio:** extract from video, or convert, to MP3, M4A, WAV, OGG/Opus and FLAC.
 * **Contact sheets:** still (JPEG, PNG, WebP) or animated (WebP, GIF) grids of a video, with a
   header and timestamps.
-* **Metadata:** see what a file holds, and remove all of it or just the location without
-  re-encoding; every output keeps or removes the source's metadata by one setting.
+* **Metadata:** see what a file holds, and remove the metadata sashimi knows about (EXIF, XMP,
+  IPTC, comments, tags, chapters, cover art) or just the location, without re-encoding; every
+  output keeps or removes the source's metadata by one setting.
 * **Folders, safely:** the CLI names outputs predictably, never processes its own outputs, never
   overwrites without `--force`, shows the plan with `--dry-run` and reports in JSON.
 
