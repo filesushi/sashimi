@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sashimi-convert"
+dynamic = ["version"]
+description = "File conversion and video contact sheets for apps and servers: explicit paths, atomic writes, typed errors, no network."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "AUTHORS"]
+authors = [{ name = "The FileSushi Authors", email = "admin@filesushi.com" }]
+keywords = ["ffmpeg", "video", "image", "audio", "conversion", "contact-sheet", "thumbnails"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Video :: Conversion",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "pydantic>=2.0",
+    "pillow>=10.1",
+]
+
+[project.optional-dependencies]
+cli = [
+    "typer>=0.16.0",
+    "rich>=14.0.0",
+    "tomlkit",
+]
+emoji = ["pilmoji"]
+heif = ["pillow-heif>=0.18"]
+
+[project.urls]
+"Homepage" = "https://github.com/filesushi/sashimi"
+"Repository" = "https://github.com/filesushi/sashimi"
+"Changelog" = "https://github.com/filesushi/sashimi/blob/main/CHANGELOG.md"
+"Issues" = "https://github.com/filesushi/sashimi/issues"
+
+[project.scripts]
+sashimi = "sashimi.cli:main"
+
+[tool.hatch.version]
+path = "src/sashimi/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sashimi"]
+core-metadata-version = "2.4"
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/CLAUDE.md", "/docs/FILESUSHI_HANDBACK.md"]
+core-metadata-version = "2.4"
+
+[tool.pytest.ini_options]
+log_cli = true
+log_level = "DEBUG"
+log_format = "%(asctime)s %(levelname)s %(message)s"
+log_date_format = "%Y-%m-%d %H:%M:%S"
+testpaths = ["tests"]
+
+[tool.ruff]
+extend-exclude = ["*.ipynb"]
+line-length = 120
+
+[tool.ruff.lint]
+select = [ "E4", "E7", "E9", "F", "B" ]
+ignore = ["F401"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F811"]
+
+[tool.mypy]
+exclude = ["dist/", "build/", "venv/", ".venv/"]
+mypy_path = "src"
+warn_unreachable = true
+
+[dependency-groups]
+dev = [
+    "mypy>=1.15.0",
+    "pyfakefs>=5.9.2",
+    "pytest>=8.3.4",
+    "pytest-cov>=6.0.0",
+    "pytest-mock>=3.14.0",
+    "ruff>=0.8.4",
+    "typer>=0.16.0",
+    "rich>=14.0.0",
+    "tomlkit",
+    "pilmoji",
+    "pillow-heif>=0.18",
+]

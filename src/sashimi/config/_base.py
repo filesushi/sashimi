@@ -1,0 +1,237 @@
+# SPDX-FileCopyrightText: 2026 The FileSushi Authors
+# SPDX-License-Identifier: Apache-2.0
+
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, Self, TypeVar, cast
+
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, model_validator
+from pydantic_core import PydanticCustomError
+
+from sashimi.errors import InvalidOptionsError
+
+if TYPE_CHECKING:
+    from sashimi.config._limits import Limits
+
+_SENTENCE = "sashimi_sentence"
+_TRUE = frozenset({"true", "1", "on", "yes"})
+_FALSE = frozenset({"false", "0", "off", "no"})
+TARGET_ALIASES: Mapping[str, str] = MappingProxyType({"jpg": "jpeg", "tif": "tiff"})
+
+
+MetadataMode = Literal["keep", "remove_location", "remove_all"]
+"""What an output does with the source's metadata: keep it, remove location data, or remove all of it."""
+METADATA_MODES: tuple[MetadataMode, ...] = ("keep", "remove_location", "remove_all")
+"""The values of every ``metadata`` field, from the most kept to the least."""
+
+
+def sentence(text: str) -> PydanticCustomError:
+    """A validation error whose message is shown to users as it is, as a complete sentence."""
+    return PydanticCustomError(_SENTENCE, text)
+
+
+class ParamsModel(BaseModel):
+    """
+    Base for every config model.
+
+    - Unknown keys are rejected.
+    - A key that is omitted or set to ``None`` means "use the default".
+    - Models are immutable, so a config can be shared between calls.
+    - Numbers must be finite: infinity and NaN are rejected.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, use_attribute_docstrings=True, allow_inf_nan=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_none(cls, data: Any) -> Any:
+        if isinstance(data, Mapping):
+            return {key: value for key, value in data.items() if value is not None}
+        return data
+
+    @classmethod
+    def from_params(cls, params: Mapping[str, Any] | None = None, /, **fields: Any) -> Self:
+        """
+        Builds a config from a parameter dict such as FileSushi's job parameters, plus explicit
+        fields (e.g. ``target=...``). Invalid values raise :class:`InvalidOptionsError`, whose
+        ``user_message`` is one readable sentence.
+        """
+        data = {**(params or {}), **fields}
+        try:
+            return cls.model_validate(data)
+        except ValidationError as e:
+            raise invalid_options_error(e) from e
+
+    def _check_limits(self, limits: "Limits") -> None:
+        """Raises InvalidOptionsError for a limit this config breaks by itself; see :meth:`Limits.check`."""
+
+
+def invalid_options_error(err: ValidationError) -> InvalidOptionsError:
+    """Turns the first validation error into an :class:`InvalidOptionsError` with a readable sentence."""
+    first = err.errors()[0]
+    field = ".".join(str(part) for part in first["loc"]) or "options"
+    if first["type"] == _SENTENCE:
+        message = first["msg"]
+    elif first["type"] == "extra_forbidden":
+        message = f"Unknown option: {field}."
+    else:
+        reason = first["msg"].removeprefix("Value error, ")
+        if not reason[1:2].isupper():
+            reason = reason[:1].lower() + reason[1:]
+        message = f"Invalid value for {field}: {reason}."
+        message = message.replace("..", ".")
+    return InvalidOptionsError(message, detail=str(err))
+
+
+def parse_bool(value: Any) -> Any:
+    """Accepts the strings a web form posts for a checkbox ("true", "on", "1", ...)."""
+    if isinstance(value, int) and not isinstance(value, bool) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in _TRUE:
+            return True
+        if text in _FALSE:
+            return False
+    return value
+
+
+def _parse_int(value: Any) -> Any:
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value.strip())
+    return value
+
+
+def normalize_target(value: Any) -> Any:
+    """Lower-cases a format name and maps ``jpg``/``tif`` to ``jpeg``/``tiff``."""
+    if isinstance(value, str):
+        value = value.strip().lower()
+        return TARGET_ALIASES.get(value, value)
+    return value
+
+
+FormInt = BeforeValidator(_parse_int)
+"""Lets an integer ``Literal`` field accept the string a web form posts ("24" for 24)."""
+FormBool = BeforeValidator(parse_bool)
+"""Lets a boolean ``Literal`` field accept the string a web form posts ("true" for True)."""
+TargetName = BeforeValidator(normalize_target)
+
+Rotation = Annotated[Literal[0, 90, 180, 270], FormInt]
+"""A clockwise rotation in degrees: 0, 90, 180 or 270 (form strings such as "90" are accepted)."""
+Flip = Literal["none", "horizontal", "vertical"]
+"""A mirror: none, horizontal (left to right) or vertical (top to bottom)."""
+
+
+def parse_color(value: Any) -> Any:
+    """Accepts '#rgb', '#rrggbb', '#rrggbbaa', 'r,g,b[,a]' or a sequence of ints."""
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("#"):
+            digits = text[1:]
+            if len(digits) == 3:
+                digits = "".join(c * 2 for c in digits)
+            if len(digits) not in (6, 8) or any(c not in "0123456789abcdefABCDEF" for c in digits):
+                raise ValueError(f"not a colour: {value!r}")
+            return tuple(int(digits[i : i + 2], 16) for i in range(0, len(digits), 2))
+        try:
+            return tuple(int(part) for part in text.replace(" ", "").split(","))
+        except ValueError as e:
+            raise ValueError(f"not a colour: {value!r}") from e
+    if isinstance(value, list):
+        return tuple(value)
+    return value
+
+
+_Channel = Annotated[int, Field(ge=0, le=255)]
+RGB = Annotated[tuple[_Channel, _Channel, _Channel], BeforeValidator(parse_color)]
+"""An RGB colour: a 3-tuple, ``"#rrggbb"`` or ``"r,g,b"``."""
+RGBA = Annotated[tuple[_Channel, _Channel, _Channel, _Channel], BeforeValidator(parse_color)]
+"""An RGBA colour: a 4-tuple, ``"#rrggbbaa"`` or ``"r,g,b,a"``."""
+
+
+C = TypeVar("C")
+
+
+def _choices(values: list[str]) -> str:
+    return values[0] if len(values) == 1 else f"{', '.join(values[:-1])} or {values[-1]}"
+
+
+class ConfigFamily(Generic[C]):
+    """
+    The config models of one operation, one per output format.
+
+    :meth:`from_params` picks the model from the discriminating option (``target`` unless stated)
+    and validates the remaining options against it; :meth:`model_for` returns that model without
+    validating anything, for reading its fields, defaults and bounds.
+
+    ``key`` is the name of the discriminating option (``container`` for ``VIDEO_TRIM``,
+    ``target`` for the others), and ``name`` describes the operation.
+    """
+
+    def __init__(
+        self, name: str, models: Mapping[str, type[ParamsModel]], *, key: str = "target", default: str | None = None
+    ):
+        self.name = name
+        self.key = key
+        self.default = default
+        self._models = MappingProxyType(dict(models))
+
+    @property
+    def models(self) -> tuple[type[C], ...]:
+        """Every model in the family."""
+        return tuple(cast(type[C], model) for model in dict.fromkeys(self._models.values()))
+
+    @property
+    def targets(self) -> tuple[str, ...]:
+        """The values the discriminating option accepts."""
+        return tuple(self._models)
+
+    def __repr__(self) -> str:
+        return f"<ConfigFamily {self.name}: {', '.join(m.__name__ for m in self.models)}>"
+
+    def model_for(self, **discriminators: Any) -> type[C]:
+        """
+        The model used for these discriminating options, e.g. ``model_for(target="jpeg")``. Other
+        keyword arguments are ignored, so a whole form's values can be passed.
+        """
+        model, _ = self._pick(discriminators)
+        return cast(type[C], model)
+
+    def from_params(self, params: Mapping[str, Any] | None = None, /, **fields: Any) -> C:
+        """
+        Picks the model and builds the config from `params` plus explicit `fields` (which win).
+        Anything invalid, including an unknown or missing format, raises
+        :class:`~sashimi.errors.InvalidOptionsError`.
+        """
+        data = {key: value for key, value in {**(params or {}), **fields}.items() if value is not None}
+        model, data = self._pick(data)
+        return cast(C, model.from_params(data))
+
+    def _lookup(
+        self, key: str, value: Any, table: Mapping[str, type[ParamsModel]], default: str | None
+    ) -> tuple[str, type[ParamsModel]]:
+        if value is None:
+            if default is None:
+                raise InvalidOptionsError(f"Missing option: {key}.")
+            value = default
+        name = normalize_target(value)
+        if not isinstance(name, str) or name not in table:
+            raise InvalidOptionsError(f"Invalid value for {key}: must be {_choices(list(table))}.")
+        return name, table[name]
+
+    def _pick(self, data: Mapping[str, Any]) -> tuple[type[ParamsModel], dict[str, Any]]:
+        name, model = self._lookup(self.key, data.get(self.key), self._models, self.default)
+        return model, {**data, self.key: name}
+
+
+def parse_flag(key: str, value: Any) -> bool:
+    """Reads a boolean discriminator such as ``accurate`` or ``animated``."""
+    parsed = parse_bool(value)
+    if not isinstance(parsed, bool):
+        raise InvalidOptionsError(f"Invalid value for {key}: input should be a valid boolean.")
+    return parsed
+
+
+class SourceMetadata(ParamsModel):
+    metadata: MetadataMode = "keep"
+    """The source's metadata (camera, dates, GPS, titles): "keep", "remove_location" or "remove_all"."""
