@@ -169,7 +169,7 @@ def test_resizing_again_without_the_output_folder_leaves_the_earlier_outputs_out
     sashimi("resize", "photos", "-w", "20", "--output-dir", "resized")
     again = report("resize", ".", "-r", "-w", "20")
     photo = pathlib.Path("photos") / "photo.jpg"
-    assert written(again) == [(str(photo), str(photo.with_name("photo.jpg.resized.jpg")))]
+    assert written(again) == [("photos/photo.jpg", "photos/photo.jpg.resized.jpg")]
     earlier = pathlib.Path("resized") / "photo.jpg.resized.jpg"
     assert again["outputs_left_out"] == [{"file": str(earlier), "made_from": str(photo)}]
 
@@ -226,7 +226,7 @@ def test_a_file_named_inside_the_output_folder_is_processed(tmp_path):
     (tmp_path / "sheets").mkdir()
     (tmp_path / "sheets" / "x.mp4").write_bytes(b"video")
     done = report("thumbs", str(pathlib.Path("sheets") / "x.mp4"), "--output-dir", "sheets")
-    assert written(done) == [(str(pathlib.Path("sheets/x.mp4")), str(pathlib.Path("sheets/x.mp4.sheet.jpg")))]
+    assert written(done) == [("sheets/x.mp4", "sheets/x.mp4.sheet.jpg")]
 
 
 def test_an_output_file_must_end_in_its_formats_extension(tmp_path):

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pathlib
+import sys
 
 import pytest
 from PIL import Image
@@ -449,6 +450,7 @@ def test_a_folder_from_a_field_is_checked_like_a_name(tmp_path):
             check_name(name, pathlib.PurePosixPath("x.mp4"), output_format("jpeg"))
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a backslash is a separator in Windows names")
 def test_a_field_value_with_a_backslash_never_makes_a_folder(tmp_path):
     source = tmp_path / "a\\b.mp4"
     touch(source)

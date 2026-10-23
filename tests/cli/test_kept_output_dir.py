@@ -216,7 +216,8 @@ def test_the_owners_layout_with_sheets_in_the_pattern(tmp_path):
     os.chdir(videos)
     assert run("thumbs", ".")["summary"]["exists"] == 3
     report = run("thumbs", "Bluebeard-5.mkv")
-    assert report["results"][0]["message"] == "Output already exists: sheets/Bluebeard-5.mkv.jpeg"
+    shown = pathlib.Path("sheets/Bluebeard-5.mkv.jpeg")
+    assert report["results"][0]["message"] == f"Output already exists: {shown}"
     combined = run("thumbs", ".", "-r", "--output-dir", "../collected")
     assert outputs(combined) == [pathlib.Path(f"../collected/sheets/Bluebeard-{n}.mkv.jpeg") for n in (5, 6, 7)]
 
