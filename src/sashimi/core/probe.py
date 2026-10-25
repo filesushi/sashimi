@@ -4,7 +4,9 @@
 """Content-based media probing with ffprobe."""
 
 import json
+import math
 import os
+from collections.abc import Container, Iterable, Iterator
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -16,10 +18,15 @@ from sashimi.core._ffmpeg import (
     ffprobe_binary,
     file_arg,
     run_ffmpeg,
+    stream_ffmpeg,
 )
 from sashimi.errors import BinaryNotFoundError, ProcessingError, UnsupportedMediaError
 
 __all__ = ["MediaInfo", "StreamInfo", "probe", "VIDEO_CONTAINERS", "AUDIO_CONTAINERS"]
+
+_SEGMENT_TIMESTAMPS = frozenset({"matroska", "webm"})
+_NO_SCAN = frozenset({"gif"})
+_SCAN_CHUNK = 1 << 16
 
 
 class StreamInfo(BaseModel):
@@ -56,7 +63,10 @@ class MediaInfo(BaseModel):
     container: str
     """ffprobe's demuxer name list, e.g. ``"matroska,webm"`` or ``"mov,mp4,m4a,3gp,3g2,mj2"``."""
     duration: float | None = None
-    """Seconds, or None when the container doesn't say (e.g. a still image)."""
+    """
+    Seconds from the first frame, the span ``ffmpeg -ss`` seeks in, or None for a still image.
+    Recordings that were never finalized (no stated length) are measured from their packets.
+    """
     size_bytes: int | None = None
     bit_rate: int | None = None
     has_video: bool = False
@@ -105,6 +115,50 @@ def _float(value: Any) -> float | None:
     return result if result == result and result >= 0 else None
 
 
+def _signed_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _clock_seconds(text: str) -> float | None:
+    parts = text.strip().split(":")
+    if len(parts) != 3:
+        return None
+    try:
+        hours, minutes, seconds = int(parts[0]), int(parts[1]), float(parts[2])
+    except ValueError:
+        return None
+    if hours < 0 or not 0 <= minutes < 60 or not 0 <= seconds < 60:
+        return None
+    result = hours * 3600 + minutes * 60 + seconds
+    return result if result > 0 else None
+
+
+def _tag_duration(tags: Any) -> float | None:
+    if not isinstance(tags, dict):
+        return None
+    for key, value in tags.items():
+        name = str(key).upper()
+        if (name == "DURATION" or name.startswith("DURATION-")) and (seconds := _clock_seconds(str(value))):
+            return seconds
+    return None
+
+
+def _start_time(data: dict[str, Any]) -> float:
+    """
+    The time ffmpeg counts ``-ss`` from: the container's start time, else the earliest stream's,
+    else 0. Pure function over ``ffprobe -show_format -show_streams -of json`` output.
+    """
+    start = _signed_float(data.get("format", {}).get("start_time"))
+    if start is not None:
+        return start
+    starts = [t for t in (_signed_float(s.get("start_time")) for s in data.get("streams", [])) if t is not None]
+    return min(starts) if starts else 0.0
+
+
 def _rotation(stream: dict[str, Any]) -> int:
     degrees: float | None = None
     for side_data in stream.get("side_data_list", []):
@@ -148,10 +202,14 @@ def parse_ffprobe_json(data: dict[str, Any]) -> MediaInfo:
     videos = [s for s in streams if s.get("codec_type") == "video" and not s.get("disposition", {}).get("attached_pic")]
     audios = [s for s in streams if s.get("codec_type") == "audio"]
 
-    duration = _float(fmt.get("duration"))
-    if duration is None:
-        durations = [d for d in (_float(s.get("duration")) for s in streams) if d]
+    duration = _float(fmt.get("duration")) or _tag_duration(fmt.get("tags"))
+    if not duration:
+        durations = [d for d in (_float(s.get("duration")) or _tag_duration(s.get("tags")) for s in streams) if d]
         duration = max(durations) if durations else None
+    if duration and _SEGMENT_TIMESTAMPS & set(str(fmt.get("format_name", "")).split(",")):
+        start = _start_time(data)
+        if 0 < start < duration:
+            duration = round(duration - start, 6)
 
     info: dict[str, Any] = {
         "container": fmt.get("format_name", ""),
@@ -192,6 +250,9 @@ def probe(input_path: str | os.PathLike[str]) -> MediaInfo:
     """
     Inspects a file's content with ffprobe. The file name and extension are ignored.
 
+    A video or audio file that doesn't state its length, such as a live-stream recording that was
+    never finalized, is read to its end once to measure it from its packets' timestamps.
+
     Raises UnsupportedMediaError if ffprobe can't read the file as media, and
     BinaryNotFoundError if ffprobe itself is missing or can't be run.
     """
@@ -218,4 +279,78 @@ def probe(input_path: str | os.PathLike[str]) -> MediaInfo:
         raise ProcessingError(f"ffprobe returned invalid JSON for {os.fspath(input_path)}: {e}") from e
     if not data.get("format"):
         raise UnsupportedMediaError("This file doesn't look like media we can read.")
-    return parse_ffprobe_json(data)
+    info = parse_ffprobe_json(data)
+    if info.duration is None and _needs_packet_scan(info):
+        info = info.model_copy(update={"duration": _scanned_duration(input_path, data)})
+    return info
+
+
+def _needs_packet_scan(info: MediaInfo) -> bool:
+    """
+    Whether a file without a stated duration is a video or audio container whose length must be
+    read from its packets (an unfinalized recording). Still images and GIFs never are.
+    """
+    names = info.container_names - _NO_SCAN
+    return bool((info.has_video and names & VIDEO_CONTAINERS) or (info.has_audio and names & AUDIO_CONTAINERS))
+
+
+def _packet_end(line: bytes, stream_indexes: Container[int]) -> float | None:
+    """
+    When a packet of `stream_indexes` ends (``pts_time``, else ``dts_time``, plus ``duration_time``),
+    from one line of ``ffprobe -show_entries packet=stream_index,pts_time,dts_time,duration_time
+    -of csv=p=0``. None for other streams and packets without a time. Pure function.
+    """
+    fields = line.decode("ascii", "replace").strip().split(",")
+    if len(fields) < 4:
+        return None
+    try:
+        index = int(fields[0])
+    except ValueError:
+        return None
+    if index not in stream_indexes:
+        return None
+    time = _signed_float(fields[1])
+    if time is None:
+        time = _signed_float(fields[2])
+    if time is None:
+        return None
+    return time + (_float(fields[3]) or 0.0)
+
+
+def _lines(chunks: Iterable[bytes]) -> Iterator[bytes]:
+    rest = b""
+    for chunk in chunks:
+        *complete, rest = (rest + chunk).split(b"\n")
+        yield from complete
+    if rest:
+        yield rest
+
+
+def _scanned_duration(input_path: str | os.PathLike[str], data: dict[str, Any]) -> float | None:
+    indexes = {
+        s["index"]
+        for s in data.get("streams", [])
+        if isinstance(s.get("index"), int)
+        and (
+            s.get("codec_type") == "audio"
+            or s.get("codec_type") == "video"
+            and not s.get("disposition", {}).get("attached_pic")
+        )
+    }
+    cmd = [ffprobe_binary(), "-hide_banner", "-loglevel", "error", *INPUT_PROTOCOLS]
+    cmd += ["-show_entries", "packet=stream_index,pts_time,dts_time,duration_time", "-of", "csv=p=0"]
+    cmd.append(file_arg(input_path))
+    end: float | None = None
+    try:
+        for line in _lines(stream_ffmpeg(cmd, _SCAN_CHUNK)):
+            time = _packet_end(line, indexes)
+            if time is not None and (end is None or time > end):
+                end = time
+    except BinaryNotFoundError:
+        raise
+    except ProcessingError:
+        pass
+    if end is None:
+        return None
+    duration = round(end - _start_time(data), 6)
+    return duration if duration > 0 else None

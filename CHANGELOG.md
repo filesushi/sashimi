@@ -3,6 +3,29 @@
 sashimi follows [Semantic Versioning](https://semver.org/). Before 1.0, minor versions may break
 the Python API; every break is listed here. See [MIGRATION.md](MIGRATION.md) for upgrade steps.
 
+## 0.6.1 — unreleased
+
+Recordings that were never finalized now work. A live-stream capture or a browser recording
+written to a pipe (Matroska or WebM with no stated length, such as an OvenMediaEngine dump with
+`Duration: N/A`) was refused by `thumbs`, `preview`, every video and audio conversion, `extract`,
+`remux` and `rotate` as "doesn't look like a video we can read", and `info` showed no length. No
+Python API changes. Outputs of files that state their length and start at zero are byte-identical
+to 0.6.0; sheets and previews of Matroska and WebM files that start later are now sampled across
+their real length.
+
+### Fixed
+
+- `probe()` measures a video or audio file that states no length from its packets: ffprobe reads
+  it to the end once, streaming (memory doesn't grow with the file), and the length runs from the
+  first frame to the end of the last packet. A Matroska `DURATION` tag (or `DURATION-eng` and the
+  like) is used first when the file has one. Still images and GIFs are never read this way.
+- Lengths count from the first frame, as `ffmpeg -ss` and every start time do. A Matroska or
+  WebM file whose timestamps start late (a capture that joined a broadcast 100 s in) states its
+  length from zero, so sashimi took it as 100 s longer than it is: contact sheets and previews
+  sampled past the end ("We couldn't read any frames from this video") and start times past the
+  real end weren't refused. `MediaInfo.duration` of such files is now shorter by their start time;
+  other containers already counted this way.
+
 ## 0.6.0 — 2026-10-23
 
 The first release on PyPI, as **`sashimi-convert`**. Builds labelled 0.5.1 were shared privately

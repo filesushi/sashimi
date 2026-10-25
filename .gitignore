@@ -223,3 +223,6 @@ CLAUDE.md
 CLAUDE.local.md
 .claude/
 docs/FILESUSHI_HANDBACK.md
+
+# Local test media: synthetic noise and Xiph derf clips (not redistributable here)
+/data/
