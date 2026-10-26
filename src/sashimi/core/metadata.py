@@ -392,7 +392,7 @@ def strip_format(input_path: PathLike, *, limits: Limits | None = None) -> str:
     except UnsupportedMediaError as e:
         if e.user_message == NOT_SUPPORTED:
             raise
-    return _STRIP_MUXERS[_media_muxer(input_path, probe(input_path))]
+    return _STRIP_MUXERS[_media_muxer(input_path, probe(input_path, limits=limits))]
 
 
 def build_strip_command(
@@ -470,7 +470,7 @@ def strip(
         if on_progress:
             on_progress(1.0, "done")
         return _STRIP_IMAGE_EXTENSIONS[image_format]
-    info = probe(input_path)
+    info = probe(input_path, limits=limits)
     if not info.streams or not (info.has_video or info.has_audio):
         raise UnsupportedMediaError(NOT_MEDIA, detail=f"container={info.container}")
     muxer = _media_muxer(input_path, info)

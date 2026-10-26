@@ -3,15 +3,106 @@
 sashimi follows [Semantic Versioning](https://semver.org/). Before 1.0, minor versions may break
 the Python API; every break is listed here. See [MIGRATION.md](MIGRATION.md) for upgrade steps.
 
-## 0.6.1 — unreleased
+## 0.7.0 — unreleased
 
 Recordings that were never finalized now work. A live-stream capture or a browser recording
 written to a pipe (Matroska or WebM with no stated length, such as an OvenMediaEngine dump with
 `Duration: N/A`) was refused by `thumbs`, `preview`, every video and audio conversion, `extract`,
-`remux` and `rotate` as "doesn't look like a video we can read", and `info` showed no length. No
-Python API changes. Outputs of files that state their length and start at zero are byte-identical
-to 0.6.0; sheets and previews of Matroska and WebM files that start later are now sampled across
-their real length.
+`remux` and `rotate` as "doesn't look like a video we can read", and `info` showed no length.
+Matroska audio (`.mka`) and a few more extensions ffmpeg reads are now picked up. This is a minor
+release because `MediaInfo.duration` changes for some files and `probe()` can refuse a file (see
+Breaking); [MIGRATION.md](MIGRATION.md) shows what to check.
+
+Every tile, preview clip and start time now shows the frame at its stated time on every container
+sashimi reads, whatever the keyframe spacing: MPEG-TS, DVD and MPEG program streams and Ogg showed
+the next keyframe instead (up to a whole keyframe interval late, or nothing). Contact sheets and
+previews of videos with keyframes far apart are decoded in one pass instead of once per tile, so
+they no longer cost tiles × keyframe interval. More audio and video formats are read: AIFF,
+AC-3, E-AC-3, DTS, AMR, CAF, Sun AU, WavPack, WMA, iPhone ringtones, Ogg video (Theora), DivX, F4V
+and Y4M. Wherever ffmpeg's own seek was right (MP4, MOV, Matroska, WebM, AVI, FLV and ASF, away
+from the cases in Fixed), outputs are byte-identical to 0.6.0.
+
+### Breaking
+
+- **`MediaInfo.duration` of a Matroska or WebM file whose timestamps start late is now measured
+  from its last packets.** Muxers disagree about what such a file's stated length means:
+  libavformat (ffmpeg, OBS, HandBrake, OvenMediaEngine) writes the time its last frame ends, so a
+  capture that joined a broadcast 100 s in and ran for 5 s said 105 s, while mkvmerge writes the
+  span (5 s), and keeps an old `ENCODER=Lavf…` tag when it remuxes an ffmpeg file. sashimi took
+  105 s as the length, so contact sheets and previews sampled past the end ("We couldn't read any
+  frames from this video"), re-encodes were given a length past the end, and start times past the
+  real end weren't refused. ffprobe now seeks to the file's last keyframe and reads the packets
+  after it (more when the file has no Cues or its keyframes are far apart, up to
+  `Limits.max_scan_packets`), and the length runs from the first frame to the end of the last
+  packet, as `ffmpeg -ss` and every start time count it, and as MP4, MOV and MPEG-TS lengths
+  already did. When the end can't be reached within the limit, the stated length is kept: a length
+  that is too short would cut every re-encode short. Files that start at zero are unchanged.
+- **`MediaInfo` has a new field, `start_time`:** the timestamp the file starts at, the time
+  `ffmpeg -ss` counts from.
+- **`probe()` can raise `MediaTooLargeError`** (`limit="max_scan_packets"`) for a recording that
+  doesn't state its length and has more packets than `Limits.max_scan_packets` (see Added). Every
+  function that probes a file passes its `limits` on. Files that state their length are never
+  refused this way by `probe()`.
+- **Contact sheets, previews and every start time can raise `MediaTooLargeError`**
+  (`limit="max_scan_packets"`) when finding the keyframe to start decoding from means reading more
+  video packets than `Limits.max_scan_packets` (2,000,000 by default: about 18 hours of 30 fps
+  video). See Fixed.
+- **The commands core functions run changed** where ffmpeg's own seek lands wrong (see Fixed):
+  every seek in MPEG-TS, MPEG-PS and Ogg, times near an open-GOP keyframe in MP4 and MOV, times in
+  the first second, and lossless cuts of those; and sheets and previews of videos with keyframes
+  far apart now decode in one pass. Every other seek keeps its 0.6.0 command. The command builders keep their 0.6.0 output unless given the new
+  argument (`decode_from=` for `build_frame_command`, `build_clip_command`, `build_convert_command`,
+  `build_palette_command` and `build_trim_command`; `index=` for `build_preview_commands`), so
+  tests that pin the builders' defaults still pass. New builder: `sheets.static.build_frames_command`
+  (every tile from one decoding pass).
+- **Length-limit refusals are worded differently:** "This video is 12 minutes 5 seconds long, and
+  the limit is 10 minutes. Set a shorter duration to convert part of it." instead of "Videos longer
+  than 10 minutes aren't supported yet. …" (the same for audio), and the `max_pixels` and
+  `max_sheet_pixels` refusals say "megapixels" after the limit.
+- **Folder searches pick up more files:** `.mka`, `.m4b`, `.mp2`, `.aiff`, `.aif`, `.aifc`, `.ac3`,
+  `.eac3`, `.dts`, `.amr`, `.caf`, `.au`, `.wv`, `.wma` and `.m4r` as audio, and `.mk3d`, `.m2ts`,
+  `.mts`, `.3g2`, `.vob`, `.ogv`, `.divx`, `.f4v` and `.y4m` as video, so a rerun over a folder
+  holding them now processes them (once; the next rerun reports them as existing).
+- **ffmpeg's input allowlist** (`-format_whitelist`, every command) adds the single-file demuxers
+  `aiff`, `ac3`, `eac3`, `dts`, `amr`, `amrnb`, `amrwb`, `caf`, `au`, `wv` and `yuv4mpegpipe`;
+  none of them opens another file or a URL. `ogg` files with video and `asf` files with only audio
+  (WMA), already allowed, now take the video and audio routes.
+
+### Added
+
+- `probe(path, limits=)`, and `Limits.max_scan_packets` (default 2,000,000, about 7 hours of
+  30 fps video with AAC audio; `[limits] max_scan_packets` in `sashimi.toml`, `none` for no
+  limit). Measuring a recording that doesn't state its length reads every packet, at about 20
+  microseconds of CPU time each, so the cost follows the packet count, not the file size; a file
+  with more packets than the limit is refused once the scan reaches it, with the limit in the
+  message. A measurement is remembered for the rest of the process while the file's size and
+  modification time stay the same (the last 64 files), so a command that probes a file more than
+  once, or a caller that probes it before converting it, reads it once.
+- Matroska audio (`.mka`), audiobooks (`.m4b`) and MPEG audio layer II (`.mp2`) convert to every
+  audio format, and `.mka` and `.m4b` (and `.weba`) can be stripped of metadata in their own format.
+  `.mk3d`, AVCHD and Blu-ray `.m2ts`/`.mts`, `.3g2` and DVD `.vob` take every video route; `strip`
+  doesn't take them (it keeps a file's format, and these formats can't be written that way), and
+  says which formats it takes.
+- AIFF, AC-3, E-AC-3, DTS, AMR, CAF, Sun AU, WavPack and WMA audio, and iPhone ringtones
+  (`.m4r`), convert to every audio format; Ogg video (`.ogv`, Theora), DivX, F4V and YUV4MPEG
+  (`.y4m`) take every video route. `strip` keeps the format of `.m4r` and `.f4v` (MP4 family) and
+  says which formats it takes for the rest. RealMedia (`.rm`, `.rmvb`) and Monkey's Audio
+  (`.ape`) are left out: RealVideo can't be copied into Matroska (`remux` and lossless `extract`
+  fail), and nothing here can write an `.ape` file to test with.
+- Refusals under a limit, on the command line, end with how to change it: "To change the limit,
+  run: sashimi config set limits.max_scan_packets 10000000 (or none for no limit)." The Python
+  API's messages don't carry it.
+- A benchmark harness for the repository (`scripts/bench/`, see its README): suites over a local
+  corpus of real and synthetic clips, results grouped by machine, live checkpoints and `--resume`.
+  It runs on Windows too, recording CPU time and peak memory as unavailable there. Its saved
+  results stay in the repository and out of the sdist.
+
+### Changed
+
+- Where sashimi decodes from a keyframe it chose (see Fixed), a re-encode's audio decoder starts
+  before the cut and is primed, so the first audio samples differ slightly from what ffmpeg's own
+  seek gave, and an accurate cut ends exactly at its length (ffmpeg's input `-t` could keep one
+  frame more).
 
 ### Fixed
 
@@ -19,12 +110,41 @@ their real length.
   it to the end once, streaming (memory doesn't grow with the file), and the length runs from the
   first frame to the end of the last packet. A Matroska `DURATION` tag (or `DURATION-eng` and the
   like) is used first when the file has one. Still images and GIFs are never read this way.
-- Lengths count from the first frame, as `ffmpeg -ss` and every start time do. A Matroska or
-  WebM file whose timestamps start late (a capture that joined a broadcast 100 s in) states its
-  length from zero, so sashimi took it as 100 s longer than it is: contact sheets and previews
-  sampled past the end ("We couldn't read any frames from this video") and start times past the
-  real end weren't refused. `MediaInfo.duration` of such files is now shorter by their start time;
-  other containers already counted this way.
+- `sashimi convert a.mka mp3` said "Can't convert .mka to MP3", even for a finalized file, because
+  folder searches and routing didn't list Matroska audio.
+- `strip`'s message for a file it skips named "images, videos and audio files", which an MPEG-TS
+  video is; it now names the formats it takes.
+- **Seeking shows the frame at the time asked for, on every container.** ffmpeg's `-ss` asks the
+  demuxer to seek, and where it lands depends on the container: MPEG-TS (`.ts`, `.m2ts`, `.mts`),
+  MPEG program streams (`.mpg`, `.vob`) and Ogg land near the time and decoding then waits for the
+  next keyframe, so a contact sheet of a TS recording with 10-second keyframe intervals showed the
+  frames at 10 s and 20 s under labels from 00:02 to 00:19, left the tiles after the last keyframe
+  empty, and reported success; a TS shorter than one keyframe interval failed `thumbs` and
+  `preview` ("We couldn't read any frames"). MP4 and MOV picked the keyframe by decoding order, so
+  open-GOP video (x265's default) lost up to four frames before each keyframe; AVI and FLV whose
+  video starts a little after the file jumped to the second keyframe for a time before the first.
+  Every decoding route now reads the first video stream's packet list once per file (up to the
+  latest time it needs; the CPU cost follows the file's size, about 0.6 CPU s per 300 MB here).
+  Where ffmpeg's seek would land wrong, it seeks to just before the keyframe shown at or before
+  the time and drops the frames before the time after decoding (`trim`/`atrim`, which is what
+  ffmpeg's own accurate seek does); elsewhere it keeps ffmpeg's seek, which is cheaper (the
+  decoder skips the frames before the time that no other frame needs). Lossless
+  cuts of MPEG-TS, MPEG-PS and Ogg start at the keyframe at or before the time (MPEG-PS: at most
+  one keyframe earlier) instead of the one after it, and lossless cuts of MP4 and MOV no longer
+  start after the time on open-GOP video.
+- **Contact sheets and previews of videos with keyframes far apart are decoded once.** Each tile
+  was its own ffmpeg run decoding from the keyframe before it, so a sheet cost tiles × keyframe
+  interval. sashimi now counts the frames each way from the keyframe index and decodes in one
+  pass when that is cheaper (the frames are picked with `select`, and clips resampled exactly as
+  the `fps` filter would, so the output is byte-identical either way). Measured here with two
+  workers: a 24-tile sheet of a 10-second 1080p50 clip with two keyframes went from 131 to 19 CPU
+  s, its animated sheet from 93 to 26, and a 2 GB, 30-second 1080p50 file with a single keyframe
+  from 581 to 45 (animated 245 to 56, preview 138 to 58). One pass still decodes everything up to
+  the last tile, so the cost follows the bytes decoded: about 0.1 CPU s per MB of 1080p H.264
+  here.
+- `remux` and lossless `extract` of MPEG program streams (`.mpg`, `.vob`) failed with "Can't write
+  packet with unknown timestamp"; stream copies of them now generate the missing timestamps
+  (`-fflags +genpts`).
 
 ## 0.6.0 — 2026-10-23
 

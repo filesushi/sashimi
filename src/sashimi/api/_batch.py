@@ -88,6 +88,7 @@ Planning and writing:
   ``error``, ``skipped``), from the plan alone, without opening any input.
 """
 
+import contextvars
 import functools
 import logging
 import os
@@ -311,12 +312,24 @@ def discover(
     return sorted(files.values()), rejected
 
 
+LIMIT_HINT: contextvars.ContextVar[Callable[[str], str | None] | None] = contextvars.ContextVar(
+    "sashimi_limit_hint", default=None
+)
+"""
+How the caller's users change a limit: called with the field name (``max_scan_packets``) of a
+refusal under a limit, it returns a sentence appended to the message, or None. The CLI sets it
+(``sashimi config set limits.…``); unset, messages are the core's own.
+"""
+
+
 def classify(error: Exception) -> tuple[str, str]:
     """Maps an exception to a batch status and message, by type."""
     if isinstance(error, (UnsupportedMediaError, MediaTooShortError)):
         return "skipped", error.user_message
     if isinstance(error, UserInputError):
-        return "error", error.user_message
+        hint = LIMIT_HINT.get()
+        extra = hint(error.limit) if hint is not None and error.limit else None
+        return "error", f"{error.user_message} {extra}" if extra else error.user_message
     if isinstance(error, ProcessingError):
         return "error", f"Failed: {str(error).splitlines()[0]}"
     if isinstance(error, OSError):

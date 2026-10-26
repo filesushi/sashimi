@@ -11,7 +11,7 @@ from typing import Annotated, List, Optional
 import typer
 
 from sashimi.cli import _options as opt
-from sashimi.cli._output import BatchRunner, console, display_path, fail, refusals
+from sashimi.cli._output import BatchRunner, console, display_path, fail, refusal, refusals
 
 _LABELS = (
     ("carriers", "Found in"),
@@ -48,7 +48,7 @@ def metadata_cmd(
     try:
         info = read(path, limits=Limits.unlimited())
     except UserInputError as e:
-        fail(e.user_message, code=1)
+        fail(refusal(e), code=1)
     except SashimiError as e:
         fail(str(e).splitlines()[0], code=1)
     if json_output:

@@ -1,3 +1,80 @@
+# Migrating from 0.6 to 0.7
+
+Nothing needs to change in code that calls sashimi, but these things behave differently.
+
+## Lengths of late-starting Matroska and WebM files
+
+`MediaInfo.duration` of a Matroska or WebM file whose timestamps start after zero is now measured
+from its last packets. libavformat (ffmpeg, OBS, HandBrake, OvenMediaEngine) states the time such
+a file's last frame ends, so a 5-second capture whose first frame is at 100 s said 105 s in 0.6;
+mkvmerge states the span. If you stored durations, compared them with your own limits, or derived
+sampling times from them, those files now get the real length (and checks you made against the
+old one may now pass). Files that start at zero and other containers are unchanged. The new
+`MediaInfo.start_time` is the timestamp the file starts at.
+
+```python
+from sashimi import probe
+
+probe("capture.mkv").duration     # 0.6: 105.04   0.7: 5.0
+probe("capture.mkv").start_time   # 100.0
+```
+
+## Recordings without a stated length, and `max_scan_packets`
+
+0.6 refused a recording that states no length (a live dump written to a pipe) as "doesn't look
+like a video we can read". 0.7 measures it by reading its packets, which costs about 20
+microseconds of CPU time per packet (about 280,000 an hour for 30 fps video with AAC audio), and
+refuses one with more than `Limits.max_scan_packets` (default 2,000,000) with
+`MediaTooLargeError`, `limit="max_scan_packets"`.
+
+The same limit bounds the video packets read to find where to start decoding: every contact
+sheet, preview and start time reads the video's packet list up to the latest time it needs (about
+0.6 CPU s per 300 MB here), so a long video can now be refused by a sheet or a cut under a low
+limit. Catch the error where you catch the other limit errors, set a limit your machine and users
+can afford, and pass the same `limits` to your own `probe()` calls:
+
+```python
+from sashimi import probe, sheets
+from sashimi.config import Limits
+
+limits = Limits(max_scan_packets=1_000_000)   # about 9 hours of 30 fps video to seek in
+info = probe(upload, limits=limits)
+sheets.render(upload, out, config, limits=limits)   # reuses what was read: the file isn't read again
+```
+
+On the command line, `sashimi config set limits.max_scan_packets 5000000` keeps a limit, and
+`none` removes it.
+
+## Seeking, and the commands that run
+
+Every route that starts decoding at a time (sheet tiles, preview clips, start times, accurate
+cuts) now reads the file's keyframe index. Where ffmpeg's own seek lands wrong (always in MPEG-TS,
+MPEG-PS and Ogg; near open-GOP keyframes in MP4 and MOV; in the first second), it starts decoding
+just before the keyframe shown at or before the time and drops the frames before it with
+`trim`/`atrim`; elsewhere the command is 0.6's. The command builders give their 0.6 commands
+unless you pass the new argument, `decode_from=` (from
+`sashimi.core._seek.video_index(path, info, until, limits).start_for(time)`) or, for
+`build_preview_commands`, `index=`. If you run the builders yourself and want the 0.7 behaviour,
+pass it; if you compare the commands the core functions run, expect new ones for those files.
+Outputs are byte-identical to 0.6 wherever 0.6's seek was right.
+
+## Wording of length limits
+
+`MediaTooLongError` now says how long the file is: "This video is 12 minutes 5 seconds long, and
+the limit is 10 minutes. Set a shorter duration to convert part of it." (0.6: "Videos longer than
+10 minutes aren't supported yet. …"). Branch on the type and `.limit`, never the text.
+
+## More files in folder searches, and more formats
+
+Folder searches now take `.mka`, `.m4b`, `.mp2`, `.aiff`, `.aif`, `.aifc`, `.ac3`, `.eac3`,
+`.dts`, `.amr`, `.caf`, `.au`, `.wv`, `.wma` and `.m4r` as audio and `.mk3d`, `.m2ts`, `.mts`,
+`.3g2`, `.vob`, `.ogv`, `.divx`, `.f4v` and `.y4m` as video. A command you rerun over a folder
+holding such files processes them once. To keep the old set, pass `extensions=` to the batch
+function, or list the extensions in `[thumbs] video_extensions` for `sashimi thumbs`. ffmpeg's
+input allowlist adds the demuxers `aiff`, `ac3`, `eac3`, `dts`, `amr`, `amrnb`, `amrwb`, `caf`,
+`au`, `wv` and `yuv4mpegpipe`; if you run sashimi's commands in a sandbox with its own allowlist,
+add them there.
+
 # Migrating from 0.5 to 0.6
 
 0.6.0 is the first release on PyPI (`pip install sashimi-convert`). If you used a private 0.5.1

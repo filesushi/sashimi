@@ -77,7 +77,7 @@ def _seconds(value: str | float | None) -> float | None:
     return parse_time_to_seconds(value)
 
 
-def _clip_message(config: TrimConfig, source: pathlib.Path, output: pathlib.Path) -> str:
+def _clip_message(config: TrimConfig, source: pathlib.Path, output: pathlib.Path, limits: Limits | None) -> str:
     """The success message: the clip's real length, with the keyframe note when a copy came out long."""
     requested = config.length
     if not isinstance(config, CopyTrimConfig):
@@ -85,9 +85,9 @@ def _clip_message(config: TrimConfig, source: pathlib.Path, output: pathlib.Path
             return f"Extracted from {config.start_seconds:g}s to the end: {{name}}"
         return f"Extracted {requested:.1f}s to {{name}}"
     try:
-        actual = probe(output).duration
+        actual = probe(output, limits=limits).duration
         if requested is None and config.start_seconds > 0:
-            source_length = probe(source).duration
+            source_length = probe(source, limits=limits).duration
             requested = source_length - config.start_seconds if source_length else None
     except SashimiError:
         actual = None
@@ -178,7 +178,7 @@ def extract_generator(
     def process(source: pathlib.Path, target: pathlib.Path, progress: Callable[[float, str], None] | None) -> str:
         config = config_for(source)
         trim(source, target, config, max_workers=max_workers, limits=limits, on_progress=progress)
-        return _clip_message(config, source, target)
+        return _clip_message(config, source, target, limits)
 
     return run_batch(
         paths,

@@ -5,9 +5,10 @@ import json
 
 import pytest
 
+from sashimi.config import Limits
 from sashimi.core import probe as probe_module
 from sashimi.core.probe import parse_ffprobe_json, probe
-from sashimi.errors import BinaryNotFoundError, ProcessingError
+from sashimi.errors import BinaryNotFoundError, MediaTooLargeError, ProcessingError
 
 
 def video_stream(**extra):
@@ -123,22 +124,36 @@ def test_longest_stream_tag_wins():
 @pytest.mark.parametrize(
     "container, start, stated, expected",
     [
-        ("matroska,webm", "100.000000", "105.038000", 5.038),
-        ("matroska,webm", "1.734000", "00:00:06.749000000", 5.015),
+        ("matroska,webm", "100.000000", "105.038000", 105.038),
+        ("matroska,webm", "1.734000", "00:00:06.749000000", 6.749),
         ("matroska,webm", "0.000000", "105.038000", 105.038),
-        ("matroska,webm", "-0.021000", "5.000000", 5.0),
-        ("matroska,webm", "200.000000", "105.038000", 105.038),
         ("mov,mp4,m4a,3gp,3g2,mj2", "100.000000", "5.038000", 5.038),
         ("mpegts", "101.376778", "5.023222", 5.023222),
     ],
 )
-def test_matroska_length_counts_from_the_first_frame(container, start, stated, expected):
-    fmt = {"format_name": container, "start_time": start}
+def test_the_parsed_length_is_the_stated_one(container, start, stated, expected):
+    fmt = {"format_name": container, "start_time": start, "tags": {"ENCODER": "Lavf62.12.102"}}
     if ":" in stated:
-        fmt["tags"] = {"DURATION": stated}
+        fmt["tags"]["DURATION"] = stated
     else:
         fmt["duration"] = stated
-    assert parse_ffprobe_json({"format": fmt, "streams": [video_stream()]}).duration == expected
+    info = parse_ffprobe_json({"format": fmt, "streams": [video_stream()]})
+    assert info.duration == expected and info.start_time == float(start)
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [
+        {"ENCODER": "Lavf62.12.102"},
+        {"encoder": "Lavf"},
+        {},
+        {"ENCODER": "libebml v1.4.5 + libmatroska v1.7.1"},
+        {"ENCODER": "mkvmerge v88.0 ('All I Know') 64-bit"},
+    ],
+)
+def test_no_muxer_name_shortens_a_stated_length(tags):
+    fmt = {"format_name": "matroska,webm", "start_time": "2.000000", "duration": "10.031000", "tags": tags}
+    assert parse_ffprobe_json({"format": fmt, "streams": [video_stream()]}).duration == 10.031
 
 
 @pytest.mark.parametrize(
@@ -181,10 +196,12 @@ class FakeFfprobe:
 
     def stream(self, cmd, chunk_size):
         self.scans.append(cmd)
+        self.stopped_early = True
         for start in range(0, len(self.packets), 7):
             yield self.packets[start : start + 7]
         if self.fail_after is not None:
             raise self.fail_after
+        self.stopped_early = False
 
 
 PACKETS_FROM_100 = b"0,100.000000,100.000000,0.040000\n1,100.000000,100.000000,0.021333\n0,104.960000,104.920000,0.040000\n1,104.992000,104.992000,0.021333\n0,104.880000,104.880000,0.040000\n"
@@ -259,3 +276,85 @@ def test_no_scan_for_stills_or_stated_lengths(monkeypatch, data):
     fake = FakeFfprobe(monkeypatch, data, b"0,99.0,99.0,1\n")
     probe("still")
     assert fake.scans == []
+
+
+def lines_of_packets(count, start=100.0):
+    return b"".join(b"0,%.6f,%.6f,0.040000\n" % (start + i * 0.04, start + i * 0.04) for i in range(count))
+
+
+@pytest.fixture
+def capture(tmp_path):
+    path = tmp_path / "capture.mkv"
+    path.write_bytes(b"recording")
+    probe_module._scans.clear()
+    yield path
+    probe_module._scans.clear()
+
+
+def test_a_scan_past_the_limit_is_refused_and_stops_reading(monkeypatch, capture):
+    fake = FakeFfprobe(monkeypatch, unfinalized(), lines_of_packets(50))
+    with pytest.raises(MediaTooLargeError) as e:
+        probe(capture, limits=Limits(max_scan_packets=10))
+    assert e.value.limit == "max_scan_packets"
+    assert e.value.user_message == (
+        "This recording doesn't state its length, so it would have to be read through to measure it, and it has "
+        "more than 10 audio and video packets (about 1 second of 30 fps video with sound); the limit is 10 packets."
+    )
+    assert fake.stopped_early
+
+
+@pytest.mark.parametrize("cap", [50, 51, None])
+def test_a_scan_within_the_limit_or_without_one_measures_the_file(monkeypatch, tmp_path, cap):
+    probe_module._scans.clear()
+    FakeFfprobe(monkeypatch, unfinalized(), lines_of_packets(50))
+    assert probe(tmp_path / "x.mkv", limits=Limits(max_scan_packets=cap)).duration == 2.0
+
+
+def test_the_default_limit_applies_when_none_is_given(monkeypatch, capture):
+    monkeypatch.setattr(probe_module, "resolve_limits", lambda limits: Limits(max_scan_packets=3))
+    FakeFfprobe(monkeypatch, unfinalized(), lines_of_packets(5))
+    with pytest.raises(MediaTooLargeError):
+        probe(capture)
+    assert Limits().max_scan_packets == 2_000_000
+
+
+def test_a_measured_file_is_not_read_again(monkeypatch, capture):
+    fake = FakeFfprobe(monkeypatch, unfinalized(), PACKETS_FROM_100)
+    assert [probe(capture).duration for _ in range(3)] == [5.013333] * 3
+    assert len(fake.scans) == 1
+
+
+def test_a_changed_file_is_measured_again(monkeypatch, capture):
+    fake = FakeFfprobe(monkeypatch, unfinalized(), PACKETS_FROM_100)
+    probe(capture)
+    capture.write_bytes(b"a longer recording")
+    fake.packets = lines_of_packets(10)
+    assert probe(capture).duration == 0.4
+    assert len(fake.scans) == 2
+
+
+def test_remembered_measurements_follow_the_limit_given(monkeypatch, capture):
+    fake = FakeFfprobe(monkeypatch, unfinalized(), lines_of_packets(20))
+    assert probe(capture, limits=Limits(max_scan_packets=None)).duration == 0.8
+    with pytest.raises(MediaTooLargeError):
+        probe(capture, limits=Limits(max_scan_packets=19))
+    assert len(fake.scans) == 1
+    probe_module._scans.clear()
+    with pytest.raises(MediaTooLargeError):
+        probe(capture, limits=Limits(max_scan_packets=5))
+    with pytest.raises(MediaTooLargeError):
+        probe(capture, limits=Limits(max_scan_packets=4))
+    assert len(fake.scans) == 2
+    assert probe(capture, limits=Limits(max_scan_packets=20)).duration == 0.8
+    assert len(fake.scans) == 3
+
+
+def test_remembered_measurements_are_bounded(monkeypatch, tmp_path):
+    probe_module._scans.clear()
+    FakeFfprobe(monkeypatch, unfinalized(), PACKETS_FROM_100)
+    for i in range(probe_module._SCAN_CACHE_SIZE + 10):
+        path = tmp_path / f"{i}.mkv"
+        path.write_bytes(b"x")
+        probe(path)
+    assert len(probe_module._scans) == probe_module._SCAN_CACHE_SIZE
+    probe_module._scans.clear()

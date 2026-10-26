@@ -130,7 +130,7 @@ def stub_processing(monkeypatch):
     for module, name in stubbed:
         monkeypatch.setattr(module, name, made)
     extract = importlib.import_module("sashimi.api.extract")
-    monkeypatch.setattr(extract, "_clip_message", lambda config, source, output: "Extracted to {name}")
+    monkeypatch.setattr(extract, "_clip_message", lambda *args: "Extracted to {name}")
 
 
 def folder(path, names=FIXTURE):

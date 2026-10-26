@@ -20,6 +20,8 @@ cutting exactly at the probed length would clip the end.
 
 DEFAULT_MAX_PIXELS = 64_000_000
 """The default of :attr:`Limits.max_pixels` (64 MP covers 48 MP phone photos)."""
+DEFAULT_MAX_SCAN_PACKETS = 2_000_000
+"""The default of :attr:`Limits.max_scan_packets`: about 7 hours of 30 fps video with AAC audio, or 18 hours of 30 fps video packets."""
 
 WEBP_MAX_SIDE = 16383
 """The widest and tallest WebP image, in pixels: the format's limit (contact sheets, frame strips)."""
@@ -76,6 +78,31 @@ def duration_text(seconds: float) -> str:
     return "1 second" if seconds == 1 else f"{seconds:g} seconds"
 
 
+def length_text(seconds: float) -> str:
+    """A media length as words, to the second: "45 seconds", "12 minutes 5 seconds", "1 hour 2 minutes"."""
+    total = max(0, round(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    parts = [(hours, "hour"), (minutes, "minute"), (secs, "second")]
+    words = [f"{n} {unit}{'' if n == 1 else 's'}" for n, unit in parts if n]
+    return " ".join(words[:2]) if words else "under a second"
+
+
+def rough_length_text(seconds: float) -> str:
+    """A rough media length: to the minute from a minute up ("43 minutes"), else to the second."""
+    return length_text(round(seconds / 60) * 60 if seconds >= 60 else max(seconds, 1))
+
+
+def too_long_text(kind: str, length: float, start: float, limit: float) -> str:
+    """Why a whole `kind` (from `start`) is refused under a length limit, and what to do."""
+    what = (
+        f"This {kind} is {length_text(length)} long"
+        if start <= 0
+        else f"From {start:g}s, this {kind} runs {length_text(length)}"
+    )
+    return f"{what}, and the limit is {duration_text(limit)}. Set a shorter duration to convert part of it."
+
+
 def megabytes(size: int) -> str:
     """A size in bytes as whole megabytes (MiB), as people read them: "256 MB"."""
     return f"{round(size / MIB):,} MB"
@@ -104,8 +131,9 @@ class Limits(BaseModel):
     ``limits=``; ``None`` means ``Limits()``, these defaults.
 
     Each field is a number, or ``None`` for no limit. The defaults protect the machine (decoded
-    pixels and frames held in memory, contact sheet size) and leave lengths unlimited, since a
-    longer video takes longer but needs no more memory. ``Limits.unlimited()`` turns every limit off.
+    pixels and frames held in memory, contact sheet size, the packets read to measure a recording
+    that doesn't state its length) and leave lengths unlimited, since a longer video takes longer
+    but needs no more memory. ``Limits.unlimited()`` turns every limit off.
 
     A refusal states the limit in force in its ``user_message`` and names the field in its
     ``limit`` attribute. Format limits (WebP's 16383 pixels, the encoders' sample rates) and
@@ -130,6 +158,8 @@ class Limits(BaseModel):
     """The longest GIF or animated WebP made from a video, and the longest preview (all its clips together)."""
     max_preview_clips: _Count = None
     """The most clips a preview takes."""
+    max_scan_packets: _Count = DEFAULT_MAX_SCAN_PACKETS
+    """Packets read to measure a file: a recording that doesn't state its length (a live capture that was never finalized) or a Matroska file that starts late is read to its end, and a video is read up to the time a contact sheet, preview or start time needs, to find the keyframe to decode from (about 20 microseconds of CPU time a packet). A file that needs more is refused. The default covers about 7 hours of 30 fps video with AAC audio, or 18 hours of video packets."""
 
     @classmethod
     def unlimited(cls) -> Self:

@@ -152,7 +152,14 @@ inside locked-down workers (read-only filesystems, no network, small process lim
 - **Deterministic.** The same input and config produce the same output.
 - **Hardened input handling.** ffmpeg and ffprobe only open local files (`-protocol_whitelist
   file`) and only run allowlisted demuxers (`-format_whitelist`), so containers such as HLS
-  playlists are refused before anything parses them.
+  playlists are refused before anything parses them. The allowlist is single-file formats only:
+  Matroska/WebM, MP4/MOV/3GP, AVI, ASF (WMV/WMA), MPEG-TS and MPEG-PS, FLV, Ogg, GIF, YUV4MPEG,
+  MP3, WAV, FLAC, AAC, AIFF, AC-3, E-AC-3, DTS, AMR, CAF, Sun AU and WavPack.
+- **Frames at the times asked for.** Contact sheet tiles, preview clips and start times show the
+  frame at their time on every container, whatever the keyframe spacing: sashimi reads the video's
+  keyframe index once, starts decoding just before the right keyframe and drops what comes before
+  the time. Sheets and previews of videos with keyframes far apart are decoded in one pass instead
+  of once per tile.
 
 ### Configs
 
@@ -185,6 +192,7 @@ sashimi enforces only the limits you pass, as one `sashimi.config.Limits`:
 | `max_audio_seconds` | none | audio conversions |
 | `max_gif_seconds` | none | GIFs and animated WebPs made from a video, and a preview's clips together |
 | `max_preview_clips` | none | a preview's clips |
+| `max_scan_packets` | 2,000,000 | packets read to measure a recording that states no length (a live capture that was never finalized) or the end of a Matroska file that starts late (about 20 µs of CPU each; 2,000,000 is about 7 hours of 30 fps video with audio), and video packets read to find the keyframe a sheet, preview or start time decodes from (2,000,000 is about 18 hours of 30 fps video) |
 
 Every limit can be raised, and `None` turns it off; `Limits.unlimited()` turns them all off. A
 refusal is a `UserInputError` whose `user_message` states the limit in force and whose `limit` is

@@ -6,6 +6,8 @@
 import concurrent.futures
 import logging
 import os
+from collections.abc import Sequence
+from typing import Literal
 
 from PIL import Image
 
@@ -30,6 +32,7 @@ from sashimi.core._ffmpeg import (
     run_ffmpeg,
 )
 from sashimi.core._resources import resolve_max_workers
+from sashimi.core._seek import VideoIndex, decoding_args, video_index, with_filter
 from sashimi.core.probe import VIDEO_CONTAINERS, MediaInfo, probe
 from sashimi.core.sheets._layout import SheetLayout, check_tiles, frame_times, plan_layout
 from sashimi.core.sheets._render import (
@@ -49,7 +52,7 @@ from sashimi.errors import (
     UnsupportedMediaError,
 )
 
-__all__ = ["render_still", "build_frame_command"]
+__all__ = ["render_still", "build_frame_command", "build_frames_command", "sheet_route"]
 
 logger = logging.getLogger("sashimi")
 
@@ -66,9 +69,11 @@ def optional_path(path: PathLike | None) -> str | None:
     return os.fspath(path) if path is not None else None
 
 
-def probe_sheet_source(input_path: PathLike, min_duration: float, too_short: str) -> MediaInfo:
+def probe_sheet_source(
+    input_path: PathLike, min_duration: float, too_short: str, limits: Limits | None = None
+) -> MediaInfo:
     try:
-        info = probe(input_path)
+        info = probe(input_path, limits=limits)
     except UnsupportedMediaError as e:
         raise UnsupportedMediaError(NOT_A_VIDEO, detail=e.detail) from e
     if (
@@ -99,7 +104,7 @@ def check_sheet_size(width: int, height: int, target: str, limits: Limits | None
     if budget is not None and width * height > budget:
         raise MediaTooLargeError(
             f"{too_big}: it would have {megapixels(width * height)} megapixels ({width}x{height}), and the limit "
-            f"is {megapixels(budget)}. Use fewer rows or a smaller width.",
+            f"is {megapixels(budget)} megapixels. Use fewer rows or a smaller width.",
             detail=f"{width}x{height}",
             limit="max_sheet_pixels",
         )
@@ -120,23 +125,39 @@ def header_lines(input_path: PathLike, info: MediaInfo, display_name: str | None
 
 
 def build_frame_command(
-    input_path: PathLike, timestamp: float, width: int, height: int, ffmpeg: str = "ffmpeg"
+    input_path: PathLike,
+    timestamp: float,
+    width: int,
+    height: int,
+    ffmpeg: str = "ffmpeg",
+    *,
+    decode_from: float | None = None,
 ) -> list[str]:
-    """One still frame, scaled to the tile, as raw RGB on stdout. Pure. 'V:0' skips cover art."""
+    """
+    One still frame, scaled to the tile, as raw RGB on stdout. Pure. 'V:0' skips cover art.
+
+    `decode_from` is where decoding starts (seconds, from the file's keyframe index; see
+    :func:`sashimi.core._seek.VideoIndex.decode_from`): the frames before `timestamp` are then
+    decoded and dropped. None leaves the seek to ffmpeg (``-ss timestamp``).
+    """
+    if decode_from is None:
+        seek, vf = ["-ss", fmt_seconds(timestamp)], f"scale={width}:{height},setsar=1"
+    else:
+        decoding = decoding_args(decode_from, timestamp)
+        seek, vf = decoding.inputs, with_filter(decoding.video, f"scale={width}:{height},setsar=1")
     return [
         ffmpeg,
         *base_args(1),
         *INPUT_PROTOCOLS,
         "-threads",
         "1",
-        "-ss",
-        fmt_seconds(timestamp),
+        *seek,
         "-i",
         file_arg(input_path),
         "-map",
         "0:V:0",
         "-vf",
-        f"scale={width}:{height},setsar=1",
+        vf,
         "-frames:v",
         "1",
         "-f",
@@ -145,6 +166,67 @@ def build_frame_command(
         "rgb24",
         "pipe:1",
     ]
+
+
+def build_frames_command(
+    input_path: PathLike,
+    timestamps: Sequence[float],
+    width: int,
+    height: int,
+    threads: int,
+    ffmpeg: str = "ffmpeg",
+    *,
+    decode_from: float = 0.0,
+) -> list[str]:
+    """
+    Every tile's frame from one decoding pass, in order, as raw RGB on stdout: for each of
+    `timestamps` (ascending), the first frame shown at or after it. Pure. Decoding starts at
+    `decode_from` (seconds; see :func:`build_frame_command`) and stops after the last timestamp,
+    so a video with keyframes far apart is decoded once instead of once per tile.
+    """
+    seek = ["-ss", fmt_seconds(decode_from)] if decode_from > 0 else []
+    picks = "0"
+    for slot in reversed(range(len(timestamps))):
+        at = fmt_seconds(max(timestamps[slot] - decode_from, 0.0))
+        picks = f"if(eq(selected_n,{slot}),gte(t,{at}),{picks})"
+    reach = timestamps[-1] - decode_from + 1.0
+    return [
+        ffmpeg,
+        *base_args(threads),
+        *INPUT_PROTOCOLS,
+        "-threads",
+        str(threads),
+        *seek,
+        "-t",
+        fmt_seconds(reach),
+        "-i",
+        file_arg(input_path),
+        "-map",
+        "0:V:0",
+        "-vf",
+        f"select='{picks}',scale={width}:{height},setsar=1",
+        "-fps_mode",
+        "passthrough",
+        "-frames:v",
+        str(len(timestamps)),
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "pipe:1",
+    ]
+
+
+def sheet_route(index: VideoIndex | None, times: Sequence[float]) -> Literal["seek", "pass"]:
+    """
+    Whether a still sheet's frames are cheaper to get with one seek per tile (``seek``) or one
+    decoding pass (``pass``), counted in frames decoded from the keyframe `index`. Pure.
+    """
+    if index is None or not times:
+        return "seek"
+    per_tile = sum(index.decoded_before(t) - index.decoded_before(index.decode_from(t)) + 1 for t in times)
+    one_pass = index.decoded_before(times[-1]) - index.decoded_before(index.decode_from(times[0])) + 1
+    return "pass" if one_pass < per_tile else "seek"
 
 
 def _grab_frame(cmd: list[str], width: int, height: int) -> Image.Image | None:
@@ -158,6 +240,21 @@ def _grab_frame(cmd: list[str], width: int, height: int) -> Image.Image | None:
     if len(data) < width * height * 3:
         return None
     return Image.frombytes("RGB", (width, height), data[: width * height * 3])
+
+
+def _grab_frames(cmd: list[str], width: int, height: int, count: int) -> list[Image.Image]:
+    size = width * height * 3
+    try:
+        data = run_ffmpeg(cmd, capture_stdout=True)
+    except BinaryNotFoundError:
+        raise
+    except ProcessingError as e:
+        logger.debug(f"Frame extraction failed: {e}")
+        return []
+    return [
+        Image.frombytes("RGB", (width, height), data[i : i + size])
+        for i in range(0, min(len(data), count * size) - size + 1, size)
+    ]
 
 
 def render_still(
@@ -182,7 +279,7 @@ def render_still(
     nothing is written to disk except the output. A frame that can't be read leaves its tile empty.
     """
     workers = resolve_max_workers(max_workers)
-    info = probe_sheet_source(input_path, 1.0, TOO_SHORT_FOR_SHEET)
+    info = probe_sheet_source(input_path, 1.0, TOO_SHORT_FOR_SHEET, limits)
     assert info.duration is not None and info.display_aspect_ratio
     layout: SheetLayout = plan_layout(config.width, config.cols, config.rows, config.gap, info.display_aspect_ratio)
     check_tiles(layout)
@@ -206,31 +303,50 @@ def render_still(
         sheet.paste(header, (0, 0))
 
     ffmpeg = ffmpeg_binary()
-    placed = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(
-                _grab_frame,
-                build_frame_command(input_path, t, layout.thumb_w, layout.thumb_h, ffmpeg),
-                layout.thumb_w,
-                layout.thumb_h,
-            ): slot
-            for slot, t in enumerate(times)
-        }
-        for done, future in enumerate(concurrent.futures.as_completed(futures), start=1):
-            slot = futures[future]
-            tile = future.result()
-            if tile is not None:
-                if config.show_timestamps:
-                    label = timestamp_label(
-                        format_duration(times[slot]), ts_font, config.timestamp_bg_color, config.timestamp_text_color
-                    )
-                    stamp(tile, label)
-                x, y = layout.cell_origin(slot)
-                sheet.paste(tile, (x, header_h + y))
-                placed += 1
+    index = video_index(input_path, info, times[-1], limits) if times else None
+    tiles: dict[int, Image.Image] = {}
+    if sheet_route(index, times) == "pass":
+        assert index is not None
+        cmd = build_frames_command(
+            input_path, times, layout.thumb_w, layout.thumb_h, workers, ffmpeg, decode_from=index.decode_from(times[0])
+        )
+        for slot, tile in enumerate(_grab_frames(cmd, layout.thumb_w, layout.thumb_h, len(times))):
+            tiles[slot] = tile
             if on_progress:
-                on_progress(0.9 * done / len(futures), "extracting")
+                on_progress(0.9 * (slot + 1) / len(times), "extracting")
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(
+                    _grab_frame,
+                    build_frame_command(
+                        input_path,
+                        t,
+                        layout.thumb_w,
+                        layout.thumb_h,
+                        ffmpeg,
+                        decode_from=index.start_for(t) if index is not None else None,
+                    ),
+                    layout.thumb_w,
+                    layout.thumb_h,
+                ): slot
+                for slot, t in enumerate(times)
+            }
+            for done, future in enumerate(concurrent.futures.as_completed(futures), start=1):
+                if (grabbed := future.result()) is not None:
+                    tiles[futures[future]] = grabbed
+                if on_progress:
+                    on_progress(0.9 * done / len(futures), "extracting")
+    placed = 0
+    for slot, tile in sorted(tiles.items()):
+        if config.show_timestamps:
+            label = timestamp_label(
+                format_duration(times[slot]), ts_font, config.timestamp_bg_color, config.timestamp_text_color
+            )
+            stamp(tile, label)
+        x, y = layout.cell_origin(slot)
+        sheet.paste(tile, (x, header_h + y))
+        placed += 1
 
     if not placed:
         raise UnsupportedMediaError(NO_FRAMES)

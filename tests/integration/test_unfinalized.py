@@ -5,11 +5,14 @@
 Recordings that were never finalized (a live-stream dump written to a pipe: no stated length,
 no index, often a start time well past zero) work on every route, with their length counted
 from the first frame as ``ffmpeg -ss`` counts it. So do finalized Matroska files whose
-timestamps start late, whose stated length counts from zero.
+timestamps start late, measured from their last packets: muxers disagree about what such a
+file's stated length means.
 """
 
 import json
 import pathlib
+import re
+import struct
 import subprocess
 from unittest.mock import patch
 
@@ -17,7 +20,9 @@ import pytest
 from PIL import Image
 from typer.testing import CliRunner
 
-from sashimi import audio, probe, sheets, video
+from sashimi import audio, metadata, probe, sheets, video
+from sashimi.api.extract import extract
+from sashimi.api.thumbs import make_thumbs
 from sashimi.cli import settings
 from sashimi.cli.main import app
 from sashimi.config import (
@@ -28,10 +33,12 @@ from sashimi.config import (
     CopyTrimConfig,
     GifPreviewConfig,
     JpegSheetConfig,
+    Limits,
     Mp4TransformConfig,
 )
+from sashimi.core import probe as probe_module
 from sashimi.core.sheets import animated, static
-from sashimi.errors import InvalidOptionsError
+from sashimi.errors import InvalidOptionsError, MediaTooLargeError
 
 from tests.conftest import _ffmpeg as make_media, leftovers, needs_ffmpeg
 
@@ -246,4 +253,144 @@ def test_cli_thumbs_and_info_on_a_live_dump(late_capture, tmp_path, monkeypatch)
     assert (work / "stream.mkv.sheet.jpg").exists()
     info = runner.invoke(app, ["info", "stream.mkv", "--json"])
     assert abs(json.loads(info.output)["duration"] - SECONDS) < 0.1
+    settings.load_raw_config.cache_clear()
+
+
+def _muxed_by_another_app(source: pathlib.Path, path: pathlib.Path) -> pathlib.Path:
+    """`source` with every ``Lavf…`` app name (MuxingApp, WritingApp, the ENCODER tag) rewritten in place."""
+    data = re.sub(rb"Lavf[0-9.]*", lambda m: (b"mkvmerge v88.0 " * 4)[: len(m.group())], source.read_bytes())
+    path.write_bytes(data)
+    return path
+
+
+def test_a_late_matroska_is_measured_whoever_wrote_it(finalized_late, tmp_path):
+    other = _muxed_by_another_app(finalized_late, tmp_path / "original.blob")
+    stated = _ffprobe(other)["format"]
+    assert stated["tags"]["ENCODER"].startswith("mkvmerge")
+    assert float(stated["duration"]) == pytest.approx(SECONDS + 100, abs=0.1)
+    assert probe(other).duration == pytest.approx(SECONDS, abs=0.1)
+    assert probe(finalized_late).duration == pytest.approx(SECONDS, abs=0.1)
+
+
+def _stated_as_a_span(source: pathlib.Path, path: pathlib.Path, span: float) -> pathlib.Path:
+    """`source` with its Matroska Duration (8-byte float, milliseconds) rewritten to `span`, as mkvmerge writes it."""
+    data = source.read_bytes()
+    at = data.find(b"\x44\x89\x88")
+    assert at > 0
+    path.write_bytes(data[: at + 3] + struct.pack(">d", span * 1000) + data[at + 11 :])
+    return path
+
+
+@pytest.fixture(scope="module")
+def remuxed_span(tmp_path_factory) -> pathlib.Path:
+    """
+    A file shaped like mkvmerge's remux of an ffmpeg file starting at 2 s: the ``ENCODER=Lavf…``
+    tag kept, but the stated length the span (10 s) rather than the end time (12 s).
+    """
+    folder = tmp_path_factory.mktemp("span")
+    late = folder / "late.mkv"
+    make_media(
+        *("-f", "lavfi", "-i", "testsrc2=s=160x90:r=25:d=10", "-f", "lavfi", "-i", "sine=d=10"),
+        *("-c:v", "libx264", "-preset", "ultrafast", "-g", "25", "-c:a", "aac", "-output_ts_offset", "2"),
+        *("-f", "matroska", str(late)),
+    )
+    return _stated_as_a_span(late, folder / "original.blob", 10.031)
+
+
+def test_a_late_matroska_stating_its_span_is_not_shortened(remuxed_span, tmp_path):
+    stated = _ffprobe(remuxed_span)["format"]
+    assert stated["tags"]["ENCODER"].startswith("Lavf") and float(stated["start_time"]) == 2.0
+    assert float(stated["duration"]) == pytest.approx(10.031)
+    assert probe(remuxed_span).duration == pytest.approx(10.0, abs=0.05)
+    out = tmp_path / "out.mp4"
+    video.convert(remuxed_span, out, VIDEO_CONVERT.from_params({}, target="mp4"))
+    assert _length(out) == pytest.approx(10.0, abs=0.1)
+
+
+def test_a_late_matroska_whose_end_cant_be_reached_keeps_its_stated_length(finalized_late):
+    stated = float(_ffprobe(finalized_late)["format"]["duration"])
+    probe_module._ends.clear()
+    assert probe(finalized_late, limits=Limits(max_scan_packets=10)).duration == pytest.approx(stated)
+    probe_module._ends.clear()
+
+
+@pytest.fixture(scope="module")
+def dense_capture(tmp_path_factory) -> pathlib.Path:
+    """An unfinalized capture of 2 s at 1000 fps: 2,000 tiny packets."""
+    path = tmp_path_factory.mktemp("dense") / "original.blob"
+    lavfi = ("-f", "lavfi", "-i", "color=s=32x32:r=1000:d=2")
+    return _piped(path, *lavfi, "-c:v", "libx264", "-preset", "ultrafast", "-f", "matroska")
+
+
+def _refused(call) -> None:
+    with pytest.raises(MediaTooLargeError) as e:
+        call()
+    assert e.value.limit == "max_scan_packets"
+    assert "more than 1,000 audio and video packets" in e.value.user_message
+
+
+def test_every_route_honours_the_scan_limit(dense_capture, tmp_path):
+    limits = Limits(max_scan_packets=1000)
+    assert probe(dense_capture, limits=Limits(max_scan_packets=2000)).duration == pytest.approx(2.0, abs=0.01)
+    probe_module._scans.clear()
+    _refused(lambda: probe(dense_capture, limits=limits))
+    sheet = CONTACT_SHEET.from_params({"cols": 2, "rows": 1}, target="jpeg")
+    _refused(lambda: sheets.render(dense_capture, tmp_path / "s", sheet, limits=limits))
+    gif = VIDEO_CONVERT.from_params({}, target="gif")
+    _refused(lambda: video.convert(dense_capture, tmp_path / "g", gif, limits=limits))
+    _refused(lambda: video.trim(dense_capture, tmp_path / "t", CopyTrimConfig(container="mkv"), limits=limits))
+    _refused(lambda: video.preview(dense_capture, tmp_path / "p", GifPreviewConfig(), limits=limits))
+    _refused(lambda: metadata.strip(dense_capture, tmp_path / "m", limits=limits))
+    assert not list(tmp_path.iterdir())
+
+
+def test_a_file_is_measured_once_per_call(late_capture, tmp_path, monkeypatch):
+    probe_module._scans.clear()
+    work = tmp_path / "work"
+    work.mkdir()
+    clip = work / "stream.mkv"
+    clip.write_bytes(late_capture.read_bytes())
+    real = probe_module._scan_packets
+    scans = []
+
+    def counting(path, data, cap):
+        scans.append(path)
+        return real(path, data, cap)
+
+    monkeypatch.setattr(probe_module, "_scan_packets", counting)
+    assert extract(clip, start="1s", show_progress=False)["summary"]["success"] == 1
+    assert make_thumbs(clip, show_progress=False)["summary"]["success"] == 1
+    video.convert(clip, tmp_path / "out", VIDEO_CONVERT.from_params({}, target="gif"))
+    assert len(scans) == 1
+    clip.write_bytes(late_capture.read_bytes() + b"\0")
+    assert abs(probe(clip).duration - SECONDS) < 0.1
+    assert len(scans) == 2
+    probe_module._scans.clear()
+
+
+def test_cli_refuses_past_the_kept_scan_limit(dense_capture, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(settings, "USER_CONFIG_DIR", home)
+    (home / "sashimi.toml").write_text("[limits]\nmax_scan_packets = 1000\n")
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    settings.load_raw_config.cache_clear()
+    probe_module._scans.clear()
+    (work / "dense.mkv").write_bytes(dense_capture.read_bytes())
+    runner = CliRunner()
+    result = runner.invoke(app, ["thumbs", "dense.mkv", "--json"])
+    assert result.exit_code == 1, result.output
+    (row,) = json.loads(result.output)["results"]
+    assert row["status"] == "error" and "more than 1,000 audio and video packets" in row["message"]
+    assert row["message"].endswith(
+        "To change the limit, run: sashimi config set limits.max_scan_packets 10000000 (or none for no limit)."
+    )
+    info = runner.invoke(app, ["info", "dense.mkv"], env={"COLUMNS": "1000"})
+    assert info.exit_code == 1 and "more than 1,000 audio and video packets" in info.output
+    assert "sashimi config set limits.max_scan_packets" in info.output
+    (home / "sashimi.toml").write_text("[limits]\nmax_scan_packets = 2500\n")
+    settings.load_raw_config.cache_clear()
+    assert runner.invoke(app, ["info", "dense.mkv"]).exit_code == 0
     settings.load_raw_config.cache_clear()

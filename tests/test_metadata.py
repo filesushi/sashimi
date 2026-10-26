@@ -31,7 +31,7 @@ def test_authors_and_urls():
 
 
 def test_sdist_leaves_out_internal_docs():
-    assert {"/CLAUDE.md", "/docs/FILESUSHI_HANDBACK.md"} <= set(
+    assert {"/CLAUDE.md", "/docs/FILESUSHI_HANDBACK.md", "/scripts/bench/results/"} <= set(
         PYPROJECT["tool"]["hatch"]["build"]["targets"]["sdist"]["exclude"]
     )
 

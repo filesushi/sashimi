@@ -21,6 +21,7 @@ from sashimi.core._ffmpeg import (
     file_arg,
     fmt_seconds,
     run_ffmpeg,
+    stream_timed_frames,
 )
 from sashimi.core._palette import (
     PALETTE_SHARE,
@@ -32,6 +33,7 @@ from sashimi.core._palette import (
     scaled,
 )
 from sashimi.core._resources import resolve_max_workers
+from sashimi.core._seek import build_pass_command, clip_frames, clip_route, decoding_args, video_index, with_filter
 from sashimi.core.sheets._layout import SheetLayout, check_tiles, clip_starts, plan_layout
 from sashimi.core.sheets._render import HeaderStyle, format_duration, load_font, padded_label, render_header, stamp
 from sashimi.core.sheets.static import NO_FRAMES, check_sheet_size, header_lines, optional_path, probe_sheet_source
@@ -49,26 +51,40 @@ _PALETTEUSE = "dither=bayer:bayer_scale=4"
 
 
 def build_clip_command(
-    input_path: PathLike, start: float, length: float, fps: int, width: int, height: int, ffmpeg: str = "ffmpeg"
+    input_path: PathLike,
+    start: float,
+    length: float,
+    fps: int,
+    width: int,
+    height: int,
+    ffmpeg: str = "ffmpeg",
+    *,
+    decode_from: float | None = None,
 ) -> list[str]:
-    """One tile's clip as raw RGB frames on stdout, already at the sheet's fps and tile size. Pure."""
+    """
+    One tile's clip as raw RGB frames on stdout, already at the sheet's fps and tile size. Pure.
+    `decode_from` is where decoding starts, as in :func:`~sashimi.core.sheets.static.build_frame_command`.
+    """
     frames = max(1, round(length * fps))
+    vf = f"fps={fps},scale={width}:{height},setsar=1"
+    if decode_from is None:
+        seek = ["-ss", fmt_seconds(start), "-t", fmt_seconds(length)]
+    else:
+        decoding = decoding_args(decode_from, start, length)
+        seek, vf = decoding.inputs, with_filter(decoding.video, vf)
     return [
         ffmpeg,
         *base_args(1),
         *INPUT_PROTOCOLS,
         "-threads",
         "1",
-        "-ss",
-        fmt_seconds(start),
-        "-t",
-        fmt_seconds(length),
+        *seek,
         "-i",
         file_arg(input_path),
         "-map",
         "0:V:0",
         "-vf",
-        f"fps={fps},scale={width}:{height},setsar=1",
+        vf,
         "-frames:v",
         str(frames),
         "-f",
@@ -77,6 +93,37 @@ def build_clip_command(
         "rgb24",
         "pipe:1",
     ]
+
+
+def _clips_in_one_pass(
+    input_path: PathLike,
+    starts: list[float],
+    length: float,
+    fps: int,
+    width: int,
+    height: int,
+    threads: int,
+    ffmpeg: str,
+    decode_from: float,
+) -> dict[int, list[bytes]]:
+    clips = [(start, length) for start in starts]
+    windows = [(start, start + length) for start in starts]
+    cmd = build_pass_command(
+        input_path, windows, f"scale={width}:{height},setsar=1", threads, ffmpeg, decode_from=decode_from
+    )
+    frames = stream_timed_frames(cmd, width * height * 3)
+    gathered: dict[int, list[bytes]] = {}
+    try:
+        timed = ((time + decode_from, frame) for time, frame in frames)
+        for slot, frame in clip_frames(timed, clips, fps):
+            gathered.setdefault(slot, []).append(frame)
+    except BinaryNotFoundError:
+        raise
+    except ProcessingError as e:
+        logger.debug(f"Clip extraction failed: {e}")
+    finally:
+        frames.close()
+    return gathered
 
 
 def _raw_input(width: int, height: int, fps: int) -> list[str]:
@@ -170,7 +217,9 @@ def render_animated(
     A video shorter than one clip (but at least a second long) gets a single tile of the whole video.
     """
     workers = resolve_max_workers(max_workers)
-    info = probe_sheet_source(input_path, min(config.sample_duration, MIN_ANIMATED_SECONDS), TOO_SHORT_FOR_ANIMATED)
+    info = probe_sheet_source(
+        input_path, min(config.sample_duration, MIN_ANIMATED_SECONDS), TOO_SHORT_FOR_ANIMATED, limits
+    )
     assert info.duration is not None and info.display_aspect_ratio
     single = info.duration < config.sample_duration
     clip_length = info.duration if single else config.sample_duration
@@ -203,21 +252,47 @@ def render_animated(
     )
 
     ffmpeg = ffmpeg_binary()
+    index = video_index(input_path, info, starts[-1] + clip_length, limits)
     clips: dict[int, list[bytes]] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(
-                _grab_clip,
-                build_clip_command(input_path, start, clip_length, config.fps, layout.thumb_w, layout.thumb_h, ffmpeg),
-                frame_bytes,
-            ): slot
-            for slot, start in enumerate(starts)
-        }
-        for done, future in enumerate(concurrent.futures.as_completed(futures), start=1):
-            if (clip_frames := future.result()) is not None:
-                clips[futures[future]] = clip_frames
-            if on_progress:
-                on_progress(0.5 * done / len(futures), "extracting")
+    if clip_route(index, [(start, clip_length) for start in starts]) == "pass":
+        assert index is not None
+        clips = _clips_in_one_pass(
+            input_path,
+            starts,
+            clip_length,
+            config.fps,
+            layout.thumb_w,
+            layout.thumb_h,
+            workers,
+            ffmpeg,
+            index.decode_from(starts[0]),
+        )
+        if on_progress:
+            on_progress(0.5, "extracting")
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(
+                    _grab_clip,
+                    build_clip_command(
+                        input_path,
+                        start,
+                        clip_length,
+                        config.fps,
+                        layout.thumb_w,
+                        layout.thumb_h,
+                        ffmpeg,
+                        decode_from=index.start_for(start) if index is not None else None,
+                    ),
+                    frame_bytes,
+                ): slot
+                for slot, start in enumerate(starts)
+            }
+            for done, future in enumerate(concurrent.futures.as_completed(futures), start=1):
+                if (grabbed := future.result()) is not None:
+                    clips[futures[future]] = grabbed
+                if on_progress:
+                    on_progress(0.5 * done / len(futures), "extracting")
     if not clips:
         raise UnsupportedMediaError(NO_FRAMES)
 

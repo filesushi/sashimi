@@ -98,7 +98,7 @@ def test_sheet_size_is_checked_against_the_format_and_the_limit():
         check_sheet_size(8000, 9000, "png", None)
     assert e.value.user_message == (
         "These settings would make the contact sheet too large: it would have 72 megapixels (8000x9000), and the "
-        "limit is 64. Use fewer rows or a smaller width."
+        "limit is 64 megapixels. Use fewer rows or a smaller width."
     )
     assert e.value.limit == "max_sheet_pixels"
     check_sheet_size(8000, 9000, "png", Limits(max_sheet_pixels=100_000_000))

@@ -3,9 +3,11 @@
 
 """Content-based media probing with ffprobe."""
 
+import collections
 import json
 import math
 import os
+import threading
 from collections.abc import Container, Iterable, Iterator
 from typing import Any
 
@@ -20,13 +22,18 @@ from sashimi.core._ffmpeg import (
     run_ffmpeg,
     stream_ffmpeg,
 )
-from sashimi.errors import BinaryNotFoundError, ProcessingError, UnsupportedMediaError
+from sashimi.config._limits import Limits, resolve_limits, rough_length_text
+from sashimi.errors import BinaryNotFoundError, MediaTooLargeError, ProcessingError, UnsupportedMediaError
 
 __all__ = ["MediaInfo", "StreamInfo", "probe", "VIDEO_CONTAINERS", "AUDIO_CONTAINERS"]
 
 _SEGMENT_TIMESTAMPS = frozenset({"matroska", "webm"})
+_PAST_THE_END = "999999999"
+_PACKETS_PER_SECOND = 77
+"""Packets a second of 30 fps video with 48 kHz AAC audio holds: 30 video and about 47 audio."""
 _NO_SCAN = frozenset({"gif"})
 _SCAN_CHUNK = 1 << 16
+_SCAN_CACHE_SIZE = 64
 
 
 class StreamInfo(BaseModel):
@@ -65,8 +72,11 @@ class MediaInfo(BaseModel):
     duration: float | None = None
     """
     Seconds from the first frame, the span ``ffmpeg -ss`` seeks in, or None for a still image.
-    Recordings that were never finalized (no stated length) are measured from their packets.
+    Recordings that were never finalized (no stated length) are measured from their packets, up
+    to ``Limits.max_scan_packets``.
     """
+    start_time: float = 0.0
+    """The timestamp the file starts at, in seconds: the time ``ffmpeg -ss`` counts from (often 0; a live capture's or a TS's may be anything)."""
     size_bytes: int | None = None
     bit_rate: int | None = None
     has_video: bool = False
@@ -206,14 +216,11 @@ def parse_ffprobe_json(data: dict[str, Any]) -> MediaInfo:
     if not duration:
         durations = [d for d in (_float(s.get("duration")) or _tag_duration(s.get("tags")) for s in streams) if d]
         duration = max(durations) if durations else None
-    if duration and _SEGMENT_TIMESTAMPS & set(str(fmt.get("format_name", "")).split(",")):
-        start = _start_time(data)
-        if 0 < start < duration:
-            duration = round(duration - start, 6)
 
     info: dict[str, Any] = {
         "container": fmt.get("format_name", ""),
         "duration": duration,
+        "start_time": _start_time(data),
         "size_bytes": int(fmt["size"]) if str(fmt.get("size", "")).isdigit() else None,
         "bit_rate": int(fmt["bit_rate"]) if str(fmt.get("bit_rate", "")).isdigit() else None,
         "has_video": bool(videos),
@@ -246,14 +253,19 @@ def parse_ffprobe_json(data: dict[str, Any]) -> MediaInfo:
     return MediaInfo(**info)
 
 
-def probe(input_path: str | os.PathLike[str]) -> MediaInfo:
+def probe(input_path: str | os.PathLike[str], *, limits: Limits | None = None) -> MediaInfo:
     """
     Inspects a file's content with ffprobe. The file name and extension are ignored.
 
     A video or audio file that doesn't state its length, such as a live-stream recording that was
-    never finalized, is read to its end once to measure it from its packets' timestamps.
+    never finalized, is read to its end to measure it from its packets' timestamps. That costs
+    CPU time in proportion to its packets (about 20 microseconds each; a 30 fps video with AAC
+    audio has about 280,000 an hour), so ``limits.max_scan_packets`` caps it. The measurement is
+    remembered for the file while its size and modification time stay the same, so probing it
+    again in the same process doesn't read it again.
 
-    Raises UnsupportedMediaError if ffprobe can't read the file as media, and
+    Raises UnsupportedMediaError if ffprobe can't read the file as media, MediaTooLargeError
+    (``limit="max_scan_packets"``) if measuring it would read more packets than the limit, and
     BinaryNotFoundError if ffprobe itself is missing or can't be run.
     """
     cmd = [
@@ -281,7 +293,12 @@ def probe(input_path: str | os.PathLike[str]) -> MediaInfo:
         raise UnsupportedMediaError("This file doesn't look like media we can read.")
     info = parse_ffprobe_json(data)
     if info.duration is None and _needs_packet_scan(info):
-        info = info.model_copy(update={"duration": _scanned_duration(input_path, data)})
+        cap = resolve_limits(limits).max_scan_packets
+        info = info.model_copy(update={"duration": _measured_duration(input_path, data, cap)})
+    elif info.duration and info.start_time > 0 and info.container_names & _SEGMENT_TIMESTAMPS:
+        cap = resolve_limits(limits).max_scan_packets
+        if (span := _late_span(input_path, data, cap)) is not None:
+            info = info.model_copy(update={"duration": span})
     return info
 
 
@@ -326,7 +343,104 @@ def _lines(chunks: Iterable[bytes]) -> Iterator[bytes]:
         yield rest
 
 
-def _scanned_duration(input_path: str | os.PathLike[str], data: dict[str, Any]) -> float | None:
+class _Scan:
+    """One packet scan's result: the end it found, how many packets it read, and whether it reached the end."""
+
+    __slots__ = ("end", "packets", "complete")
+
+    def __init__(self, end: float | None, packets: int, complete: bool):
+        self.end, self.packets, self.complete = end, packets, complete
+
+
+_scans: collections.OrderedDict[tuple[int, int, int, int], _Scan] = collections.OrderedDict()
+_scans_lock = threading.Lock()
+
+
+def _file_key(input_path: str | os.PathLike[str]) -> tuple[int, int, int, int] | None:
+    try:
+        st = os.stat(input_path)
+    except OSError:
+        return None
+    if not st.st_ino:
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def _too_many_packets(cap: int) -> MediaTooLargeError:
+    return MediaTooLargeError(
+        "This recording doesn't state its length, so it would have to be read through to measure it, "
+        f"and it has more than {cap:,} audio and video packets (about {rough_length_text(cap / _PACKETS_PER_SECOND)} "
+        f"of 30 fps video with sound); the limit is {cap:,} packets.",
+        detail=f"more than {cap} packets",
+        limit="max_scan_packets",
+    )
+
+
+_ends: collections.OrderedDict[tuple[int, int, int, int], _Scan] = collections.OrderedDict()
+
+
+def _late_span(input_path: str | os.PathLike[str], data: dict[str, Any], cap: int | None) -> float | None:
+    """
+    How long a Matroska or WebM file whose timestamps start late really is, measured from its
+    last packets, or None when that can't be told within `cap` packets.
+
+    Muxers disagree about the stated length of such a file: libavformat writes the time its last
+    frame ends, mkvmerge the span from the first frame, and a remux can keep the old muxer's
+    ``ENCODER`` tag. So the end is read from the file: ffprobe seeks to its last keyframe (from the
+    Cues) and reads the packets after it; without Cues, or with keyframes far apart, it reads more,
+    up to `cap` packets. The stated length is kept when the end isn't reached, so it is never
+    shortened by guesswork (a length that is too short cuts every re-encode short).
+    """
+    key = _file_key(input_path)
+    known = None
+    if key is not None:
+        with _scans_lock:
+            known = _ends.get(key)
+    if known is None or not (known.complete or (cap is not None and known.packets > cap)):
+        known = _scan_packets(input_path, data, cap, start=_PAST_THE_END)
+        if key is not None and key == _file_key(input_path):
+            with _scans_lock:
+                _ends[key] = known
+                while len(_ends) > _SCAN_CACHE_SIZE:
+                    _ends.popitem(last=False)
+    if not known.complete or known.end is None or (cap is not None and known.packets > cap):
+        return None
+    span = round(known.end - _start_time(data), 6)
+    return span if span > 0 else None
+
+
+def _measured_duration(input_path: str | os.PathLike[str], data: dict[str, Any], cap: int | None) -> float | None:
+    key = _file_key(input_path)
+    known = None
+    if key is not None:
+        with _scans_lock:
+            known = _scans.get(key)
+            if known is not None:
+                _scans.move_to_end(key)
+    if known is not None and (known.complete or (cap is not None and known.packets > cap)):
+        if cap is not None and known.packets > cap:
+            raise _too_many_packets(cap)
+        scan = known
+    else:
+        scan = _scan_packets(input_path, data, cap)
+        if key is not None and key == _file_key(input_path):
+            with _scans_lock:
+                _scans[key] = scan
+                _scans.move_to_end(key)
+                while len(_scans) > _SCAN_CACHE_SIZE:
+                    _scans.popitem(last=False)
+        if not scan.complete:
+            assert cap is not None
+            raise _too_many_packets(cap)
+    if scan.end is None:
+        return None
+    duration = round(scan.end - _start_time(data), 6)
+    return duration if duration > 0 else None
+
+
+def _scan_packets(
+    input_path: str | os.PathLike[str], data: dict[str, Any], cap: int | None, *, start: str | None = None
+) -> _Scan:
     indexes = {
         s["index"]
         for s in data.get("streams", [])
@@ -338,11 +452,20 @@ def _scanned_duration(input_path: str | os.PathLike[str], data: dict[str, Any]) 
         )
     }
     cmd = [ffprobe_binary(), "-hide_banner", "-loglevel", "error", *INPUT_PROTOCOLS]
+    if start is not None:
+        cmd += ["-read_intervals", f"{start}%"]
     cmd += ["-show_entries", "packet=stream_index,pts_time,dts_time,duration_time", "-of", "csv=p=0"]
     cmd.append(file_arg(input_path))
     end: float | None = None
+    packets = 0
+    chunks = stream_ffmpeg(cmd, _SCAN_CHUNK)
     try:
-        for line in _lines(stream_ffmpeg(cmd, _SCAN_CHUNK)):
+        for line in _lines(chunks):
+            if not line.strip():
+                continue
+            packets += 1
+            if cap is not None and packets > cap:
+                return _Scan(end, packets, False)
             time = _packet_end(line, indexes)
             if time is not None and (end is None or time > end):
                 end = time
@@ -350,7 +473,6 @@ def _scanned_duration(input_path: str | os.PathLike[str], data: dict[str, Any]) 
         raise
     except ProcessingError:
         pass
-    if end is None:
-        return None
-    duration = round(end - _start_time(data), 6)
-    return duration if duration > 0 else None
+    finally:
+        chunks.close()
+    return _Scan(end, packets, True)

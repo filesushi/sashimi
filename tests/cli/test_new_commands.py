@@ -209,7 +209,8 @@ def test_preview_command(video_blob, tmp_path):
     too_long = runner.invoke(app, ["preview", "clip.mkv", "--samples", "10", "--clip-length", "4", "-f", "--json"])
     assert too_long.exit_code == 1
     assert json.loads(too_long.stdout)["results"][0]["message"] == (
-        "Previews can be at most 30 seconds long. Use fewer clips or shorter ones."
+        "Previews can be at most 30 seconds long. Use fewer clips or shorter ones. "
+        "To change the limit, run: sashimi config set limits.max_gif_seconds 2h (or none for no limit)."
     )
 
 

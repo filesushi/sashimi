@@ -17,10 +17,12 @@ __all__ = ["STRIP_EXTENSIONS", "strip_files", "strip_files_generator"]
 
 STRIP_EXTENSIONS = (
     ".jpg", ".jpeg", ".png", ".webp", ".gif", ".tif", ".tiff",
-    ".mp4", ".m4v", ".mov", ".mkv", ".webm",
-    ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".oga", ".wav",
+    ".mp4", ".m4v", ".f4v", ".mov", ".mkv", ".mk3d", ".webm",
+    ".mp3", ".m4a", ".m4b", ".m4r", ".mka", ".weba", ".flac", ".ogg", ".opus", ".oga", ".wav",
 )  # fmt: skip
 """The extensions :func:`strip_files_generator` picks up: the formats :func:`sashimi.metadata.strip` handles."""
+STRIP_ACCEPTS = "JPEG, PNG, WebP, GIF and TIFF images and MKV, WebM, MP4, MOV, M4A, MP3, FLAC, OGG and WAV files"
+"""What :func:`strip_files_generator` works on, in words, for its message about a file it skips."""
 
 
 def strip_files_generator(
@@ -57,7 +59,7 @@ def strip_files_generator(
         extensions=extensions,
         recursive=recursive,
         force=force,
-        accepts="images, videos and audio files",
+        accepts=STRIP_ACCEPTS,
         route=lambda path: "image" if kind_of(path) == "image" else "media",
         process=process,
         success_message="Metadata removed: {name}",

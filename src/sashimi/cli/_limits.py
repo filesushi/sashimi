@@ -27,6 +27,7 @@ KINDS = {
     "max_audio_seconds": "seconds",
     "max_gif_seconds": "seconds",
     "max_preview_clips": "count",
+    "max_scan_packets": "count",
 }
 """How each limit is written: pixels (200M), bytes (2G), seconds (10m, 600) or a count."""
 
@@ -78,6 +79,25 @@ def parse(field: str, value: Any) -> int | float | None:
     if number != int(number):
         raise ValueError(f"expected {_HINTS[kind]}, or none")
     return int(number)
+
+
+_EXAMPLES = {"pixels": "200M", "bytes": "2G", "seconds": "2h"}
+_COUNT_EXAMPLES = {"max_scan_packets": "10000000", "max_preview_clips": "20"}
+
+
+def hint(field: str) -> str | None:
+    """How to change the limit `field` from the CLI, for the end of its refusal; None for an unknown field."""
+    kind = KINDS.get(field)
+    if kind is None:
+        return None
+    example = _EXAMPLES.get(kind) or _COUNT_EXAMPLES.get(field, "100")
+    return f"To change the limit, run: sashimi config set limits.{field} {example} (or none for no limit)."
+
+
+def with_hint(message: str, field: str | None) -> str:
+    """`message`, followed by how to change the limit `field` if it names one."""
+    extra = hint(field) if field else None
+    return f"{message} {extra}" if extra else message
 
 
 def accepted(field: str) -> str:

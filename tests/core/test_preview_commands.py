@@ -12,7 +12,7 @@ from sashimi.core._ffmpeg import FRAME_PROGRESS
 from sashimi.video import build_preview_commands, build_preview_palette_command, plan_preview
 
 COMMON = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-filter_threads"]
-FORMATS = "3g2,3gp,aac,asf,avi,flac,flv,gif,m4a,matroska,mj2,mov,mp3,mp4,mpeg,mpegts,ogg,wav,webm"
+FORMATS = "3g2,3gp,aac,ac3,aiff,amr,amrnb,amrwb,asf,au,avi,caf,dts,eac3,flac,flv,gif,m4a,matroska,mj2,mov,mp3,mp4,mpeg,mpegts,ogg,wav,webm,wv,yuv4mpegpipe"
 INPUT = ["-protocol_whitelist", "file", "-format_whitelist", FORMATS, "-threads", "1"]
 RAW = ["-f", "rawvideo", "-pix_fmt", "rgb24"]
 VF = "fps=15,scale=640:360:flags=lanczos,setsar=1"

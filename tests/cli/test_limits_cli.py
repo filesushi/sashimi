@@ -86,7 +86,8 @@ def test_max_pixels_flag_and_sashimi_toml(tmp_path):
     refused = runner.invoke(app, ["convert", "big.png", "jpeg", "--max-pixels", "5M", "--json"])
     assert refused.exit_code == 1
     assert result_message(refused) == (
-        "This image is too large to process: it has 6 megapixels (3000x2000), and the limit is 5."
+        "This image is too large to process: it has 6 megapixels (3000x2000), and the limit is 5 megapixels. "
+        "To change the limit, run: sashimi config set limits.max_pixels 200M (or none for no limit)."
     )
     toml(tmp_path, '[limits]\nmax_pixels = "5M"\n')
     assert runner.invoke(app, ["resize", "big.png", "-w", "100", "--json"]).exit_code == 1
@@ -162,12 +163,16 @@ def test_video_limits_come_from_sashimi_toml(video_blob, tmp_path):
     toml(tmp_path, '[limits]\nmax_video_seconds = "5s"\nmax_audio_seconds = 3\n')
     video = runner.invoke(app, ["convert", "clip.mkv", "webm", "--json"])
     assert video.exit_code == 1
-    assert result_message(video).startswith("Videos longer than 5 seconds aren't supported yet.")
+    assert result_message(video) == (
+        "This video is 6 seconds long, and the limit is 5 seconds. Set a shorter duration to convert part of it. "
+        "To change the limit, run: sashimi config set limits.max_video_seconds 2h (or none for no limit)."
+    )
     audio = runner.invoke(app, ["convert", "clip.mkv", "mp3", "--json"])
-    assert result_message(audio).startswith("Audio longer than 3 seconds isn't supported yet.")
+    assert result_message(audio).startswith("This video is 6 seconds long, and the limit is 3 seconds.")
+    assert result_message(audio).endswith("sashimi config set limits.max_audio_seconds 2h (or none for no limit).")
     assert runner.invoke(app, ["extract", "clip.mkv", "0", "--json"]).exit_code == 0
     accurate = runner.invoke(app, ["extract", "clip.mkv", "0", "-o", "a.mp4", "--accurate", "--json"])
-    assert result_message(accurate).startswith("Videos longer than 5 seconds")
+    assert result_message(accurate).startswith("This video is 6 seconds long, and the limit is 5 seconds.")
 
 
 @needs_ffmpeg

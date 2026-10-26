@@ -42,6 +42,13 @@ def display_path(path: pathlib.Path) -> str:
         return str(path)
 
 
+def refusal(error: Any) -> str:
+    """A user error's message, followed by how to change the limit it names (``sashimi config set limits.…``), if any."""
+    from sashimi.cli._limits import with_hint
+
+    return with_hint(error.user_message, getattr(error, "limit", None))
+
+
 def fail(message: str, code: int = 2, *, markup: bool = False) -> NoReturn:
     """Prints `message` as an error and exits with `code`. The message is plain text unless `markup`."""
     err_console.print(f"[bold red]Error:[/bold red] {message if markup else escape(message)}")
@@ -56,7 +63,7 @@ def refusals() -> Iterator[None]:
     try:
         yield
     except UserInputError as e:
-        fail(e.user_message)
+        fail(refusal(e))
 
 
 def exit_on_invalid_options(err: ValidationError, flags: dict[str, str]) -> NoReturn:
@@ -174,7 +181,7 @@ class BatchRunner:
         try:
             plan = generator.plan()
         except UserInputError as e:
-            fail(e.user_message)
+            fail(refusal(e))
         if not (plan.searched and plan.mixed):
             return plan
         roots = [path for path in self._inputs if path.is_dir()]
@@ -208,6 +215,19 @@ class BatchRunner:
         from sashimi.api._consume import build_report
         from sashimi.errors import UserInputError
 
+        from sashimi.api._batch import LIMIT_HINT
+        from sashimi.cli._limits import hint
+
+        token = LIMIT_HINT.set(hint)
+        try:
+            self._run(generator, inputs)
+        finally:
+            LIMIT_HINT.reset(token)
+
+    def _run(self, generator: Iterator[YieldType], inputs: Iterable[pathlib.Path]) -> None:
+        from sashimi.api._consume import build_report
+        from sashimi.errors import UserInputError
+
         self._inputs = list(inputs)
         plan = self._plan(generator)
         start_time = time.perf_counter()
@@ -215,7 +235,7 @@ class BatchRunner:
         try:
             first = next(generator, 0)
         except UserInputError as e:
-            fail(e.user_message)
+            fail(refusal(e))
         total_files = first if isinstance(first, int) else 0
         started: set[pathlib.Path] = set()
 

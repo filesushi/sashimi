@@ -19,7 +19,7 @@ from sashimi.config import (
     VideoConvertConfig,
     WebpVideoConfig,
 )
-from sashimi.config._limits import duration_text, resolve_limits
+from sashimi.config._limits import duration_text, resolve_limits, too_long_text
 from sashimi.config._video import _H264Options, _Vp9Options
 from sashimi.core._atomic import PathLike, atomic_output
 from sashimi.core._ffmpeg import (
@@ -44,6 +44,7 @@ from sashimi.core._palette import (
     scaled,
 )
 from sashimi.core._resources import resolve_max_workers
+from sashimi.core._seek import FORWARD_SEEKING, SHOWN_SEEKING, VideoIndex, decoding_args, video_index, with_filter
 from sashimi.core.probe import VIDEO_CONTAINERS, MediaInfo, probe
 from sashimi.errors import (
     BinaryNotFoundError,
@@ -73,11 +74,8 @@ logger = logging.getLogger("sashimi")
 NOT_A_VIDEO = "This file doesn't look like a video we can read."
 
 
-def _too_long(limit: float) -> MediaTooLongError:
-    return MediaTooLongError(
-        f"Videos longer than {duration_text(limit)} aren't supported yet. Set a shorter duration to convert part of it.",
-        limit="max_video_seconds",
-    )
+def _too_long(limit: float, length: float, start: float) -> MediaTooLongError:
+    return MediaTooLongError(too_long_text("video", length, start, limit), limit="max_video_seconds")
 
 
 _MUXERS = {"gif": "gif", "webp": "webp", "webm": "webm", "mp4": "mp4", "mkv": "matroska", "mov": "mov"}
@@ -182,10 +180,10 @@ def _stream_args(mute: bool) -> list[str]:
     return ["-pix_fmt", "yuv420p", "-map", "0:v:0", *audio, "-sn", "-dn"]
 
 
-def _probe_video(input_path: PathLike) -> MediaInfo:
+def _probe_video(input_path: PathLike, limits: Limits | None = None) -> MediaInfo:
     """Probes and checks the input is a video (or animated GIF) with a readable duration."""
     try:
-        info = probe(input_path)
+        info = probe(input_path, limits=limits)
     except UnsupportedMediaError as e:
         raise UnsupportedMediaError(NOT_A_VIDEO, detail=e.detail) from e
     if not info.has_video or not info.duration or not (info.container_names & VIDEO_CONTAINERS):
@@ -216,7 +214,13 @@ def _too_close_to_the_end(start: float, fps: int) -> InvalidOptionsError:
 
 
 def _frames_after(
-    input_path: PathLike, start: float, ffmpeg: str, *, copied: bool = False, fps: int | None = None
+    input_path: PathLike,
+    start: float,
+    ffmpeg: str,
+    *,
+    copied: bool = False,
+    fps: int | None = None,
+    index: VideoIndex | None = None,
 ) -> bool:
     """
     Whether ffmpeg, seeking to `start`, finds any video frame; True when that can't be told.
@@ -224,12 +228,19 @@ def _frames_after(
     animated WebP does), or with `copied` only demuxed, as a stream copy sees them (no decoding,
     so it costs the same whatever the keyframe interval).
     """
-    cmd = [ffmpeg, *base_args(1), *INPUT_PROTOCOLS, "-threads", "1", "-ss", fmt_seconds(start)]
+    cmd = [ffmpeg, *base_args(1), *INPUT_PROTOCOLS, "-threads", "1"]
+    scale = f"fps={fps},scale=2:2" if fps else "scale=2:2"
+    begin = index.start_for(start) if index is not None and not copied else None
+    if begin is None:
+        cmd += ["-ss", fmt_seconds(start)]
+    else:
+        decoding = decoding_args(begin, start)
+        cmd += decoding.inputs
+        scale = with_filter(decoding.video, scale)
     cmd += ["-i", file_arg(input_path)]
     if copied:
         cmd += ["-map", "0:v:0", "-c", "copy", "-copypriorss", "0", "-copyinkf", "-frames:v", "1", "-f", "data"]
     else:
-        scale = f"fps={fps},scale=2:2" if fps else "scale=2:2"
         cmd += ["-an", "-sn", "-dn", "-vf", scale, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray"]
     cmd.append("pipe:1")
     try:
@@ -240,12 +251,14 @@ def _frames_after(
         return True
 
 
-def _nothing_from(input_path: PathLike, start: float, ffmpeg: str, action: str) -> InvalidOptionsError | None:
+def _nothing_from(
+    input_path: PathLike, start: float, ffmpeg: str, action: str, index: VideoIndex | None = None
+) -> InvalidOptionsError | None:
     """
     Why ffmpeg, seeking to `start`, decodes no video frame: there is none after it, or there are
     some it can't decode from there (it found no keyframe to start from). None when it decodes one.
     """
-    if _frames_after(input_path, start, ffmpeg):
+    if _frames_after(input_path, start, ffmpeg, index=index):
         return None
     if _frames_after(input_path, start, ffmpeg, copied=True):
         return InvalidOptionsError(
@@ -256,16 +269,25 @@ def _nothing_from(input_path: PathLike, start: float, ffmpeg: str, action: str) 
     return _after_last_frame(start, action)
 
 
-def _require_video(output: PathLike, input_path: PathLike, start: float, ffmpeg: str, action: str) -> None:
+def _require_video(
+    output: PathLike, input_path: PathLike, start: float, ffmpeg: str, action: str, index: VideoIndex | None = None
+) -> None:
     """
     Raises unless `output` holds a video frame: InvalidOptionsError when ffmpeg decodes no frame
     of the input from `start` (see :func:`_nothing_from`), else ProcessingError.
     """
     if holds_packets(output, "video"):
         return
-    if refusal := _nothing_from(input_path, start, ffmpeg, action):
+    if refusal := _nothing_from(input_path, start, ffmpeg, action, index):
         raise refusal
     raise ProcessingError(f"ffmpeg wrote no video frames from {start:g}s")
+
+
+def _start_index(input_path: PathLike, info: MediaInfo, start: float, limits: Limits | None) -> VideoIndex | None:
+    """The keyframe index up to `start` when decoding starts there (inside the video), else None."""
+    if start <= 0 or start >= (info.duration or 0.0):
+        return None
+    return video_index(input_path, info, start, limits)
 
 
 def _length_limit(requested: float | None, start: float, duration: float, limit: float | None) -> float:
@@ -277,7 +299,7 @@ def _length_limit(requested: float | None, start: float, duration: float, limit:
     if requested is not None:
         return requested
     if limit is not None and duration - start > limit:
-        raise _too_long(limit)
+        raise _too_long(limit, duration - start, start)
     rest = duration - start + DURATION_TOLERANCE_SECONDS
     return rest if limit is None else min(rest, limit)
 
@@ -333,6 +355,15 @@ def plan_mp4_route(info: MediaInfo, config: Mp4VideoConfig) -> VideoRoute:
     return "copy_video"
 
 
+GENERATED_PTS = frozenset({"mpeg"})
+"""Demuxers whose packets can lack a pts (MPEG-PS B-frames), which a stream copy must generate (``-fflags +genpts``)."""
+
+
+def _copy_input(source: MediaInfo | None) -> list[str]:
+    """Input options for a stream copy of `source`: generated pts for MPEG program streams (DVD .vob, .mpg)."""
+    return ["-fflags", "+genpts"] if source is not None and source.container_names & GENERATED_PTS else []
+
+
 def _copy_command(
     input_path: PathLike,
     output_path: PathLike,
@@ -345,7 +376,7 @@ def _copy_command(
     source: MediaInfo | None,
 ) -> list[str]:
     copy_audio = route == "copy"
-    cmd = [ffmpeg, *base_args(1 if copy_audio else threads), *_progress_args(), *INPUT_PROTOCOLS]
+    cmd = [ffmpeg, *base_args(1 if copy_audio else threads), *_progress_args(), *INPUT_PROTOCOLS, *_copy_input(source)]
     cmd += ["-t", fmt_seconds(t_value), "-i", file_arg(input_path)]
     audio = ["-an"] if config.mute else ["-map", "0:a:0?"]
     cmd += ["-map", "0:v:0", *audio, "-sn", "-dn", "-c:v", "copy"]
@@ -370,6 +401,7 @@ def build_convert_command(
     limits: Limits | None = None,
     source: MediaInfo | None = None,
     palette: bytes | None = None,
+    decode_from: float | None = None,
 ) -> list[str]:
     """
     Builds the ffmpeg command for :func:`convert`. Pure: no filesystem or process access.
@@ -393,6 +425,11 @@ def build_convert_command(
     instead of building the palette itself. Without it, a GIF's command builds the palette in the
     same pass, which holds every frame in memory until the end; the GIF is byte-identical
     either way. Other targets ignore it.
+
+    `decode_from` is where decoding starts for a start time (seconds, from the file's keyframe
+    index; see :func:`sashimi.core._seek.VideoIndex.decode_from`): the frames before the start
+    are decoded and dropped (with ``trim`` before a GIF's or WebP's ``fps``, else with an output
+    ``-ss``). None leaves the seek to ffmpeg (an input ``-ss``).
     """
     limits = resolve_limits(limits)
     limits.check(config)
@@ -405,9 +442,10 @@ def build_convert_command(
             input_path, output_path, config, route, t_value=t_value, threads=threads, ffmpeg=ffmpeg, source=source
         )
 
-    cmd = [ffmpeg, *base_args(threads), *_progress_args(), *_input_args(input_path, config, t_value, threads)]
+    inputs, skip, audio_skip = _input_args(input_path, config, t_value, threads, decode_from)
+    cmd = [ffmpeg, *base_args(threads), *_progress_args(), *inputs]
     if isinstance(config, GifVideoConfig):
-        filters = _gif_filters(config)
+        filters = with_filter(skip, _gif_filters(config))
         if palette is not None and two_pass(config):
             cmd += [*palette_input(palette), *palette_use(filters, _paletteuse(config))]
         else:
@@ -416,7 +454,7 @@ def build_convert_command(
     elif isinstance(config, WebpVideoConfig):
         cmd += [
             "-vf",
-            f"fps={config.fps},scale='min({config.max_width},iw)':-2:flags=lanczos",
+            with_filter(skip, f"fps={config.fps},scale='min({config.max_width},iw)':-2:flags=lanczos"),
             "-c:v",
             "libwebp_anim",
             "-lossless",
@@ -430,7 +468,14 @@ def build_convert_command(
     else:
         width = config.max_width
         scale = f"scale='min({width},iw)':-2:flags=lanczos" if width else "scale=trunc(iw/2)*2:trunc(ih/2)*2"
-        cmd += ["-vf", scale, *_stream_args(config.mute), *_encoder_args(config, audio_channels=_channels(source))]
+        if audio_skip and not config.mute:
+            cmd += ["-af", audio_skip]
+        cmd += [
+            "-vf",
+            with_filter(skip, scale),
+            *_stream_args(config.mute),
+            *_encoder_args(config, audio_channels=_channels(source)),
+        ]
         cmd += metadata_args(config.metadata, source, _first_streams(source, config.mute))
     cmd += ["-threads", str(threads), *OUTPUT_FLAGS, "-f", _MUXERS[config.target], file_arg(output_path)]
     return cmd
@@ -459,11 +504,16 @@ def _paletteuse(config: GifVideoConfig) -> str:
     return ":".join(options)
 
 
-def _input_args(input_path: PathLike, config: VideoConvertConfig, t_value: float, threads: int) -> list[str]:
+def _input_args(
+    input_path: PathLike, config: VideoConvertConfig, t_value: float, threads: int, decode_from: float | None
+) -> tuple[list[str], str | None, str | None]:
     cmd = [*INPUT_PROTOCOLS, "-threads", str(threads)]
-    if config.start_seconds > 0:
-        cmd += ["-ss", fmt_seconds(config.start_seconds)]
-    return [*cmd, "-t", fmt_seconds(t_value), "-i", file_arg(input_path)]
+    if decode_from is None or config.start_seconds <= 0:
+        if config.start_seconds > 0:
+            cmd += ["-ss", fmt_seconds(config.start_seconds)]
+        return [*cmd, "-t", fmt_seconds(t_value), "-i", file_arg(input_path)], None, None
+    decoding = decoding_args(decode_from, config.start_seconds, t_value)
+    return [*cmd, *decoding.inputs, "-i", file_arg(input_path)], decoding.video, decoding.audio
 
 
 def build_palette_command(
@@ -474,6 +524,7 @@ def build_palette_command(
     threads: int,
     ffmpeg: str = "ffmpeg",
     limits: Limits | None = None,
+    decode_from: float | None = None,
 ) -> list[str]:
     """
     Builds the first pass of a two-pass GIF (see :func:`two_pass`): the same frames as
@@ -485,8 +536,9 @@ def build_palette_command(
     limits.check(config)
     _check_start(config.start_seconds, duration)
     t_value = _length_limit(config.duration_seconds, config.start_seconds, duration, limits.max_video_seconds)
-    cmd = [ffmpeg, *base_args(threads), *_input_args(input_path, config, t_value, threads)]
-    return [*cmd, "-an", *palette_output(_gif_filters(config), config.palette_mode)]
+    inputs, skip, _ = _input_args(input_path, config, t_value, threads, decode_from)
+    cmd = [ffmpeg, *base_args(threads), *inputs]
+    return [*cmd, "-an", *palette_output(with_filter(skip, _gif_filters(config)), config.palette_mode)]
 
 
 def convert(
@@ -530,19 +582,27 @@ def convert(
     limits = resolve_limits(limits)
     limits.check(config)
     threads = resolve_max_workers(max_workers)
-    info = _probe_video(input_path)
+    info = _probe_video(input_path, limits)
     assert info.duration is not None
     remaining = info.duration - config.start_seconds
     expected = min(config.duration_seconds or remaining, remaining)
     ffmpeg = ffmpeg_binary()
     animated = isinstance(config, (GifVideoConfig, WebpVideoConfig))
+    index = _start_index(input_path, info, config.start_seconds, limits)
+    decode_from = index.start_for(config.start_seconds) if index is not None else None
 
     def run(route: VideoRoute) -> VideoRoute:
         palette = None
         report = on_progress
         if isinstance(config, GifVideoConfig) and two_pass(config):
             first = build_palette_command(
-                input_path, config, duration=info.duration or 0.0, threads=threads, ffmpeg=ffmpeg, limits=limits
+                input_path,
+                config,
+                duration=info.duration or 0.0,
+                threads=threads,
+                ffmpeg=ffmpeg,
+                limits=limits,
+                decode_from=decode_from,
             )
             palette = run_ffmpeg(
                 first,
@@ -566,10 +626,11 @@ def convert(
                 limits=limits,
                 source=info,
                 palette=palette,
+                decode_from=decode_from,
             )
             run_ffmpeg(cmd, progress_total=expected, on_progress=report, stage="encoding")
             if config.start_seconds > 0 and not animated:
-                _require_video(temp, input_path, config.start_seconds, ffmpeg, "convert")
+                _require_video(temp, input_path, config.start_seconds, ffmpeg, "convert", index)
         return route
 
     _log_opus_cap(config, info)
@@ -581,9 +642,9 @@ def convert(
     except ProcessingError as e:
         if animated and config.start_seconds > 0:
             assert isinstance(config, (GifVideoConfig, WebpVideoConfig))
-            if refusal := _nothing_from(input_path, config.start_seconds, ffmpeg, "convert"):
+            if refusal := _nothing_from(input_path, config.start_seconds, ffmpeg, "convert", index):
                 raise refusal from e
-            if not _frames_after(input_path, config.start_seconds, ffmpeg, fps=config.fps):
+            if not _frames_after(input_path, config.start_seconds, ffmpeg, fps=config.fps, index=index):
                 raise _too_close_to_the_end(config.start_seconds, config.fps) from e
         if planned == "encode":
             raise
@@ -639,6 +700,7 @@ def build_trim_command(
     subtitles: Sequence[str] = (),
     limits: Limits | None = None,
     source: MediaInfo | None = None,
+    decode_from: float | None = None,
 ) -> list[str]:
     """
     Builds the ffmpeg command for :func:`trim`. Pure.
@@ -652,18 +714,28 @@ def build_trim_command(
     ``limits.max_video_seconds``; a stream copy has no length limit. `source` is the probed input,
     used as in :func:`build_convert_command`; a copy that removes metadata also leaves out timed
     metadata (data streams, such as GPS tracks), and cover art for ``remove_all``.
+
+    `decode_from` is where reading starts for a start time (seconds, from the file's keyframe
+    index): for an accurate cut, decoding starts there and the frames before the start are
+    dropped with an output ``-ss``; a copy starts there, just before the keyframe it keeps, and
+    its length is counted from the start time. None leaves the seek to ffmpeg.
     """
     limits = resolve_limits(limits)
     limits.check(config)
     _check_start(config.start_seconds, duration)
     length = config.length
+    start = config.start_seconds
+    early = start - decode_from if decode_from is not None and start > 0 else 0.0
 
     if isinstance(config, CopyTrimConfig):
-        cmd = [ffmpeg, *base_args(1), *_progress_args(), *INPUT_PROTOCOLS]
-        if config.start_seconds > 0:
-            cmd += ["-ss", fmt_seconds(config.start_seconds)]
+        cmd = [ffmpeg, *base_args(1), *_progress_args(), *INPUT_PROTOCOLS, *_copy_input(source)]
+        if decode_from is not None and start > 0:
+            if decode_from > 0:
+                cmd += ["-ss", fmt_seconds(decode_from)]
+        elif start > 0:
+            cmd += ["-ss", fmt_seconds(start)]
         if length is not None:
-            cmd += ["-t", fmt_seconds(length)]
+            cmd += ["-t", fmt_seconds(length + early)]
         cmd += ["-i", file_arg(input_path), "-map", "0"]
         dropped = dropped_streams(source, config.metadata)
         for index in dropped:
@@ -679,10 +751,18 @@ def build_trim_command(
 
     t_value = _length_limit(length, config.start_seconds, duration, limits.max_video_seconds)
     cmd = [ffmpeg, *base_args(threads), *_progress_args(), *INPUT_PROTOCOLS, "-threads", str(threads)]
-    if config.start_seconds > 0:
-        cmd += ["-ss", fmt_seconds(config.start_seconds)]
-    cmd += ["-t", fmt_seconds(t_value), "-i", file_arg(input_path)]
-    cmd += ["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", *_stream_args(config.mute)]
+    scale = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    if decode_from is not None and start > 0:
+        decoding = decoding_args(decode_from, start, t_value)
+        cmd += [*decoding.inputs, "-i", file_arg(input_path)]
+        if decoding.audio and not config.mute:
+            cmd += ["-af", decoding.audio]
+        scale = with_filter(decoding.video, scale)
+    else:
+        if start > 0:
+            cmd += ["-ss", fmt_seconds(start)]
+        cmd += ["-t", fmt_seconds(t_value), "-i", file_arg(input_path)]
+    cmd += ["-vf", scale, *_stream_args(config.mute)]
     cmd += _encoder_args(config, faststart=config.container in ("mp4", "mov"), audio_channels=_channels(source))
     cmd += metadata_args(config.metadata, source, _first_streams(source, config.mute))
     cmd += ["-threads", str(threads), *OUTPUT_FLAGS, "-f", _MUXERS[config.container], file_arg(output_path)]
@@ -722,7 +802,7 @@ def trim(
     """
     limits = resolve_limits(limits)
     limits.check(config)
-    info = _probe_video(input_path)
+    info = _probe_video(input_path, limits)
     assert info.duration is not None
     _check_start(config.start_seconds, info.duration)
     copy = isinstance(config, CopyTrimConfig)
@@ -732,6 +812,16 @@ def trim(
     start = config.start_seconds
     if copy and start > 0 and not _frames_after(input_path, start, ffmpeg, copied=True):
         raise _after_last_frame(start, "cut")
+    index = None
+    decode_from = None
+    names = info.container_names
+    if not copy or names & (FORWARD_SEEKING | SHOWN_SEEKING):
+        index = _start_index(input_path, info, start, limits)
+    if index is not None:
+        if copy:
+            decode_from = index.copy_from(start, at_shown=not names & FORWARD_SEEKING)
+        else:
+            decode_from = index.start_for(start)
     threads = 1 if copy else resolve_max_workers(max_workers)
     _log_opus_cap(config, info)
     subtitles = [stream.codec for stream in info.streams if stream.type == "subtitle"]
@@ -746,6 +836,7 @@ def trim(
             subtitles=subtitles,
             limits=limits,
             source=info,
+            decode_from=decode_from,
         )
         if copy:
             run_ffmpeg(cmd)
@@ -754,7 +845,7 @@ def trim(
             expected = min(config.length or remaining, remaining)
             run_ffmpeg(cmd, progress_total=expected, on_progress=on_progress, stage="encoding")
         if start > 0:
-            _require_video(temp, input_path, start, ffmpeg, "cut")
+            _require_video(temp, input_path, start, ffmpeg, "cut", None if copy else index)
     if on_progress:
         on_progress(1.0, "done")
 
@@ -829,7 +920,7 @@ def transform(
     raises MediaTooLongError.
     """
     threads = resolve_max_workers(max_workers)
-    info = _probe_video(input_path)
+    info = _probe_video(input_path, limits)
     assert info.duration is not None
     _log_opus_cap(config, info)
     with atomic_output(output_path, scratch_dir) as temp:

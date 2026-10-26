@@ -226,3 +226,7 @@ docs/FILESUSHI_HANDBACK.md
 
 # Local test media: synthetic noise and Xiph derf clips (not redistributable here)
 /data/
+
+# Benchmark runs: each machine's latest.json and LATEST.md repeat its newest dated report
+scripts/bench/results/*/latest.json
+scripts/bench/results/*/LATEST.md

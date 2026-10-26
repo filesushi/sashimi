@@ -73,7 +73,7 @@ def test_whole_file_stops_just_past_the_probed_length():
         "-protocol_whitelist",
         "file",
         "-format_whitelist",
-        "3g2,3gp,aac,asf,avi,flac,flv,gif,m4a,matroska,mj2,mov,mp3,mp4,mpeg,mpegts,ogg,wav,webm",
+        "3g2,3gp,aac,ac3,aiff,amr,amrnb,amrwb,asf,au,avi,caf,dts,eac3,flac,flv,gif,m4a,matroska,mj2,mov,mp3,mp4,mpeg,mpegts,ogg,wav,webm,wv,yuv4mpegpipe",
     ]
 
 
@@ -102,7 +102,7 @@ def test_audio_length_limit():
     with pytest.raises(MediaTooLongError) as e:
         build("mp3", duration=3601.0, limits=FILESUSHI)
     assert e.value.user_message == (
-        "Audio longer than 60 minutes isn't supported yet. Set a shorter duration to convert part of it."
+        "This audio is 1 hour 1 second long, and the limit is 60 minutes. Set a shorter duration to convert part of it."
     )
     assert e.value.limit == "max_audio_seconds"
     build("mp3", duration=7200.0, duration_seconds=3600, limits=FILESUSHI)

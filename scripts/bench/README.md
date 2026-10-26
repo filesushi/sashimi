@@ -13,10 +13,16 @@ Saved benchmark reports are grouped by machine under `scripts/bench/results/<mac
 `scripts/bench/run.py` auto-detects these three machines from `/proc/cpuinfo`, DMI product name, and kernel release, or takes `--machine <slug>` / `SASHIMI_BENCH_MACHINE=<slug>`.
 
 Each run writes:
-- `scripts/bench/results/<machine>/<YYYY-MM-DD>_sashimi-<version>[_<tag>].json` (and `.md`)
-- `scripts/bench/results/<machine>/latest.json` (and `LATEST.md`)
+- `scripts/bench/results/<machine>/<YYYY-MM-DD>_sashimi-<version>[_<tag>].json` (and `.md`), dated by the day the run started (UTC)
+- `scripts/bench/results/<machine>/latest.json` (and `LATEST.md`), a copy of the newest report for local comparisons; git ignores these copies, so commit the dated report
 
-**Live checkpointing & resume:** Reports are atomically checkpointed to disk after every single benchmark case (`"status": "running"` → `"completed"`). If a run is interrupted, re-running with `--resume` loads all completed cases from the report and continues from where it stopped.
+The first baseline, `wsl2-desktop-ryzen3600/2026-10-25_sashimi-0.6.1.*`, is labelled 0.6.1: that was the pre-release name of what became 0.7.0, and the file keeps the label of what ran.
+
+**Live checkpointing & resume:** Reports are atomically checkpointed to disk after every single benchmark case (`"status": "running"` → `"completed"`). If a run is interrupted, re-running with `--resume` continues this machine's newest dated report for the same sashimi version and tag, whatever day it was started on: it keeps that report's environment block (start time, start load) and runs only the cases it doesn't have. It warns when Python, Pillow, FFmpeg, the git commit or the default workers differ from the run it continues.
+
+**Platforms:** CPU time and peak memory come from Python's `resource` module (Linux, macOS, WSL2). On Windows, which has no `resource` module, the harness still runs and records wall time and outputs, with CPU time and peak memory as unavailable (`null` in JSON, `n/a` in the tables).
+
+The results are not in the sdist (`pyproject.toml` excludes `scripts/bench/results/`); the harness and its tests are. `--rebuild-missing` downloads the Xiph clips from media.xiph.org with a generic User-Agent; nothing else uses the network.
 
 ## Commands
 
@@ -53,7 +59,7 @@ uv run python scripts/bench/run.py --compare \
 
 | Suite | Cases | What it measures |
 |---|---:|---|
-| `probe` | 44 | `sashimi.probe` & `sashimi.metadata.read` on all 20 files + `probe-unfinalized-mkv` streaming packet-scan (0.6.1) on 8–300 MB unfinalized captures |
+| `probe` | 44 | `sashimi.probe` & `sashimi.metadata.read` on all 20 files + `probe-unfinalized-mkv` streaming packet-scan (0.7.0) on 8–300 MB unfinalized captures |
 | `sheets` | 21 | Static (`jpeg`, `webp`, `png` at 2560px) and animated (`webp`, `gif` at 1280px 3×3) contact sheets |
 | `preview` | 12 | `preview-gif` (two-pass), `preview-webp`, and `preview-webp-9x16` (5×2s clips @ 15 fps, 360p) |
 | `gif-methods` | 24 | 6 `palette_mode` (`diff`, `full`, `single`) × `dither` (`bayer`, `sierra2_4a`, `floyd_steinberg`, `none`) combinations across easy, foliage, water, and pure noise |

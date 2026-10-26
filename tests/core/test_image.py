@@ -133,7 +133,7 @@ def test_oversized_images_are_refused(tmp_path):
     with pytest.raises(MediaTooLargeError) as e:
         image.convert(src, tmp_path / "r", PngImageConfig(), limits=Limits(max_pixels=5_000_000))
     assert e.value.user_message == (
-        "This image is too large to process: it has 6 megapixels (3000x2000), and the limit is 5."
+        "This image is too large to process: it has 6 megapixels (3000x2000), and the limit is 5 megapixels."
     )
     assert e.value.limit == "max_pixels"
     for call in (image.to_ico, image.favicon_pack):
@@ -158,11 +158,11 @@ def test_limits_above_pillows_own_are_honoured(tmp_path):
         image.frames_info(huge)
     assert e.value.limit == "max_pixels"
     assert e.value.user_message == (
-        "This image is too large to process: it has more than 179 megapixels, and the limit is 64."
+        "This image is too large to process: it has more than 179 megapixels, and the limit is 64 megapixels."
     )
     with pytest.raises(MediaTooLargeError) as e:
         image.frames_info(huge, limits=Limits(max_pixels=300_000_000))
-    assert "it has 400 megapixels (20000x20000), and the limit is 300." in e.value.user_message
+    assert "it has 400 megapixels (20000x20000), and the limit is 300 megapixels." in e.value.user_message
     assert image.frames_info(huge, limits=Limits(max_pixels=None)).width == 20000
     assert image.frames_info(huge, limits=Limits(max_pixels=400_000_000)).height == 20000
     assert Image.MAX_IMAGE_PIXELS == before

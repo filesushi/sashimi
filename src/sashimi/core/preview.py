@@ -20,6 +20,7 @@ from sashimi.core._ffmpeg import (
     fmt_seconds,
     run_ffmpeg,
     stream_ffmpeg,
+    stream_timed_frames,
 )
 from sashimi.core._palette import (
     PALETTE_SHARE,
@@ -31,6 +32,15 @@ from sashimi.core._palette import (
     scaled,
 )
 from sashimi.core._resources import resolve_max_workers
+from sashimi.core._seek import (
+    VideoIndex,
+    build_pass_command,
+    clip_frames,
+    clip_route,
+    decoding_args,
+    video_index,
+    with_filter,
+)
 from sashimi.core.sheets._layout import sample_window
 from sashimi.core.video import _probe_video
 from sashimi.errors import (
@@ -121,6 +131,7 @@ def build_preview_commands(
     ffmpeg: str = "ffmpeg",
     limits: Limits | None = None,
     palette: bytes | None = None,
+    index: VideoIndex | None = None,
 ) -> tuple[list[list[str]], list[str]]:
     """
     Builds the ffmpeg commands for :func:`preview`: one per clip, then the encoder. Pure.
@@ -135,6 +146,10 @@ def build_preview_commands(
     same frames: a GIF's encoder then reads it as a second input. Without it, a GIF's encoder
     builds the palette itself, which holds every frame in memory until the end; the GIF is
     byte-identical either way. A WebP ignores it.
+
+    `index` is the video's keyframe index (:func:`sashimi.core._seek.video_index`): each clip then
+    decodes from just before the keyframe its start needs and drops the frames before the start.
+    Without it, ffmpeg seeks by itself (``-ss start``).
     """
     limits = resolve_limits(limits)
     limits.check(config)
@@ -149,9 +164,22 @@ def build_preview_commands(
     clip_commands = []
     for start, length in clips:
         cmd = [ffmpeg, *base_args(1), *INPUT_PROTOCOLS, "-threads", "1"]
-        if start > 0:
-            cmd += ["-ss", fmt_seconds(start)]
-        cmd += ["-t", fmt_seconds(length), "-i", file_arg(input_path), "-map", "0:V:0", "-vf", vf]
+        clip_vf = vf
+        if index is None:
+            if start > 0:
+                cmd += ["-ss", fmt_seconds(start)]
+            cmd += ["-t", fmt_seconds(length)]
+        else:
+            begin = index.start_for(start)
+            if begin is None:
+                if start > 0:
+                    cmd += ["-ss", fmt_seconds(start)]
+                cmd += ["-t", fmt_seconds(length)]
+            else:
+                decoding = decoding_args(begin, start, length)
+                cmd += decoding.inputs
+                clip_vf = with_filter(decoding.video, vf)
+        cmd += ["-i", file_arg(input_path), "-map", "0:V:0", "-vf", clip_vf]
         cmd += ["-frames:v", str(_frames(length, config.fps)), "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
         clip_commands.append(cmd)
 
@@ -218,7 +246,7 @@ def preview(
     limits = resolve_limits(limits)
     limits.check(config)
     threads = resolve_max_workers(max_workers)
-    info = _probe_video(input_path)
+    info = _probe_video(input_path, limits)
     assert info.duration is not None
     height = max(info.height or 0, 2)
     width = max(round(height * info.display_aspect_ratio) if info.display_aspect_ratio else info.width or 0, 2)
@@ -226,9 +254,18 @@ def preview(
     frame_bytes = out_w * out_h * 3
     ffmpeg = ffmpeg_binary()
     sent = 0
+    planned = plan_preview(
+        info.duration, config.samples, config.sample_duration, config.start_offset_percent, config.end_offset_percent
+    )
+    index = video_index(input_path, info, planned[-1][0] + planned[-1][1], limits)
+    one_pass = clip_route(index, planned) == "pass"
 
     def frames(clip_commands: list[list[str]]) -> Iterator[bytes]:
         nonlocal sent
+        if one_pass:
+            assert index is not None
+            yield from passed(index)
+            return
         for cmd in clip_commands:
             try:
                 for chunk in stream_ffmpeg(cmd, frame_bytes):
@@ -239,6 +276,27 @@ def preview(
                 raise
             except ProcessingError as e:
                 logger.debug(f"Preview clip failed: {e}")
+
+    def passed(index: VideoIndex) -> Iterator[bytes]:
+        nonlocal sent
+        start = index.decode_from(planned[0][0])
+        windows = [(begin, begin + length) for begin, length in planned]
+        (scale_w, scale_h) = preview_size(width, height, config)[0]
+        vf = f"scale={scale_w}:{scale_h}:flags=lanczos,setsar=1"
+        if (scale_w, scale_h) != (out_w, out_h):
+            vf += f",crop={out_w}:{out_h}"
+        cmd = build_pass_command(input_path, windows, vf, threads, ffmpeg, decode_from=start)
+        timed = stream_timed_frames(cmd, frame_bytes)
+        try:
+            for _, frame in clip_frames(((time + start, data) for time, data in timed), planned, config.fps):
+                sent += 1
+                yield frame
+        except BinaryNotFoundError:
+            raise
+        except ProcessingError as e:
+            logger.debug(f"Preview pass failed: {e}")
+        finally:
+            timed.close()
 
     def build(output: PathLike, palette: bytes | None) -> tuple[list[list[str]], list[str]]:
         return build_preview_commands(
@@ -252,6 +310,7 @@ def preview(
             ffmpeg=ffmpeg,
             limits=limits,
             palette=palette,
+            index=index,
         )
 
     def run(cmd: list[str], clip_commands: list[list[str]], **kwargs: Any) -> bytes:

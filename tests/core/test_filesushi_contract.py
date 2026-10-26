@@ -154,6 +154,7 @@ FILESUSHI = {
     "max_frame_bytes": 400 * 1024 * 1024,
     "max_animation_bytes": 256 * 1024 * 1024,
     "max_sheet_pixels": 64_000_000,
+    "max_scan_packets": 1_000_000,
 }
 """The limits the hand-back tells FileSushi to pass, so that it accepts what it accepted before."""
 
@@ -169,6 +170,7 @@ def test_limits_filesushi_passes():
     assert (defaults.max_frame_bytes, defaults.max_animation_bytes) == (2**30, 2**30)
     assert [defaults.max_video_seconds, defaults.max_audio_seconds, defaults.max_gif_seconds] == [None] * 3
     assert defaults.max_preview_clips is None
+    assert defaults.max_scan_packets == 2_000_000
     with pytest.raises(ValidationError):
         limits.max_pixels = 1
 

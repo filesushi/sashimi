@@ -28,7 +28,7 @@ from sashimi.video import (
 )
 
 COMMON = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-filter_threads", "2"]
-FORMATS = "3g2,3gp,aac,asf,avi,flac,flv,gif,m4a,matroska,mj2,mov,mp3,mp4,mpeg,mpegts,ogg,wav,webm"
+FORMATS = "3g2,3gp,aac,ac3,aiff,amr,amrnb,amrwb,asf,au,avi,caf,dts,eac3,flac,flv,gif,m4a,matroska,mj2,mov,mp3,mp4,mpeg,mpegts,ogg,wav,webm,wv,yuv4mpegpipe"
 FRAME_PROGRESS = (
     "metadata=mode=add:key=sashimi_progress:value=1,metadata=mode=print:key=sashimi_progress:file=pipe\\\\:2:direct=1"
 )
@@ -195,7 +195,8 @@ def test_video_length_limit(target):
     with pytest.raises(MediaTooLongError) as e:
         build(target, duration=601.0, limits=FILESUSHI)
     assert e.value.user_message == (
-        "Videos longer than 10 minutes aren't supported yet. Set a shorter duration to convert part of it."
+        "This video is 10 minutes 1 second long, and the limit is 10 minutes. Set a shorter duration to convert "
+        "part of it."
     )
     assert e.value.limit == "max_video_seconds"
     build(target, duration=3600.0, duration_seconds=600, limits=FILESUSHI)
@@ -206,7 +207,10 @@ def test_video_length_limit(target):
     assert e.value.user_message == "Video clips can be at most 10 minutes long."
     with pytest.raises(MediaTooLongError) as e:
         build(target, duration=7201.0, limits=Limits(max_video_seconds=7200))
-    assert e.value.user_message.startswith("Videos longer than 2 hours aren't supported yet.")
+    assert e.value.user_message.startswith("This video is 2 hours 1 second long, and the limit is 2 hours.")
+    with pytest.raises(MediaTooLongError) as e:
+        build(target, duration=900.0, start_seconds=200, limits=FILESUSHI)
+    assert e.value.user_message.startswith("From 200s, this video runs 11 minutes 40 seconds, and the limit is")
 
 
 @pytest.mark.parametrize("target", ["webm", "mp4"])

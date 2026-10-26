@@ -113,7 +113,7 @@ def too_large_image(width: int, height: int, limit: int) -> MediaTooLargeError:
     """The refusal of an image over ``Limits.max_pixels``."""
     return MediaTooLargeError(
         f"This image is too large to process: it has {megapixels(width * height)} megapixels ({width}x{height}), "
-        f"and the limit is {megapixels(limit)}.",
+        f"and the limit is {megapixels(limit)} megapixels.",
         detail=f"{width}x{height}",
         limit="max_pixels",
     )
@@ -138,7 +138,7 @@ def _open_image(input_path: PathLike, limits: Limits | None, *, load: bool = Tru
             raise MediaTooLargeError(TOO_LARGE_IMAGE, detail=str(e)) from e
         raise MediaTooLargeError(
             f"This image is too large to process: it has more than {megapixels(2 * pillow_limit)} megapixels, "
-            f"and the limit is {megapixels(max_pixels)}.",
+            f"and the limit is {megapixels(max_pixels)} megapixels.",
             detail=str(e),
             limit="max_pixels",
         ) from e

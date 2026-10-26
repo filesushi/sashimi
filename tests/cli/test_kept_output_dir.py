@@ -68,7 +68,7 @@ def isolated(tmp_path, monkeypatch):
     ):
         monkeypatch.setattr(importlib.import_module(module), name, made)
     extract = importlib.import_module("sashimi.api.extract")
-    monkeypatch.setattr(extract, "_clip_message", lambda config, source, output: "Extracted to {name}")
+    monkeypatch.setattr(extract, "_clip_message", lambda *args: "Extracted to {name}")
     yield
     settings.load_raw_config.cache_clear()
 

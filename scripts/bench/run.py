@@ -24,7 +24,7 @@ import fnmatch
 import json
 import os
 import platform
-import resource
+import re
 import subprocess
 import sys
 import tempfile
@@ -35,6 +35,11 @@ from typing import Any
 from PIL import Image
 
 import sashimi
+
+try:
+    import resource
+except ImportError:
+    resource = None  # type: ignore[assignment]
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 if str(ROOT) not in sys.path:
@@ -61,6 +66,34 @@ KNOWN_MACHINES = (
     "ubuntu-laptop-xps13",
     "ubuntu-server-xeon",
 )
+MAXRSS_BYTES = 1 if sys.platform == "darwin" else 1024
+"""Bytes per unit of ``ru_maxrss``: bytes on macOS, kilobytes on Linux and the BSDs."""
+
+
+def rusage() -> tuple[float, float, float, float] | None:
+    """
+    User and system CPU seconds of this process and its finished children together, and the peak
+    resident memory of this process and of its largest child, in MiB; None where the ``resource``
+    module doesn't exist (Windows), whose results then record CPU time and memory as unavailable.
+    """
+    if resource is None:
+        return None
+    me = resource.getrusage(resource.RUSAGE_SELF)
+    children = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return (
+        me.ru_utime + children.ru_utime,
+        me.ru_stime + children.ru_stime,
+        me.ru_maxrss * MAXRSS_BYTES / (1024 * 1024),
+        children.ru_maxrss * MAXRSS_BYTES / (1024 * 1024),
+    )
+
+
+def _shown(value: float | None, spec: str) -> str:
+    return "n/a" if value is None else format(value, spec)
+
+
+def _with_unit(value: float | None, spec: str, unit: str) -> str:
+    return "n/a" if value is None else format(value, spec) + unit
 
 
 def _cpu_model() -> str:
@@ -209,8 +242,7 @@ def run_worker_child(task_name: str, input_path: Path, workers: int) -> int:
             return 1
 
         out_path = scratch / f"result.{task.ext}"
-        r_self_before = resource.getrusage(resource.RUSAGE_SELF)
-        r_child_before = resource.getrusage(resource.RUSAGE_CHILDREN)
+        before = rusage()
         t0 = time.perf_counter()
         try:
             returned = task.run(actual_input, out_path, workers)
@@ -229,17 +261,16 @@ def run_worker_child(task_name: str, input_path: Path, workers: int) -> int:
             )
             return 1
 
-        r_self_after = resource.getrusage(resource.RUSAGE_SELF)
-        r_child_after = resource.getrusage(resource.RUSAGE_CHILDREN)
-
-        user_s = (r_self_after.ru_utime - r_self_before.ru_utime) + (r_child_after.ru_utime - r_child_before.ru_utime)
-        sys_s = (r_self_after.ru_stime - r_self_before.ru_stime) + (r_child_after.ru_stime - r_child_before.ru_stime)
-        cpu_s = user_s + sys_s
-
-        python_rss_mb = round(r_self_after.ru_maxrss / 1024.0, 1)
-        child_rss_mb = round(r_child_after.ru_maxrss / 1024.0, 1)
-        peak_rss_mb = round(max(python_rss_mb, child_rss_mb), 1)
-        combined_rss_mb = round(python_rss_mb + child_rss_mb, 1)
+        after = rusage()
+        user_s = sys_s = cpu_s = python_rss_mb = child_rss_mb = peak_rss_mb = combined_rss_mb = None
+        if before is not None and after is not None:
+            user_s = round(after[0] - before[0], 4)
+            sys_s = round(after[1] - before[1], 4)
+            cpu_s = round(user_s + sys_s, 4)
+            python_rss_mb = round(after[2], 1)
+            child_rss_mb = round(after[3], 1)
+            peak_rss_mb = round(max(python_rss_mb, child_rss_mb), 1)
+            combined_rss_mb = round(python_rss_mb + child_rss_mb, 1)
 
         out_bytes = out_path.stat().st_size
         out_sha256 = sha256_file(out_path)
@@ -248,10 +279,10 @@ def run_worker_child(task_name: str, input_path: Path, workers: int) -> int:
         payload: dict[str, Any] = {
             "ok": True,
             "wall_s": round(wall_s, 4),
-            "cpu_user_s": round(user_s, 4),
-            "cpu_sys_s": round(sys_s, 4),
-            "cpu_total_s": round(cpu_s, 4),
-            "cpu_efficiency": round(cpu_s / wall_s, 2) if wall_s > 0 else 0.0,
+            "cpu_user_s": user_s,
+            "cpu_sys_s": sys_s,
+            "cpu_total_s": cpu_s,
+            "cpu_efficiency": None if cpu_s is None else round(cpu_s / wall_s, 2) if wall_s > 0 else 0.0,
             "python_rss_mb": python_rss_mb,
             "child_rss_mb": child_rss_mb,
             "peak_rss_mb": peak_rss_mb,
@@ -342,7 +373,7 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         f"| **Python / Pillow** | `{env['python_version']}` / `{env['pillow_version']}` |",
         f"| **Default `max_workers`** | `{env['default_workers']}` |",
         f"| **Host load avg (start → end)** | `{env['load_avg_start']}` → `{env.get('load_avg_end', env['load_avg_start'])}` |",
-        f"| **Total cases** | {summary['passed']}/{summary['total']} passed in {summary['total_wall_s']:.1f}s wall ({summary['total_cpu_s']:.1f}s CPU) |",
+        f"| **Total cases** | {summary['passed']}/{summary['total']} passed in {summary['total_wall_s']:.1f}s wall ({_with_unit(summary.get('total_cpu_s'), '.1f', 's')} CPU) |",
         "",
     ]
 
@@ -371,8 +402,9 @@ def render_markdown_report(report: dict[str, Any]) -> str:
             route_note = f" [{r['route']}]" if "route" in r else ""
             lines.append(
                 f"| `{r['task']}` | `{r['clip']}` | `{r['input_codec']}` | {r['workers']} | "
-                f"{r['wall_s']:.2f} | {r['cpu_total_s']:.2f} | {r['cpu_efficiency']:.2f}x | "
-                f"{r['peak_rss_mb']:.1f} | {format_bytes(r['output_bytes'])} | "
+                f"{r['wall_s']:.2f} | {_shown(r.get('cpu_total_s'), '.2f')} | "
+                f"{_shown(r.get('cpu_efficiency'), '.2f')}{'' if r.get('cpu_efficiency') is None else 'x'} | {_shown(r.get('peak_rss_mb'), '.1f')} | "
+                f"{format_bytes(r['output_bytes'])} | "
                 f"{r['output_summary']}{route_note} |"
             )
         lines.append("")
@@ -409,8 +441,9 @@ def compare_reports(path_a: Path, path_b: Path) -> str:
         same_hash = "yes" if a.get("output_sha256") == b.get("output_sha256") else "DIFF"
         lines.append(
             f"| `{a['suite']}` | `{a['task']}` | `{a['clip']} ({a['input_codec']})` | {a['workers']} | "
-            f"{wa:.2f} | {wb:.2f} | {pct:+.1f}% | {a['cpu_total_s']:.2f} | {b['cpu_total_s']:.2f} | "
-            f"{a['peak_rss_mb']:.0f} / {b['peak_rss_mb']:.0f} | {same_hash} |"
+            f"{wa:.2f} | {wb:.2f} | {pct:+.1f}% | {_shown(a.get('cpu_total_s'), '.2f')} | "
+            f"{_shown(b.get('cpu_total_s'), '.2f')} | "
+            f"{_shown(a.get('peak_rss_mb'), '.0f')} / {_shown(b.get('peak_rss_mb'), '.0f')} | {same_hash} |"
         )
     return "\n".join(lines)
 
@@ -432,6 +465,33 @@ def report_paths(
     suffix = f"_{tag}" if tag else ""
     stem = f"{date_str}_sashimi-{version}{suffix}"
     return machine_dir / f"{stem}.json", machine_dir / f"{stem}.md"
+
+
+RESUME_MUST_MATCH = ("python_version", "pillow_version", "ffmpeg_version", "git", "default_workers")
+"""Environment fields a resumed run should share with the run it continues; a difference is warned about."""
+
+
+def shown_path(path: Path) -> str:
+    """`path` relative to the repository when it is inside it, else as given."""
+    try:
+        return str(path.resolve().relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def resume_target(machine_id: str, version: str, results_dir: Path, tag: str | None = None) -> Path | None:
+    """
+    The saved report ``--resume`` continues: this machine's newest dated report for `version` and
+    `tag`, whatever day it was started on (a run started before midnight UTC and resumed after it
+    continues the same file), or None when there is none.
+    """
+    suffix = f"_{tag}" if tag else ""
+    machine_dir = results_dir / machine_id
+    if not machine_dir.is_dir():
+        return None
+    pattern = re.compile(r"\d{4}-\d{2}-\d{2}" + re.escape(f"_sashimi-{version}{suffix}.json"))
+    found = sorted(path for path in machine_dir.iterdir() if pattern.fullmatch(path.name))
+    return found[-1] if found else None
 
 
 def save_report(report: dict[str, Any], results_dir: Path, tag: str | None = None) -> tuple[Path, Path]:
@@ -637,14 +697,20 @@ def main(argv: list[str] | None = None) -> int:
 
     cache: dict[tuple[str, str, int], dict[str, Any]] = {}
     prior_wall = 0.0
-    if args.resume and target_json.is_file():
-        prior = json.loads(target_json.read_text(encoding="utf-8"))
+    resumed = resume_target(machine_id, env["sashimi_version"], args.results_dir, args.tag) if args.resume else None
+    if resumed is not None:
+        prior = json.loads(resumed.read_text(encoding="utf-8"))
+        changed = [key for key in RESUME_MUST_MATCH if prior["environment"].get(key) != env.get(key)]
+        if changed:
+            print(f"Warning: resuming a run made with a different {', '.join(changed)}.", file=sys.stderr)
+        env = prior["environment"]
+        target_json = resumed
         prior_wall = float(prior.get("summary", {}).get("total_wall_s", 0.0))
         for prev in prior.get("results", []):
             if prev.get("ok"):
                 cache[(prev["task"], prev["rel_path"], prev["workers"])] = prev
         print(
-            f"Resuming from {target_json.relative_to(ROOT)} ({len(cache)} unique completed case(s) loaded).",
+            f"Resuming from {shown_path(resumed)} ({len(cache)} unique completed case(s) loaded).",
             file=sys.stderr,
         )
 
@@ -655,7 +721,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if not args.no_save:
         print(
-            f"Live checkpointing after every case to: {target_json.relative_to(ROOT)}",
+            f"Live checkpointing after every case to: {shown_path(target_json)}",
             file=sys.stderr,
         )
 
@@ -665,7 +731,11 @@ def main(argv: list[str] | None = None) -> int:
 
     def _build_report(status: str) -> dict[str, Any]:
         elapsed = round(prior_wall + (time.perf_counter() - t_start), 2)
-        total_cpu = round(sum(r.get("cpu_total_s", 0.0) for r in results if r.get("ok") and not r.get("reused")), 2)
+        total_cpu = (
+            None
+            if resource is None
+            else round(sum(r.get("cpu_total_s") or 0.0 for r in results if r.get("ok") and not r.get("reused")), 2)
+        )
         passed_now = sum(1 for r in results if r.get("ok"))
         load_now = os.getloadavg() if hasattr(os, "getloadavg") else (0.0, 0.0, 0.0)
         env["load_avg_end"] = [round(x, 2) for x in load_now]
@@ -695,7 +765,7 @@ def main(argv: list[str] | None = None) -> int:
             label = "reused" if is_duplicate_in_run else "resumed"
             print(
                 f"[{idx:3d}/{len(cases):3d}] {case.suite}/{case.task_name} on {rec['clip']} ({rec['input_codec']}, w={case.workers}): "
-                f"{label} (wall={rec['wall_s']:.2f}s cpu={rec['cpu_total_s']:.2f}s)",
+                f"{label} (wall={rec['wall_s']:.2f}s cpu={_with_unit(rec.get('cpu_total_s'), '.2f', 's')})",
                 file=sys.stderr,
             )
             if not args.no_save and not is_duplicate_in_run:
@@ -709,7 +779,8 @@ def main(argv: list[str] | None = None) -> int:
         if rec.get("ok"):
             print(
                 f"[{idx:3d}/{len(cases):3d}] {case.suite}/{case.task_name} on {rec['clip']} ({rec['input_codec']}, w={case.workers}): "
-                f"wall={rec['wall_s']:.2f}s cpu={rec['cpu_total_s']:.2f}s rss={rec['peak_rss_mb']:.1f}MB "
+                f"wall={rec['wall_s']:.2f}s cpu={_with_unit(rec.get('cpu_total_s'), '.2f', 's')} "
+                f"rss={_with_unit(rec.get('peak_rss_mb'), '.1f', 'MB')} "
                 f"size={format_bytes(rec['output_bytes'])}",
                 file=sys.stderr,
             )
@@ -726,8 +797,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.no_save:
         json_path, md_path = save_report(report, args.results_dir, tag=args.tag)
-        print(f"\nSaved JSON report:     {json_path.relative_to(ROOT)}", file=sys.stderr)
-        print(f"Saved Markdown report: {md_path.relative_to(ROOT)}", file=sys.stderr)
+        print(f"\nSaved JSON report:     {shown_path(json_path)}", file=sys.stderr)
+        print(f"Saved Markdown report: {shown_path(md_path)}", file=sys.stderr)
 
     print(render_markdown_report(report))
     return 0 if passed == len(results) else 1

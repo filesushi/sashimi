@@ -211,7 +211,7 @@ TASKS: dict[str, TaskSpec] = {
             name="probe-unfinalized-mkv",
             category="probe",
             ext="json",
-            description="Streaming packet-scan duration fallback on unfinalized MKV (sashimi.probe 0.6.1)",
+            description="Streaming packet-scan duration fallback on unfinalized MKV (sashimi.probe 0.7.0)",
             run=_probe_task,
             setup=_setup_unfinalized_mkv,
         ),

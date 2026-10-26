@@ -14,7 +14,7 @@ from sashimi.config import (
     OggAudioConfig,
     WavAudioConfig,
 )
-from sashimi.config._limits import duration_text, resolve_limits
+from sashimi.config._limits import resolve_limits, too_long_text
 from sashimi.core._atomic import PathLike, atomic_output
 from sashimi.core._ffmpeg import (
     INPUT_PROTOCOLS,
@@ -66,7 +66,7 @@ def _length(config: AudioConvertConfig, duration: float, kind: str, limit: float
         return config.duration_seconds
     if limit is not None and duration - config.start_seconds > limit:
         raise MediaTooLongError(
-            f"Audio longer than {duration_text(limit)} isn't supported yet. Set a shorter duration to convert part of it.",
+            too_long_text(kind, duration - config.start_seconds, config.start_seconds, limit),
             limit="max_audio_seconds",
         )
     rest = duration - config.start_seconds + DURATION_TOLERANCE_SECONDS
@@ -164,9 +164,11 @@ def output_channels(config: AudioConvertConfig, source: MediaInfo | None) -> int
     return source.audio_channels if source is not None else None
 
 
-def _probe_audio_source(input_path: PathLike) -> tuple[MediaInfo, Literal["audio", "video"]]:
+def _probe_audio_source(
+    input_path: PathLike, limits: Limits | None = None
+) -> tuple[MediaInfo, Literal["audio", "video"]]:
     try:
-        info = probe(input_path)
+        info = probe(input_path, limits=limits)
     except UnsupportedMediaError as e:
         raise UnsupportedMediaError(NOT_AUDIO, detail=e.detail) from e
     names = info.container_names
@@ -208,7 +210,7 @@ def convert(
     limits = resolve_limits(limits)
     limits.check(config)
     threads = resolve_max_workers(max_workers)
-    info, kind = _probe_audio_source(input_path)
+    info, kind = _probe_audio_source(input_path, limits)
     assert info.duration is not None
     _length(config, info.duration, kind, limits.max_audio_seconds)
     remaining = info.duration - config.start_seconds

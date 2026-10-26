@@ -6,12 +6,13 @@
 import collections
 import errno
 import os
+import queue
 import re
 import shlex
 import shutil
 import subprocess
 import threading
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
 from typing import IO, Literal
 
 from sashimi.errors import BinaryNotFoundError, ProcessingError
@@ -22,8 +23,12 @@ _configured: dict[str, str | None] = {"ffmpeg": None, "ffprobe": None}
 
 VIDEO_CONTAINERS = frozenset(
     {"matroska", "webm", "mov", "mp4", "m4a", "3gp", "3g2", "mj2", "avi", "asf", "mpeg", "mpegts", "flv", "gif"}
+    | {"ogg", "yuv4mpegpipe"}
 )
-AUDIO_CONTAINERS = frozenset({"mp3", "wav", "ogg", "flac", "aac", "matroska", "webm", "mov", "mp4", "m4a"})
+AUDIO_CONTAINERS = frozenset(
+    {"mp3", "wav", "ogg", "flac", "aac", "matroska", "webm", "mov", "mp4", "m4a"}
+    | {"aiff", "ac3", "eac3", "dts", "amr", "amrnb", "amrwb", "caf", "au", "wv", "asf"}
+)
 
 INPUT_PROTOCOLS = [
     "-protocol_whitelist",
@@ -142,7 +147,7 @@ def _feed(stream: IO[bytes], chunks: Iterable[bytes], errors: list[BaseException
                 errors.append(e)
 
 
-def stream_ffmpeg(cmd: list[str], chunk_size: int) -> Iterator[bytes]:
+def stream_ffmpeg(cmd: list[str], chunk_size: int) -> Generator[bytes, None, None]:
     """
     Runs an ffmpeg command and yields its stdout in chunks of `chunk_size` bytes (the last may be
     shorter), so a large output never sits in memory. Raises ProcessingError after the last chunk
@@ -274,3 +279,53 @@ def holds_packets(path: str | os.PathLike[str], kind: Literal["video", "audio"])
         raise
     except ProcessingError:
         return False
+
+
+def _frame_times(stream: IO[bytes], times: "queue.Queue[float | None]", sink: collections.deque) -> None:
+    try:
+        for line in iter(stream.readline, b""):
+            if frame := _FRAME_LINE.fullmatch(line.strip()):
+                times.put(float(frame.group(1)))
+            elif line.strip() != _FRAME_KEY_LINE:
+                sink.append(line)
+    finally:
+        times.put(None)
+
+
+def stream_timed_frames(cmd: list[str], frame_bytes: int) -> Generator[tuple[float, bytes], None, None]:
+    """
+    Runs an ffmpeg command whose graph ends in :data:`FRAME_PROGRESS` and writes raw frames of
+    `frame_bytes` to stdout, and yields each frame with its time (seconds, as the filter graph
+    saw it). Raises ProcessingError after the last frame if ffmpeg failed, and BinaryNotFoundError
+    if it can't be started. Closing the generator early kills the process.
+    """
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as e:
+        raise BinaryNotFoundError(f"Cannot run '{cmd[0]}': {e}") from e
+    assert proc.stdout is not None and proc.stderr is not None
+    stderr_tail: collections.deque = collections.deque(maxlen=40)
+    times: queue.Queue[float | None] = queue.Queue()
+    reader = threading.Thread(target=_frame_times, args=(proc.stderr, times, stderr_tail), daemon=True)
+    reader.start()
+    try:
+        while len(frame := proc.stdout.read(frame_bytes)) == frame_bytes:
+            time = times.get()
+            if time is None:
+                break
+            yield time, frame
+        proc.stdout.read()
+        proc.wait()
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        reader.join(timeout=5)
+        proc.stdout.close()
+        proc.stderr.close()
+    if proc.returncode != 0:
+        tail = b"".join(stderr_tail).decode("utf-8", "replace").strip()
+        raise ProcessingError(
+            f"{os.path.basename(cmd[0])} exited with code {proc.returncode}: {tail}\ncommand: {shlex.join(cmd)}"
+        )

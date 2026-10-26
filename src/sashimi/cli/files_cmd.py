@@ -20,6 +20,7 @@ from sashimi.cli._output import (
     display_path,
     err_console,
     fail,
+    refusal,
     print_json,
 )
 
@@ -225,7 +226,7 @@ def flatten_cmd(
     try:
         plan = plan_flatten(source_dir)
     except UserInputError as e:
-        fail(e.user_message, code=1)
+        fail(refusal(e), code=1)
     except SashimiError as e:
         fail(str(e).splitlines()[0], code=1)
     if not dry_run and not force and not yes:
@@ -278,6 +279,7 @@ def info_cmd(
     opt.exists_or_fail(path)
     opt.file_or_fail(path, "info")
     from sashimi import probe
+    from sashimi.cli import _limits
     from sashimi.config import Limits
     from sashimi.core.edit import frames_info
     from sashimi.core.sheets._render import format_duration, format_size
@@ -288,15 +290,15 @@ def info_cmd(
     except UnsupportedMediaError:
         image_info = None
     except UserInputError as e:
-        fail(e.user_message, code=1)
+        fail(refusal(e), code=1)
     if image_info is not None:
         _print_image_info(path, image_info, json_output, format_size(path.stat().st_size))
         return
 
     try:
-        info = probe(path)
+        info = probe(path, limits=_limits.resolve())
     except UserInputError as e:
-        fail(e.user_message, code=1)
+        fail(refusal(e), code=1)
     except SashimiError as e:
         fail(str(e).splitlines()[0], code=1)
 
