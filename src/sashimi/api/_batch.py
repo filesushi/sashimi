@@ -88,6 +88,7 @@ Planning and writing:
   ``error``, ``skipped``), from the plan alone, without opening any input.
 """
 
+import contextvars
 import functools
 import logging
 import os
@@ -95,12 +96,13 @@ import pathlib
 import secrets
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from sashimi.api._kinds import AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, count_text, kind_of, unsupported
 from sashimi.api._naming import NameRefused, NameTemplate, Naming, endings, length_problem
 from sashimi.api._outputs import own_outputs, path_key, rendered_names
 from sashimi.errors import InvalidOptionsError, MediaTooShortError, ProcessingError, UnsupportedMediaError
-from sashimi.errors import UserInputError
+from sashimi.errors import FFmpegPathError, UnsuitableFFmpegError, UserInputError
 
 __all__ = [
     "AUDIO_EXTENSIONS",
@@ -108,6 +110,8 @@ __all__ = [
     "VIDEO_EXTENSIONS",
     "Batch",
     "BatchPlan",
+    "Done",
+    "FileResult",
     "FolderClash",
     "PlannedFile",
     "run_batch",
@@ -126,13 +130,56 @@ Batch generators yield the number of files to process first, then any rejected i
 ``output`` is the file written (or that would have been), or ``None`` when there is none.
 """
 
+
+class FileResult(tuple[pathlib.Path, str, str, pathlib.Path | None]):
+    """
+    A result ``(path, status, message, output)`` (see :data:`YieldType`), which unpacks and
+    compares as that 4-tuple. A ``success`` that wrote a file also says what the output kept
+    of its input: ``fidelity`` (:class:`~sashimi.fidelity.Fidelity`), whose ``text`` ends the message.
+    ``fidelity`` is None for every other result, and for a dry run.
+    """
+
+    fidelity: Any
+
+    def __new__(
+        cls,
+        path: pathlib.Path,
+        status: str,
+        message: str,
+        output: pathlib.Path | None,
+        fidelity: Any = None,
+    ) -> "FileResult":
+        result = super().__new__(cls, (path, status, message, output))
+        result.fidelity = fidelity
+        return result
+
+
+@dataclass(frozen=True)
+class Done:
+    """What a batch function's `process` may return: its own success message, and what the output kept."""
+
+    message: str | None = None
+    """A success message, with ``{name}`` for the output, instead of the batch's own."""
+    fidelity: Any = None
+    """What the output kept (:class:`~sashimi.fidelity.Fidelity`)."""
+
+
 FileProgress = Callable[[pathlib.Path, float, str], None]
 """Per-file progress: ``(input_path, fraction, stage)``."""
-Process = Callable[[pathlib.Path, pathlib.Path, "Callable[[float, str], None] | None"], "str | None"]
+Process = Callable[[pathlib.Path, pathlib.Path, "Callable[[float, str], None] | None"], Any]
 """
 Makes one output: ``(input, output, on_progress)``. It may return a success message, in which
-``{name}`` stands for the output's file name, to use instead of the batch's own.
+``{name}`` stands for the output's file name, to use instead of the batch's own; a result with
+``.fidelity`` (what a core function returns); a :class:`Done` with both; or None.
 """
+
+
+def _done(returned: Any) -> Done:
+    if isinstance(returned, Done):
+        return returned
+    if isinstance(returned, str):
+        return Done(message=returned)
+    return Done(fidelity=getattr(returned, "fidelity", None))
 
 
 @dataclass(frozen=True)
@@ -287,11 +334,13 @@ def discover(
     extensions: Iterable[str],
     recursive: bool,
     reject_reason: Callable[[pathlib.Path], str] | None = None,
+    takes_named: Callable[[pathlib.Path], bool] | None = None,
 ) -> tuple[list[pathlib.Path], list[ResultTuple]]:
     """
     Expands paths into a sorted list of files with matching extensions, plus the rejected
     inputs. A file reached twice (named and found in a folder, or by two spellings) is listed once. `reject_reason` explains why an
-    explicitly named file was skipped (default "Unsupported file type").
+    explicitly named file was skipped (default "Unsupported file type"); `takes_named` accepts a
+    named file whose extension isn't among `extensions` (an HDR MP4 converted to MP4 is tone-mapped).
     """
     wanted = {ext.lower() for ext in extensions}
     files: dict[str, pathlib.Path] = {}
@@ -303,7 +352,7 @@ def discover(
             for candidate in path.rglob("*") if recursive else path.glob("*"):
                 if candidate.is_file() and candidate.suffix.lower() in wanted:
                     files.setdefault(os.path.abspath(candidate), candidate)
-        elif path.suffix.lower() in wanted:
+        elif path.suffix.lower() in wanted or (takes_named is not None and takes_named(path)):
             files.setdefault(os.path.abspath(path), path)
         else:
             rejected.append((path, "skipped", reject_reason(path) if reject_reason else "Unsupported file type", None))
@@ -311,12 +360,43 @@ def discover(
     return sorted(files.values()), rejected
 
 
+LIMIT_HINT: contextvars.ContextVar[Callable[[str], str | None] | None] = contextvars.ContextVar(
+    "sashimi_limit_hint", default=None
+)
+"""
+How the caller's users change a limit: called with the field name (``max_scan_packets``) of a
+refusal under a limit, it returns a sentence appended to the message, or None. The CLI sets it
+(``sashimi config set limits.…``); unset, messages are the core's own.
+"""
+
+
+FFMPEG_REFUSALS: contextvars.ContextVar[dict[str, None] | None] = contextvars.ContextVar(
+    "sashimi_ffmpeg_refusals", default=None
+)
+"""
+Where refusals of the FFmpeg in use (:class:`~sashimi.errors.UnsuitableFFmpegError`, and
+:class:`~sashimi.errors.FFmpegPathError` when it can't be run at all) gather, so a caller can say
+each once: set to a dict, each file's message is short and the full explanation is added as a
+key. The CLI sets it; unset, each file's message is the full explanation.
+"""
+FFMPEG_REFUSED = "Failed: the FFmpeg sashimi runs can't do this (see below)."
+FFMPEG_UNUSABLE = "Failed: sashimi can't run FFmpeg (see below)."
+
+
 def classify(error: Exception) -> tuple[str, str]:
     """Maps an exception to a batch status and message, by type."""
+    if isinstance(error, (UnsuitableFFmpegError, FFmpegPathError)):
+        gathered = FFMPEG_REFUSALS.get()
+        if gathered is not None:
+            gathered[str(error)] = None
+            return "error", FFMPEG_UNUSABLE if isinstance(error, FFmpegPathError) else FFMPEG_REFUSED
+        return "error", f"Failed: {error}"
     if isinstance(error, (UnsupportedMediaError, MediaTooShortError)):
         return "skipped", error.user_message
     if isinstance(error, UserInputError):
-        return "error", error.user_message
+        hint = LIMIT_HINT.get()
+        extra = hint(error.limit) if hint is not None and error.limit else None
+        return "error", f"{error.user_message} {extra}" if extra else error.user_message
     if isinstance(error, ProcessingError):
         return "error", f"Failed: {str(error).splitlines()[0]}"
     if isinstance(error, OSError):
@@ -627,9 +707,10 @@ def _plan(
     accepts: str,
     output: PathInput | None,
     output_dir: PathInput | None,
+    takes_named: Callable[[pathlib.Path], bool] | None = None,
 ) -> BatchPlan:
     sources = as_paths(paths)
-    files, rejected = discover(sources, extensions, recursive, reject_reason)
+    files, rejected = discover(sources, extensions, recursive, reject_reason, takes_named)
     done = tuple(path for path, status, _, _ in rejected if status == "skipped" and already and already(path))
     out_dir = pathlib.Path(output_dir) if output_dir is not None else None
     roots = [p for p in sources if p.is_dir()]
@@ -726,7 +807,7 @@ def _write(
     output: pathlib.Path,
     progress: "Callable[[float, str], None] | None",
     force: bool,
-) -> tuple[bool, str | None]:
+) -> tuple[bool, Done]:
     """
     Runs `process` into a staged file next to `output`, then moves it into place: over whatever
     is there with `force` (the input itself included), else only if `output` is still free.
@@ -735,11 +816,11 @@ def _write(
     """
     staged = output.with_name(f".sashimi-{secrets.token_hex(6)}.staged")
     try:
-        message = process(source, staged, progress)
+        done = _done(process(source, staged, progress))
         if force:
             os.replace(staged, output)
-            return True, message
-        return _publish(staged, output), message
+            return True, done
+        return _publish(staged, output), done
     finally:
         staged.unlink(missing_ok=True)
 
@@ -779,7 +860,7 @@ def _execute(
         progress = functools.partial(on_file_progress, source) if on_file_progress is not None else None
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            written, custom = _write(process, source, target, progress, force)
+            written, done = _write(process, source, target, progress, force)
         except Exception as e:
             logger.debug(f"{source}: {e!r}")
             status, message = classify(e)
@@ -788,10 +869,20 @@ def _execute(
             if not written:
                 yield (source, "exists", _exists_message(source, target, names, inputs, by_output), target)
                 continue
-            message = (custom if isinstance(custom, str) else success_message).format(name=where)
-            if existed:
-                message += f" (replaced {_replace_note(source, target)})"
-            yield (source, "success", message, target)
+            message = (done.message if done.message is not None else success_message).format(name=where)
+            notes = [f"replaced {_replace_note(source, target)}"] if existed else []
+            if done.fidelity is not None:
+                notes.append(done.fidelity.text)
+            if notes:
+                message = _with_fidelity(message, "; ".join(notes))
+            yield FileResult(source, "success", message, target, done.fidelity)
+
+
+def _with_fidelity(message: str, text: str) -> str:
+    """`message` with the fidelity statement after it: in brackets after a short message, else as its own sentence."""
+    if message.endswith("."):
+        return f"{message} {text[:1].upper()}{text[1:]}."
+    return f"{message} ({text})"
 
 
 def run_batch(
@@ -811,11 +902,12 @@ def run_batch(
     output: PathInput | None = None,
     output_dir: PathInput | None = None,
     dry_run: bool = False,
+    takes_named: Callable[[pathlib.Path], bool] | None = None,
 ) -> Batch:
     """
     Runs ``process(input, output, on_progress)`` over discovered files, naming outputs with
     `names` (see the module's policy). `accepts` says what the command takes ("videos"), for
-    files named directly that it doesn't, unless `reject_reason` explains them;
+    files named directly that it doesn't, unless `reject_reason` explains them, or `takes_named` takes them;
     `already` says which of those are already what the command makes
     (:attr:`BatchPlan.already_done`). `route` names the code each file goes through, so the plan can count them. `output` names the one output when
     exactly one file is found (InvalidOptionsError otherwise), and must end in an extension of the
@@ -845,6 +937,7 @@ def run_batch(
         accepts=accepts,
         output=output,
         output_dir=output_dir,
+        takes_named=takes_named,
     )
     executor = functools.partial(
         _execute,

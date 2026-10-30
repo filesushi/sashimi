@@ -47,7 +47,8 @@ EXPECTED = {
         "--height": "source height",
         "--start": d(C.Mp4VideoConfig, "start_seconds"),
         "--duration": f"to the end; GIF/WebP {d(C.GifVideoConfig, 'duration_seconds')}s",
-        "--quality": f"{d(C.JpegImageConfig, 'quality')}; animated WebP {d(C.WebpVideoConfig, 'quality')}",
+        "--quality": f"{d(C.JpegImageConfig, 'quality')}; AVIF {d(C.AvifImageConfig, 'quality')}; animated WebP "
+        f"{d(C.WebpVideoConfig, 'quality')}",
         "--background": f"{d(C.JpegImageConfig, 'background_color')}; ICO transparent",
         "--optimize": f"{on(C.JpegImageConfig, 'optimize')} for JPEG, {on(C.PngImageConfig, 'optimize')} for PNG/GIF",
         "--subsampling": d(C.JpegImageConfig, "jpeg_subsampling"),
@@ -72,12 +73,17 @@ EXPECTED = {
         ),
         "--sample-rate": "source",
         "--bit-depth": d(C.WavAudioConfig, "wav_bit_depth"),
+        "--animated": on(C.GifImageConfig, "animated"),
+        "--avif-speed": d(C.AvifImageConfig, "avif_speed"),
+        "--keep-hdr": "tone-map",
         "--flac-level": d(C.FlacAudioConfig, "flac_compression_level"),
     },
     "resize": {
         "--output-format": "same as input",
-        "--quality": d(C.JpegResizeConfig, "quality"),
+        "--quality": f"{d(C.JpegResizeConfig, 'quality')}; AVIF {d(C.AvifResizeConfig, 'quality')}",
         "--background": d(C.JpegImageConfig, "background_color"),
+        "--animated": on(C.GifResizeConfig, "animated"),
+        "--avif-speed": d(C.AvifResizeConfig, "avif_speed"),
     },
     "extract": {
         "--workers": "min(4, CPUs)",
@@ -118,9 +124,12 @@ EXPECTED["resize"].update(
         + ("--tiff-compression", "--resample")
     }
 )
-EXPECTED["rotate"] = {flag: EXPECTED["convert"][flag] for flag in ("--workers", "--crf", "--preset", "--audio-bitrate")}
-EXPECTED["rotate"]["--output-format"] = "images keep theirs, videos mp4"
+EXPECTED["rotate"] = {
+    flag: EXPECTED["convert"][flag] for flag in ("--workers", "--crf", "--preset", "--audio-bitrate", "--keep-hdr")
+}
+EXPECTED["rotate"]["--output-format"] = "images keep theirs, MOV videos mov (mp4 for Dolby Vision), other videos mp4"
 EXPECTED["rotate"]["--angle"] = "the last argument, or 90"
+EXPECTED["rotate"]["--reencode"] = "lossless where it can be"
 EXPECTED["convert"]["--output-format"] = "the last argument"
 EXPECTED["rotate"]["--quality"] = f"{d(C.JpegEditConfig, 'quality')}, high, since the image is re-encoded"
 P = C.WebpPreviewConfig
@@ -160,10 +169,12 @@ EXPECTED["edit"] = {
     "--output-format": "same as input",
     "--quality": f"{d(E, 'quality')}, high, since the image is re-encoded",
     "--webp-method": d(C.WebpEditConfig, "webp_method"),
+    "--avif-speed": d(C.AvifEditConfig, "avif_speed"),
     "--compress-level": d(C.PngEditConfig, "png_compress_level"),
     "--optimize": f"{on(E, 'optimize')} for JPEG, {on(C.PngEditConfig, 'optimize')} for PNG/GIF",
     "--subsampling": d(E, "jpeg_subsampling"),
     "--tiff-compression": d(C.TiffEditConfig, "tiff_compression"),
+    "--animated": on(C.PngEditConfig, "animated"),
 }
 EXPECTED["frames"] = {
     "--keep": "all",
@@ -172,6 +183,7 @@ EXPECTED["frames"] = {
     "--output-format": "same as input",
     "--quality": f"{d(C.WebpFramesConfig, 'quality')}, high, since the frames are re-encoded",
     "--webp-method": d(C.WebpFramesConfig, "webp_method"),
+    "--avif-speed": d(C.AvifFramesConfig, "avif_speed"),
     "--optimize": on(C.GifFramesConfig, "optimize"),
 }
 EXPECTED["remux"] = {"--output-format": "mkv, or from -o"}
@@ -190,19 +202,20 @@ LIMIT_NOTES = {
     "--max-sheet-pixels": format_limit("max_sheet_pixels", L.max_sheet_pixels),
 }
 for command, flags in {
-    "convert": ("--max-pixels",),
-    "resize": ("--max-pixels",),
+    "convert": ("--max-pixels", "--max-animation-bytes"),
+    "resize": ("--max-pixels", "--max-animation-bytes"),
     "favicon": ("--max-pixels",),
     "edit": ("--max-pixels", "--max-animation-bytes"),
     "rotate": ("--max-pixels", "--max-animation-bytes"),
     "frames": ("--max-pixels", "--max-animation-bytes"),
-    "strip": ("--max-pixels",),
     "thumbs": ("--max-sheet-pixels", "--max-frame-bytes"),
 }.items():
     EXPECTED[command].update({flag: LIMIT_NOTES[flag] for flag in flags})
 for notes in EXPECTED.values():
     notes["--output-dir"] = "next to each input"
-EXPECTED["extract"].update({flag: EXPECTED["rotate"][flag] for flag in ("--crf", "--preset", "--audio-bitrate")})
+EXPECTED["extract"].update(
+    {flag: EXPECTED["rotate"][flag] for flag in ("--crf", "--preset", "--audio-bitrate", "--keep-hdr")}
+)
 EXPECTED["convert"]["--speed"] = EXPECTED["rotate"]["--speed"] = EXPECTED["extract"]["--speed"] = d(
     C.WebmVideoConfig, "speed"
 )
@@ -269,7 +282,7 @@ def test_every_model_default_appears_in_the_help(command):
 
 def test_help_shows_the_defaults():
     output = runner.invoke(app, ["convert", "--help"], env={"COLUMNS": "200"}).output
-    assert "[default: 85; animated WebP 75]" in output
+    assert "[default: 85; AVIF 75; animated WebP 75]" in output
     assert "WebM 34, MP4 23" in output
 
 
@@ -300,11 +313,11 @@ def test_config_defaults_json_lists_every_field():
     result = runner.invoke(app, ["config", "defaults", "rotate", "--json"])
     report = json.loads(result.stdout)
     models = [section["model"] for section in report]
-    assert models[0] is None and models[-2:] == ["Mp4TransformConfig", "WebmTransformConfig"]
-    assert len(models) == 3 + len(config.IMAGE_EDIT.targets)
+    assert models[0] is None and models[-3:] == ["Mp4TransformConfig", "WebmTransformConfig", "MovTransformConfig"]
+    assert len(models) == 4 + len(config.IMAGE_EDIT.targets)
     names = {row["field"]: row["default"] for row in report[0]["fields"]}
     assert names == {"output_name": "{input_name}.{role}.{output_ext}", "output_dir": None}
-    mp4 = report[-2]["fields"]
+    mp4 = report[-3]["fields"]
     rotate = next(row for row in mp4 if row["field"] == "rotate")
     assert (rotate["option"], rotate["default"], rotate["model_default"]) == ("angle", 90, 0)
     crf = next(row for row in mp4 if row["field"] == "crf")
@@ -352,7 +365,9 @@ def test_config_defaults_shows_each_commands_output_name(tmp_path):
 
 def test_config_defaults_unknown_format():
     result = runner.invoke(app, ["config", "defaults", "rotate", "mkv"])
-    assert result.exit_code == 2 and "bmp, gif, jpeg, mp4, png, tiff, webm, webp" in " ".join(result.stderr.split())
+    assert result.exit_code == 2 and "bmp, gif, jpeg, mov, mp4, png, tiff, webm, webp" in " ".join(
+        result.stderr.split()
+    )
 
 
 @pytest.mark.parametrize(

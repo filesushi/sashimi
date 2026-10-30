@@ -1,7 +1,7 @@
 <h1 align="center">sashimi</h1>
 
 <p align="center">
-  <strong>File conversion and video contact sheets for apps, servers and the command line, built on FFmpeg and Pillow.</strong>
+  <strong>File conversion and video contact sheets. Built with FFmpeg and Pillow.</strong>
 </p>
 
 <p align="center">
@@ -17,24 +17,29 @@
 
 **sashimi** converts images, video and audio, makes contact sheets and previews of videos, edits
 images and animations, and reads and removes metadata. It is a Python library and a `sashimi`
-command, and the conversion engine behind FileSushi, so it is built to run inside locked-down
+command, built to run inside locked-down
 workers: explicit paths, atomic writes, typed errors, bounded threads, the limits you choose, and
 no network.
 
 ### What it does
 
-* **Images:** convert between JPEG, PNG, WebP, GIF, BMP and TIFF (and read HEIC), resize, make
-  ICO files and complete favicon packs; rotate, flip, crop, and adjust brightness, contrast and
-  saturation to match CSS filters, on every frame of an animated GIF or WebP too.
+* **Images:** convert between JPEG, PNG, WebP, GIF, BMP, TIFF, AVIF and APNG (and read HEIC, ICO,
+  TGA and PSD), keeping animated GIFs, WebPs, APNGs and AVIFs animated, resize, make ICO files and
+  complete favicon packs; rotate, flip, crop, and adjust brightness, contrast and saturation to
+  match CSS filters, on every frame of an animated GIF, WebP, APNG or AVIF too.
 * **Video:** convert to GIF, animated WebP, WebM or MP4 (copying the streams when that gives the
   same result), cut losslessly or frame-accurately, remux, rotate and flip, and make short
-  previews sampled from across a video.
+  previews sampled from across a video. HDR video is tone-mapped to standard range, or kept as
+  10-bit HDR in MP4 and WebM.
 * **Audio:** extract from video, or convert, to MP3, M4A, WAV, OGG/Opus and FLAC.
 * **Contact sheets:** still (JPEG, PNG, WebP) or animated (WebP, GIF) grids of a video, with a
   header and timestamps.
 * **Metadata:** see what a file holds, and remove the metadata sashimi knows about (EXIF, XMP,
   IPTC, comments, tags, chapters, cover art) or just the location, without re-encoding; every
   output keeps or removes the source's metadata by one setting.
+* **Says what it kept:** every result states whether the output is lossless, has the source's
+  picture or sound with something else dropped (and what), or is lossy (and how), checked against
+  the output.
 * **Folders, safely:** the CLI names outputs predictably, never processes its own outputs, never
   overwrites without `--force`, shows the plan with `--dry-run` and reports in JSON.
 
@@ -43,7 +48,8 @@ no network.
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Python library](#python-library): [embedding](#designed-to-be-embedded), [configs](#configs),
-  [limits](#limits), [metadata](#metadata), [editing images](#editing-images)
+  [limits](#limits), [metadata](#metadata), [what each output kept](#what-each-output-kept),
+  [HDR video](#hdr-video), [editing images](#editing-images)
 - [Command line](#command-line): [settings files](#settings-files),
   [limits](#limits-on-the-command-line), [where outputs go](#where-outputs-go),
   [mixed folders](#folders-of-mixed-files), [scripting](#scripting-exit-codes-and---json)
@@ -66,9 +72,26 @@ uv tool install 'sashimi-convert[cli]' # or install just the command, with uv
 | `[heif]` | reading HEIC/HEIF photos (pillow-heif) |
 | `[emoji]` | emoji in contact sheet headers, drawn from a local image folder (pilmoji; never downloads anything) |
 
-Video and audio need **`ffmpeg` and `ffprobe` on `PATH`** (or call
-`sashimi.set_ffmpeg_paths(...)`); images need only Pillow. Install FFmpeg with your package
-manager (`apt install ffmpeg`, `brew install ffmpeg`) or from [ffmpeg.org](https://ffmpeg.org/download.html).
+Video and audio need **FFmpeg** (`ffmpeg` and `ffprobe`); images need only Pillow. sashimi is
+tested with FFmpeg 8.1 and 9.0. It checks what the FFmpeg it runs can do, per task, and refuses
+only the tasks that FFmpeg can't do right, before writing anything, saying what's missing and
+which FFmpeg it used: an encoder or filter the build lacks (libx264 for MP4, libvpx-vp9 for WebM,
+zscale for HDR video, …), or a task an older release gets wrong (FFmpeg 8.0 and older cut stream
+copies with a start time or a length wrongly, and can't tell a start after the last frame from a
+real result). A newer release than those tested is used, and reported. `sashimi info --ffmpeg`
+shows the FFmpeg in use and what it can do. Distributions often ship an older release (Ubuntu
+26.04 has 8.0.1), so install a current one from [ffmpeg.org](https://ffmpeg.org/download.html),
+for example a static build, or `brew install ffmpeg` on macOS.
+
+sashimi runs ffmpeg and ffprobe as a pair, from the first of: `sashimi.set_ffmpeg_paths(ffmpeg)`
+(the ffprobe beside it), the `SASHIMI_FFMPEG` environment variable (an ffmpeg, or the folder
+holding both), `ffmpeg.path` in `sashimi.toml` (`sashimi config set ffmpeg.path
+/opt/ffmpeg/bin/ffmpeg`, or the folder), and the ffmpeg on `PATH` with the ffprobe beside it. On
+Windows, `.exe` may be left off (`C:\ffmpeg\bin\ffmpeg` means `ffmpeg.exe`). When
+the one chosen is missing, isn't executable, or isn't FFmpeg's ffmpeg or ffprobe, every command,
+and `sashimi info --ffmpeg` (which then exits 1), says so once, naming the path, where it was
+chosen and how to fix that (`FFmpegPathError` in Python); `sashimi config set ffmpeg.path` warns
+about such a path when you set it.
 
 sashimi is tested on Linux, macOS and Windows with Python 3.11 to 3.14. Before 1.0, minor
 versions may change the Python API; the [changelog](https://github.com/filesushi/sashimi/blob/main/CHANGELOG.md)
@@ -152,7 +175,14 @@ inside locked-down workers (read-only filesystems, no network, small process lim
 - **Deterministic.** The same input and config produce the same output.
 - **Hardened input handling.** ffmpeg and ffprobe only open local files (`-protocol_whitelist
   file`) and only run allowlisted demuxers (`-format_whitelist`), so containers such as HLS
-  playlists are refused before anything parses them.
+  playlists are refused before anything parses them. The allowlist is single-file formats only:
+  Matroska/WebM, MP4/MOV/3GP, AVI, ASF (WMV/WMA), MPEG-TS and MPEG-PS, FLV, Ogg, GIF, YUV4MPEG,
+  MP3, WAV, FLAC, AAC, AIFF, AC-3, E-AC-3, DTS, AMR, CAF, Sun AU and WavPack.
+- **Frames at the times asked for.** Contact sheet tiles, preview clips and start times show the
+  frame at their time on every container, whatever the keyframe spacing: sashimi reads the video's
+  keyframe index once, starts decoding just before the right keyframe and drops what comes before
+  the time. Sheets and previews of videos with keyframes far apart are decoded in one pass instead
+  of once per tile.
 
 ### Configs
 
@@ -179,12 +209,13 @@ sashimi enforces only the limits you pass, as one `sashimi.config.Limits`:
 |---|---|---|
 | `max_pixels` | 64,000,000 | images, by decoded pixels (conversions, icons, favicon packs, edits, frames) |
 | `max_frame_bytes` | 1 GiB | video frames held in memory at once (width × height × 3 each): an animated sheet's clips |
-| `max_animation_bytes` | 1 GiB | frames of an animated GIF or WebP being edited (width × height × 4 each) |
+| `max_animation_bytes` | 1 GiB | frames of an animation being edited or converted to an animated GIF or WebP (width × height × 4 each, at the output size) |
 | `max_sheet_pixels` | 64,000,000 | contact sheets |
 | `max_video_seconds` | none | WebM/MP4 conversions (MP4 copies included), rotate and flip, accurate cuts |
 | `max_audio_seconds` | none | audio conversions |
 | `max_gif_seconds` | none | GIFs and animated WebPs made from a video, and a preview's clips together |
 | `max_preview_clips` | none | a preview's clips |
+| `max_scan_packets` | 2,000,000 | packets read to measure a recording that states no length (a live capture that was never finalized) or the end of a Matroska file that starts late (about 20 µs of CPU each; 2,000,000 is about 7 hours of 30 fps video with audio), and video packets read to find the keyframe a sheet, preview or start time decodes from (2,000,000 is about 18 hours of 30 fps video) |
 
 Every limit can be raised, and `None` turns it off; `Limits.unlimited()` turns them all off. A
 refusal is a `UserInputError` whose `user_message` states the limit in force and whose `limit` is
@@ -230,10 +261,12 @@ What `keep` can carry into each output format:
 | BMP | – | – | – | – | – |
 
 Video and audio keep the global and stream tags and the chapters the container can hold: Matroska
-and WebM all of them; MP4, MOV and M4A the standard ones (title, artist, album, comment, date, …)
-and the location, but not QuickTime's `com.apple.quicktime.*` keys; MP3 ID3; OGG and FLAC Vorbis
-comments; WAV its INFO list (no location). No output records a creation time (outputs are
-bit-exact, so the same input gives the same bytes). GIFs and animated WebPs made from a video,
+and WebM all of them; MP4, MOV and M4A all of them too, QuickTime's `com.apple.quicktime.*` keys
+and a camera's own tags included (written as QuickTime metadata keys when the source has any tag
+FFmpeg's plain MP4 writer can't hold), with the source's creation time; MP3 ID3; OGG and FLAC
+Vorbis comments; WAV its INFO list (no location). Matroska and WebM outputs record the source's
+creation time too, in the file's own date field. Outputs are bit-exact, so the same input gives the same bytes. A video's display rotation
+says how to show it, so every mode keeps it. GIFs and animated WebPs made from a video,
 previews and contact sheets hold none.
 
 ```python
@@ -245,8 +278,63 @@ if info.has_location:
 metadata.strip("upload.blob", "clean.bin", "remove_all")  # same format, nothing re-encoded
 ```
 
-`strip` copies the compressed pixels byte for byte (JPEG, PNG, WebP, GIF, TIFF) and stream-copies
-video and audio (MKV, WebM, MP4, MOV, M4A, MP3, FLAC, OGG, WAV); an MPO keeps only its main picture.
+`strip` copies the compressed pixels byte for byte (JPEG, PNG, WebP, GIF, TIFF, HEIC, AVIF) and
+stream-copies video and audio (MKV, WebM, MP4, MOV, M4A, 3GP, MPEG-TS and M2TS, VOB and MPG, FLV,
+WMV, AVI, MP3, FLAC, OGG, WAV); an MPO keeps only its main picture. BMP and ICO hold no metadata,
+and TGA and PSD can't be stripped without re-encoding, so `strip` says so and leaves them.
+
+- **HEIC and AVIF** are rewritten in place: every picture item (the photo, its tiles, an iPhone's
+  gain map, depth and portrait mattes, thumbnails) and the orientation viewers apply keep their
+  bytes, and only the EXIF and XMP items change. `remove_location` removes the GPS directory and
+  XMP location properties; `remove_all` empties the EXIF item (keeping an EXIF orientation other
+  than 1) and the photo's XMP, and keeps the XMP that tells viewers how to show the gain map and
+  other auxiliary pictures (without location). On iPhones up to the 15, how bright the gain map's
+  HDR is lives in the EXIF maker notes, so after `remove_all` viewers use their default.
+- **Motion photos and Ultra HDR JPEGs** (Google, Samsung) keep a video and a gain map after the
+  picture, listed in the XMP. Both modes keep the gain map (stripping removes information about
+  the person, place and device, not the picture), with the XMP that tells viewers how to show it,
+  unless the gain map holds location or, for `remove_all`, metadata of its own. The video stays
+  when it holds nothing the mode removes (location or data tracks for `remove_location`, any
+  metadata for `remove_all`); otherwise sashimi strips it the same way, checks the result and puts
+  it back, updating the lengths in the XMP. A Samsung trailer points into the old video, so a
+  Samsung motion photo's video that needs stripping is removed instead, and the result says so
+  (`fidelity.notes`). Conversions and edits never carry them, so their XMP drops what points at them.
+
+### What each output kept
+
+Every processing function returns a result with `fidelity` (`sashimi.fidelity.Fidelity`), and
+every batch result ends its message with the statement, so a user can tell what a conversion cost:
+
+| `level` | Meaning | Examples |
+|---|---|---|
+| `lossless` | the picture or sound is identical, and nothing else sashimi can see was dropped (`removed` lists what was removed as asked) | BMP → TIFF; GIF → lossless WebP or APNG; MKV → MKV remux; JPEG `strip` |
+| `content_lossless` | the picture or sound is identical, but something else was dropped (`lost`), or the source can hold data sashimi can't read (`checked` is false) | TIFF → BMP ("picture identical; EXIF and colour profile dropped"); MP4 → MKV remux ("picture and sound identical"); GoPro cut ("…; GoPro telemetry track (GPS) dropped. FFmpeg can't copy … into MP4") |
+| `lossy` | the picture or sound changed (`changed`) | "saved as JPEG at quality 85", "re-encoded as H.264 (CRF 23)", "tone-mapped from HDR (HLG)", "reduced to 256 colours", "scaled to 640x360" |
+
+It comes from what happened, not from a table of formats: the encoder used, the source's and the
+output's metadata, tracks and structure as sashimi reads them, and, for images saved without loss,
+the output decoded and compared with the source pixel for pixel. HEIC, AVIF, PSD, TGA and ICO
+sources, and video outside Matroska and WebM, can hold data no reader here sees (vendor boxes,
+auxiliary images), so their outputs never claim `lossless`. A stream copy is identical stream for
+stream; into MP4 or MOV it may also play the AAC encoder's priming frame that Matroska skips.
+
+### HDR video
+
+Video with an HDR transfer (PQ or HLG, Dolby Vision 8.1 and 8.4 included) is tone-mapped to
+standard-range BT.709 wherever the output can't hold HDR: contact sheets, previews, GIFs, animated
+WebPs, and re-encodes unless `keep_hdr` is set. The pictures go to linear light (zscale), to
+BT.709 primaries, through FFmpeg's `tonemap=mobius` (it keeps mid-tones and colour and rolls off
+the highlights; Hable left PQ landscapes dim, Reinhard blew out skies and skin), then to BT.709.
+HLG uses BT.2408's 203 nits as reference white. Downscaled outputs are scaled first, which costs
+nothing extra; full-size re-encodes of 4K roughly double their CPU time. The HDR mastering and
+light-level metadata is removed from the tone-mapped output.
+
+`keep_hdr=True` (`--keep-hdr`) keeps HDR in MP4 (10-bit HEVC, copied when the source already is
+10-bit HEVC) and WebM (10-bit VP9 profile 2), with its colour tags and mastering metadata; formats
+that can't hold HDR refuse it. sashimi never writes 8-bit video tagged PQ or HLG. Tone mapping needs
+FFmpeg's `zscale` (libzimg) and `tonemap` filters: without them HDR routes raise
+`MissingFiltersError` rather than write washed-out pictures. Dolby Vision in Dolby's own IPT colour
+space (profiles 5 and 20) is still refused, since only Dolby's processing gives its colours.
 
 ### Editing images
 
@@ -255,8 +343,10 @@ video and audio (MKV, WebM, MP4, MOV, M4A, MP3, FLAC, OGG, WAV); an MPO keeps on
 then `brightness`, `contrast` and `saturation`. The three adjustments are the CSS filters of the
 same names, as the Filter Effects spec defines them, so a web page can preview an edit live with
 `filter: brightness(b) contrast(c) saturate(s)` (in that order) and get the same picture.
-Animated GIFs and WebPs have every frame edited; `select_frames` keeps or drops frames and
-changes the speed, and `frames_info` lists the frames without decoding them.
+Animations (GIF, WebP, APNG, AVIF) have every frame edited and stay animated when saved as GIF,
+WebP, AVIF, APNG or PNG (an animated PNG in a `.png` file), unless `animated=False` asks for the
+first frame; `select_frames` keeps or drops frames and changes the speed, and `frames_info` lists
+the frames without decoding them.
 
 ```python
 from sashimi import image
@@ -288,7 +378,9 @@ sashimi edit photos/ --aspect 1:1 --saturation 1.2   # centred square crop, more
 sashimi edit clip.gif --brightness 1.3               # every frame of an animation
 sashimi frames clip.gif --drop 1-5 --speed 1.5       # frames are numbered from 1
 sashimi convert clip.mkv mp4                         # copies H.264/AAC when it can, else re-encodes
-sashimi rotate phone.mp4 90                          # rotate/flip a video (re-encoded)
+sashimi rotate phone.mp4 90                          # lossless: only the display rotation is set
+sashimi rotate clip.mov 90                           # clip.mov.rotated.mov: a MOV keeps its PCM sound
+sashimi rotate phone.mp4 90 --reencode               # turn the pixels themselves (re-encoded)
 sashimi rotate photo.jpg 90 --output-format png      # photo.jpg.rotated.png, no JPEG re-save
 sashimi rotate holiday/ 90 -y                        # photos, GIFs and videos; -y answers "go ahead?"
 sashimi rotate *.jpg 180                             # the angle comes last (90 when left out)
@@ -346,8 +438,8 @@ it applies wherever you run sashimi, and says which file it changed. `sashimi co
 --project` writes the project file instead: the `sashimi.toml` (or `.sashimi.toml`) in the
 current folder or the nearest folder above it, created in the current folder if there is none.
 A project file applies only when you run sashimi in its folder or a folder inside it, where it
-wins over your own settings: a pattern kept with `--project` inside `New folder` isn't used by
-`sashimi thumbs "New folder"` run from the folder above. When a project file here sets what you
+wins over your own settings: a pattern kept with `--project` inside `Home videos` isn't used by
+`sashimi thumbs "Home videos"` run from the folder above. When a project file here sets what you
 just saved to your own settings, `config set` says so. `sashimi config unset` follows the same
 rule (`--project` for the project file), `sashimi config path` shows both files, and `sashimi
 config show` what they set. Only `sashimi config set` creates either file (a new one starts with
@@ -361,9 +453,9 @@ taking a number with a unit, or `none` for no limit:
 
 | Flag | Commands | Default | Example |
 |---|---|---|---|
-| `--max-pixels` | `convert`, `resize`, `rotate`, `favicon`, `edit`, `frames`, `strip` | 64M | `sashimi convert scan.tif jpeg --max-pixels 300M` |
+| `--max-pixels` | `convert`, `resize`, `rotate`, `favicon`, `edit`, `frames` | 64M | `sashimi convert scan.tif jpeg --max-pixels 300M` |
 | `--max-frame-bytes` | `thumbs` (animated) | 1G | `sashimi thumbs film.mkv -a --cols 6 --rows 6 --max-frame-bytes 4G` |
-| `--max-animation-bytes` | `rotate`, `edit`, `frames` | 1G | `sashimi edit big.gif --rotate 90 --max-animation-bytes none` |
+| `--max-animation-bytes` | `convert`, `resize`, `rotate`, `edit`, `frames` | 1G | `sashimi edit big.gif --rotate 90 --max-animation-bytes none` |
 | `--max-sheet-pixels` | `thumbs` | 64M | `sashimi thumbs film.mkv --cols 10 --rows 20 --max-sheet-pixels 200M` |
 
 Every limit, the length limits included (off by default), can be set in the `[limits]` section of
@@ -394,7 +486,7 @@ rotated, saved as PNG" is `photo.jpg.rotated.png`. Conversions have no role, so 
 | `convert` | (none) | `photo.png` → `photo.png.webp`; `convert . jpeg` → `photo.png.jpeg`, `convert . jpg` → `photo.png.jpg` |
 | `remux` | (none) | `clip.mp4` → `clip.mp4.mkv` |
 | `resize` | `resized` | `photo.jpg` → `photo.jpg.resized.jpg`; `photo.heic` → `photo.heic.resized.jpg` |
-| `rotate` | `rotated` | `photo.jpg` → `photo.jpg.rotated.jpg` (`.png` with `--output-format png`); `clip.mkv` → `clip.mkv.rotated.mp4` |
+| `rotate` | `rotated` | `photo.jpg` → `photo.jpg.rotated.jpg` (`.png` with `--output-format png`); `clip.mkv` → `clip.mkv.rotated.mp4`; `clip.mov` → `clip.mov.rotated.mov` |
 | `extract` | `extracted` | `clip.mkv` → `clip.mkv.extracted.mkv` |
 | `edit` | `edited` | `photo.jpg` → `photo.jpg.edited.jpg` |
 | `frames` | `frames` | `anim.gif` → `anim.gif.frames.gif` |
@@ -429,8 +521,8 @@ rotated, saved as PNG" is `photo.jpg.rotated.png`. Conversions have no role, so 
   sheets. `flatten` keeps names as they are, so it has no pattern.
 - **Outputs go next to their inputs,** wherever you run sashimi from.
 - **A folder beside each input goes in the pattern.** `sashimi config set thumbs.output_name
-  'sheets/{input_name}.jpeg'` writes `New folder/sheets/Bluebeard-5.mkv.jpeg` for `New
-  folder/Bluebeard-5.mkv`, from any folder, and with `-r` each folder gets its own `sheets/`.
+  'sheets/{input_name}.jpeg'` writes `Home videos/sheets/hike-5.mkv.jpeg` for `Home
+  videos/hike-5.mkv`, from any folder, and with `-r` each folder gets its own `sheets/`.
   Folders are made as needed, and a rerun finds the sheets there ("Exists"). `\` separates
   folders as `/` does, on every system. Patterns can't leave the input's folder: absolute paths,
   drive letters, `~`, `.` and `..` folders and empty folder names are refused; that is what
@@ -508,7 +600,7 @@ rotated, saved as PNG" is `photo.jpg.rotated.png`. Conversions have no role, so 
   `--limit-output` cuts successes before problems.
 - Messages name an output by its file name when it's beside its input, and otherwise by its path
   as built from the paths you gave, so relative to where you ran sashimi when those were relative
-  ("Output already exists: sheets/Bluebeard-5.mkv.jpeg").
+  ("Output already exists: sheets/hike-5.mkv.jpeg").
 - `-n/--dry-run` shows each file's plan ("Would write a.png.webp", "Would replace …" with
   `--force`, "Output already exists", a skipped clash or a refused name, or why it's skipped)
   without reading or writing anything.
@@ -519,10 +611,21 @@ rotated, saved as PNG" is `photo.jpg.rotated.png`. Conversions have no role, so 
 ### Folders of mixed files
 
 `rotate` handles photos and animated GIFs and WebPs (every frame) through the same code as `edit
---rotate`, and videos by re-encoding them. Images keep their format, so a JPEG is re-saved (at
-quality 92); `--output-format png` keeps every pixel, and an image format rotates only images
-(`mp4` or `webm` only videos). `resize` works on images and animations; videos aren't supported
-yet. Every command's message for a file it can't take says what it works on.
+--rotate`, MOV videos as MOV (Dolby Vision ones as MP4, the only format FFmpeg writes their
+Dolby Vision settings into, unless MP4 would re-encode their sound) and other videos as MP4: a rotation alone of H.264, HEVC, AV1 or VP9
+video (in a MOV: H.264, HEVC or ProRes) is lossless (every stream copied, only the display rotation
+set, composed with any the video already has; a MOV keeps its PCM sound, while sound MP4 players
+don't all play, such as PCM from a MOV with `--output-format mp4`, is re-encoded as AAC), and a
+flip, `--reencode`, WebM or another codec re-encodes. FFmpeg, mpv, GStreamer, Chrome and Firefox
+show MP4's and MOV's display rotation; `--reencode` is for players that don't. Apple's metadata
+tracks (`mebx`) aren't copied into any format: FFmpeg can't write them. Images keep their format,
+so a JPEG is re-saved (at quality 92); `--output-format png` keeps every pixel, and an image format
+rotates only images (`mp4`, `webm` or `mov` only videos). `resize` works on images and animations; videos aren't supported
+yet. `convert` and `resize` keep an animated GIF, WebP, APNG or AVIF animated when the output is
+GIF, WebP, AVIF, APNG or PNG (an animated PNG in a `.png` file; `--no-animated` for a still, or
+`sashimi config set convert.animated false` to keep that), and so do `edit` (`--no-animated`,
+`edit.animated`) and `rotate`; to JPEG, BMP or TIFF an animation gives its first frame and a multi-page
+TIFF its first page, and the result says so. Every command's message for a file it can't take says what it works on.
 
 When a folder holds files that a command handles in different ways (photos and videos for
 `rotate`; images and videos for `convert` to WebP or GIF; images and video or audio for
@@ -562,14 +665,18 @@ functions in `sashimi.api` also return:
  "outputs_left_out": [], "clash_note": null,
  "summary": {"total_found": 2, "success": 2, "exists": 0, "skipped": 0, "errors": 0,
              "time_taken_seconds": 0.4, "avg_time_seconds": 0.2},
- "results": [{"file": "a.png", "status": "success", "message": "Converted to a.png.webp", "output": "a.png.webp"}]}
+ "results": [{"file": "a.png", "status": "success", "output": "a.png.webp",
+              "message": "Converted to a.png.webp (lossy: saved as WebP at quality 85)",
+              "fidelity": {"level": "lossy", "content": "picture", "changed": ["saved as WebP at quality 85"],
+                           "lost": [], "removed": [], "notes": [], "checked": true,
+                           "text": "lossy: saved as WebP at quality 85"}}]}
 ```
 
 `status` is `success`, `exists`, `skipped` or `error`. Every report also has `"dry_run": false`
 (true with `--dry-run`, when the results are the plan); `kinds` and `routes` count the files the
 command planned to process, `outputs_left_out` lists the command's own earlier outputs a folder
 search left out (see "Where outputs go"), and `clash_note` names the pattern that gave inputs one
-output name, or is null. `flatten` adds `renamed` and `removed_dirs` instead. MP4 conversions say in the message when the streams were copied. `info --json` prints the probe result, `metadata --json` the metadata summary, and `config ... --json` its own data.
+output name, or is null. `flatten` adds `renamed` and `removed_dirs` instead. Each result's `fidelity` says what a written output kept (see "What each output kept"), or is null. `info --json` prints the probe result, `metadata --json` the metadata summary, and `config ... --json` its own data.
 
 ## Development
 
@@ -579,22 +686,12 @@ sashimi uses [uv](https://docs.astral.sh/uv/):
 uv sync                         # dev environment, including all extras
 sh scripts/check.sh             # ruff format --check, ruff check, mypy, then pytest on Python 3.14
 sh scripts/check.sh full        # the same, then pytest on Python 3.11 to 3.14
-sh scripts/sandbox_check.sh     # every converter in a FileSushi-style locked-down container (needs Docker)
 ```
 
 `scripts/check.sh` doesn't change the tree: it uses the locked dependencies as they are
 (`uv run --frozen`) and runs each Python version in its own environment under `.venvs/`, so the
 `.venv` that `uv sync` made is left alone. The integration tests make their own media with
 FFmpeg and are skipped when it isn't installed.
-
-`scripts/sandbox_check.sh` builds a `python:3.14-alpine` worker image from the wheel (wheels only,
-`apk add ffmpeg`), then runs every converter under FileSushi's sandbox flags (`--network none
---read-only --pids-limit 128 --cpus 2 --memory 1g`) on an input named `original.blob`. Each job
-reports its time, peak memory and peak process/thread count, and fails if the output is invalid,
-anything is written outside `/vault/output` or left in `/tmp`, or a network call is attempted.
-`--skip-long` skips the two cases on a 10-minute 1080p video: the 300 MB animated-sheet budget and
-a 60-second, 1920 px GIF. The image is tagged `sashimi-sandbox-check`, or `$SASHIMI_SANDBOX_IMAGE`
-if set; remove it with `docker rmi` when you're done.
 
 ## Contributing
 

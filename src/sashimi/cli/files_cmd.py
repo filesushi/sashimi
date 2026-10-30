@@ -20,6 +20,8 @@ from sashimi.cli._output import (
     display_path,
     err_console,
     fail,
+    refusal,
+    print_fields,
     print_json,
 )
 
@@ -29,6 +31,21 @@ class Container(str, Enum):
     mp4 = "mp4"
     webm = "webm"
     mov = "mov"
+
+
+def _shown_as(info: Any) -> str:
+    """`` (shown as 1415x588)`` for a video whose pixels aren't square, else nothing."""
+    from sashimi.core.probe import anamorphic
+
+    if not anamorphic(info):
+        return ""
+    return f" (shown as {round(info.height * info.display_aspect_ratio)}x{info.height})"
+
+
+def _kept_hdr() -> bool | None:
+    from sashimi.cli.convert_cmd import _kept_switch
+
+    return _kept_switch("extract", "keep_hdr")
 
 
 def extract_cmd(
@@ -84,6 +101,7 @@ def extract_cmd(
     speed: opt.Speed = None,
     audio_bitrate: opt.AudioBitrate = None,
     mute: opt.Mute = False,
+    keep_hdr: Annotated[Optional[bool], opt.keep_hdr_option("extract")] = None,
     metadata: opt.MetadataOpt = None,
 ):
     """
@@ -126,6 +144,7 @@ def extract_cmd(
             speed=speed,
             audio_bitrate_kbps=audio_bitrate,
             mute=mute,
+            keep_hdr=bool(keep_hdr if keep_hdr is not None else _kept_hdr()),
             metadata=opt.enum_value(metadata) or "keep",
             recursive=recursive,
             force=force,
@@ -202,7 +221,7 @@ def remux_cmd(
 def flatten_cmd(
     source_dir: Annotated[
         pathlib.Path,
-        typer.Argument(exists=True, file_okay=False, dir_okay=True, help="Directory to flatten.", show_default=False),
+        typer.Argument(help="Directory to flatten.", show_default=False),
     ],
     dry_run: Annotated[bool, typer.Option("--dry-run", "-n", help="Show what would move, and change nothing.")] = False,
     force: Annotated[bool, typer.Option("-f", "--force", help="Don't ask for confirmation.")] = False,
@@ -222,10 +241,14 @@ def flatten_cmd(
     from sashimi.api.flatten import flatten, plan_flatten
     from sashimi.errors import SashimiError, UserInputError
 
+    if not source_dir.exists():
+        fail(f"Path does not exist: {source_dir}")
+    if not source_dir.is_dir():
+        fail(f"{source_dir} is a file; flatten works on a folder.")
     try:
         plan = plan_flatten(source_dir)
     except UserInputError as e:
-        fail(e.user_message, code=1)
+        fail(refusal(e), code=1)
     except SashimiError as e:
         fail(str(e).splitlines()[0], code=1)
     if not dry_run and not force and not yes:
@@ -267,17 +290,32 @@ def flatten_cmd(
 
 
 def info_cmd(
-    path: Annotated[pathlib.Path, typer.Argument(help="Media file to inspect.", show_default=False)],
+    path: Annotated[Optional[pathlib.Path], typer.Argument(help="Media file to inspect.", show_default=False)] = None,
+    ffmpeg: Annotated[
+        bool,
+        opt.option(
+            "--ffmpeg",
+            help="Show the FFmpeg sashimi runs: its paths, version, where it was chosen, whether sashimi is "
+            "tested with its series, and anything it lacks.",
+        ),
+    ] = False,
     json_output: opt.JsonOutput = False,
 ):
     """
     Show a media file's container, duration, dimensions, frame rate and codecs (via ffprobe), or
     an image's format, size and frames, with each frame's duration, numbered from 1 as
-    [bold]sashimi frames[/bold] takes them.
+    [bold]sashimi frames[/bold] takes them. [bold]sashimi info --ffmpeg[/bold] shows the FFmpeg
+    sashimi runs and what it can do.
     """
+    if ffmpeg:
+        _print_ffmpeg_info(json_output)
+        return
+    if path is None:
+        fail("Give a media file, or --ffmpeg to see the FFmpeg sashimi runs.")
     opt.exists_or_fail(path)
     opt.file_or_fail(path, "info")
     from sashimi import probe
+    from sashimi.cli import _limits
     from sashimi.config import Limits
     from sashimi.core.edit import frames_info
     from sashimi.core.sheets._render import format_duration, format_size
@@ -288,15 +326,15 @@ def info_cmd(
     except UnsupportedMediaError:
         image_info = None
     except UserInputError as e:
-        fail(e.user_message, code=1)
+        fail(refusal(e), code=1)
     if image_info is not None:
         _print_image_info(path, image_info, json_output, format_size(path.stat().st_size))
         return
 
     try:
-        info = probe(path)
+        info = probe(path, limits=_limits.resolve())
     except UserInputError as e:
-        fail(e.user_message, code=1)
+        fail(refusal(e), code=1)
     except SashimiError as e:
         fail(str(e).splitlines()[0], code=1)
 
@@ -304,11 +342,6 @@ def info_cmd(
         print(info.model_dump_json(indent=2))
         return
 
-    from rich.table import Table
-
-    table = Table(show_header=False, box=None, padding=(0, 2))
-    table.add_column(style="bold cyan", justify="right")
-    table.add_column()
     rows = [
         ("File", display_path(path)),
         ("Container", info.container),
@@ -317,17 +350,16 @@ def info_cmd(
         ("Bit rate", f"{info.bit_rate // 1000} kb/s" if info.bit_rate else "—"),
     ]
     if info.has_video:
-        rotation = f" (rotated {info.rotation}°)" if info.rotation else ""
+        mirrored = ", mirrored" if info.display_mirrored else ""
+        rotation = f" (shown turned {info.display_turn}° clockwise{mirrored})" if info.display_turn or mirrored else ""
         rows += [
-            ("Dimensions", f"{info.width}x{info.height}{rotation}"),
+            ("Dimensions", f"{info.width}x{info.height}{rotation}{_shown_as(info)}"),
             ("Aspect ratio", f"{info.display_aspect_ratio:.3f}" if info.display_aspect_ratio else "—"),
             ("Frame rate", f"{info.fps:.3f}".rstrip("0").rstrip(".") + " fps" if info.fps else "—"),
             ("Video", info.video_codec or "—"),
         ]
     rows += [("Audio", info.audio_codec or "none"), ("Streams", ", ".join(info.codecs) or "—")]
-    for label, value in rows:
-        table.add_row(label, value)
-    console.print(table)
+    print_fields(rows)
 
 
 MAX_FRAME_RUNS = 10
@@ -346,16 +378,13 @@ def _frame_runs(durations: list[int]) -> str:
     return ", ".join(f"{a}: {d} ms" if a == b else f"{a}-{b}: {d} ms" for a, b, d in runs)
 
 
+_SHORT_FRAMES = " (under 20 ms plays as 100 ms, as browsers play it)"
+
+
 def _print_image_info(path: pathlib.Path, info: Any, json_output: bool, size: str) -> None:
     if json_output:
         print(info.model_dump_json(indent=2))
         return
-    from rich.markup import escape
-    from rich.table import Table
-
-    table = Table(show_header=False, box=None, padding=(0, 2))
-    table.add_column(style="bold cyan", justify="right")
-    table.add_column()
     rows = [
         ("File", display_path(path)),
         ("Format", info.format.upper()),
@@ -365,10 +394,68 @@ def _print_image_info(path: pathlib.Path, info: Any, json_output: bool, size: st
     ]
     if info.animated:
         loop = "plays once" if info.loop is None else "loops forever" if info.loop == 0 else f"loops {info.loop} times"
+        from sashimi.config import MIN_FRAME_MS
+        from sashimi.core._animation import shown_ms
+
+        short = any(d < MIN_FRAME_MS for d in info.durations_ms)
         rows += [
-            ("Duration", f"{sum(info.durations_ms) / 1000:.2f} s, {loop}"),
-            ("Frame durations", _frame_runs(info.durations_ms)),
+            ("Duration", f"{sum(shown_ms(d) for d in info.durations_ms) / 1000:.2f} s, {loop}"),
+            ("Frame durations", _frame_runs(info.durations_ms) + (_SHORT_FRAMES if short else "")),
         ]
-    for label, value in rows:
-        table.add_row(label, escape(value))
-    console.print(table)
+    print_fields(rows)
+
+
+def _print_ffmpeg_info(json_output: bool) -> None:
+    """The FFmpeg sashimi runs, as a table or JSON (``sashimi info --ffmpeg``)."""
+    from sashimi.core._capabilities import TESTED_SERIES, ffmpeg_info
+    from sashimi.core._ffmpeg import checked_paths, ffmpeg_paths
+    from sashimi.errors import FFmpegPathError
+
+    try:
+        checked_paths()
+    except FFmpegPathError as e:
+        if json_output:
+            paths = ffmpeg_paths()
+            print_json(
+                {"ffmpeg": paths.ffmpeg, "ffprobe": paths.ffprobe, "origin": e.origin, "usable": False}
+                | {"problem": {"name": e.name, "path": e.path, "kind": e.problem, "message": str(e)}}
+            )
+            raise typer.Exit(code=1) from None
+        fail(str(e), code=1)
+    info = ffmpeg_info()
+    tested = " and ".join(".".join(map(str, series)) for series in TESTED_SERIES)
+    series = ".".join(map(str, info.series)) if info.series else None
+    statuses = {
+        "tested": f"tested (sashimi is tested with {tested})",
+        "newer": f"newer than the series sashimi is tested with ({tested}): allowed, untested",
+        "older": f"older than the series sashimi is tested with ({tested}): the tasks below are refused",
+        "unknown": f"no release version stated (a development build?): allowed, untested ({tested} are tested)",
+    }
+    if json_output:
+        print_json(
+            {
+                "ffmpeg": info.ffmpeg,
+                "ffprobe": info.ffprobe,
+                "origin": info.origin,
+                "usable": True,
+                "version": info.version,
+                "series": series,
+                "status": info.status,
+                "tested_series": [".".join(map(str, s)) for s in TESTED_SERIES],
+                "missing": info.missing,
+                "refused": info.refused,
+            }
+        )
+        return
+    rows = [
+        ("ffmpeg", info.ffmpeg),
+        ("ffprobe", info.ffprobe),
+        ("Chosen by", info.origin),
+        ("Version", info.version or "unknown"),
+        ("Series", statuses[info.status]),
+    ]
+    rows += [("Lacks", f"{name}: needed for {tasks}") for name, tasks in info.missing.items()]
+    rows += [("Refuses", f"{task}: {why}") for task, why in info.refused.items()]
+    if not info.missing and not info.refused:
+        rows.append(("Capabilities", "everything sashimi uses"))
+    print_fields(rows)

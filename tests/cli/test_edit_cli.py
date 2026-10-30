@@ -188,13 +188,55 @@ def test_config_defaults_for_edit_and_frames():
     assert edit[1]["model"] == "JpegEditConfig" and fields["quality"]["default"] == 92
     assert fields["crop_left"]["option"] == "--crop" and fields["saturation"]["accepted"] == "at least 0"
     frames = json.loads(runner.invoke(app, ["config", "defaults", "frames", "--json"]).stdout)
-    assert [section["model"] for section in frames] == [None, "GifFramesConfig", "WebpFramesConfig"]
+    assert [section["model"] for section in frames] == [
+        None,
+        "GifFramesConfig",
+        "WebpFramesConfig",
+        "AvifFramesConfig",
+        "ApngFramesConfig",
+        "PngFramesConfig",
+    ]
 
 
 @needs_ffmpeg
 def test_convert_says_when_an_mp4_was_copied(video_blob, tmp_path):
     (tmp_path / "clip.mkv").write_bytes(video_blob.read_bytes())
     copied = report(runner.invoke(app, ["convert", "clip.mkv", "mp4", "--json"]))["results"][0]
-    assert copied["message"] == "Converted to clip.mkv.mp4 (video and audio copied, not re-encoded)"
+    assert copied["message"] == "Converted to clip.mkv.mp4 (lossless)"
     encoded = report(runner.invoke(app, ["convert", "clip.mkv", "mp4", "--crf", "30", "-f", "--json"]))
-    assert encoded["results"][0]["message"] == "Converted to clip.mkv.mp4 (replaced the existing file)"
+    assert encoded["results"][0]["message"] == (
+        "Converted to clip.mkv.mp4 (replaced the existing file; lossy: re-encoded as H.264 (CRF 30), "
+        "sound re-encoded as AAC at 128 kb/s)"
+    )
+
+
+def test_edit_keeps_an_animation_in_png_unless_asked_and_remembers_the_choice(tmp_path):
+    gif(tmp_path / "anim.gif")
+    kept = report(runner.invoke(app, ["edit", "anim.gif", "--rotate", "90", "--output-format", "png", "--json"]))
+    (row,) = kept["results"]
+    assert row["output"] == "anim.gif.edited.png" and row["fidelity"]["level"] == "lossless"
+    with Image.open(tmp_path / "anim.gif.edited.png") as img:
+        assert img.n_frames == 5
+    still = runner.invoke(app, ["edit", "anim.gif", "--output-format", "png", "--no-animated", "-o", "s.png"])
+    assert still.exit_code == 0 and "animation (5 frames) removed as asked" in " ".join(still.output.split())
+    with Image.open(tmp_path / "s.png") as img:
+        assert getattr(img, "n_frames", 1) == 1
+    assert runner.invoke(app, ["config", "set", "edit.animated", "false"]).exit_code == 0
+    settings.load_raw_config.cache_clear()
+    runner.invoke(app, ["edit", "anim.gif", "--output-format", "png", "-o", "k.png"])
+    with Image.open(tmp_path / "k.png") as img:
+        assert getattr(img, "n_frames", 1) == 1
+    runner.invoke(app, ["edit", "anim.gif", "--output-format", "png", "--animated", "-o", "a.png"])
+    with Image.open(tmp_path / "a.png") as img:
+        assert img.n_frames == 5
+    quiet = runner.invoke(app, ["edit", ".", "--no-animated", "--rotate", "90", "--dry-run"])
+    assert "no effect" not in quiet.output
+
+
+def test_frames_saves_png_as_an_animated_png(tmp_path):
+    gif(tmp_path / "anim.gif")
+    result = report(runner.invoke(app, ["frames", "anim.gif", "--drop", "1", "--output-format", "png", "--json"]))
+    (row,) = result["results"]
+    assert row["output"] == "anim.gif.frames.png"
+    with Image.open(tmp_path / "anim.gif.frames.png") as img:
+        assert img.n_frames == 4

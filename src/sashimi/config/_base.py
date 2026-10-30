@@ -52,7 +52,7 @@ class ParamsModel(BaseModel):
     @classmethod
     def from_params(cls, params: Mapping[str, Any] | None = None, /, **fields: Any) -> Self:
         """
-        Builds a config from a parameter dict such as FileSushi's job parameters, plus explicit
+        Builds a config from a parameter dict such as a web form's job parameters, plus explicit
         fields (e.g. ``target=...``). Invalid values raise :class:`InvalidOptionsError`, whose
         ``user_message`` is one readable sentence.
         """

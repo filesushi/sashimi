@@ -185,7 +185,7 @@ def test_a_named_earlier_output_is_processed_on_its_own_but_not_beside_its_origi
         assert named["a.png"][:2] == ("exists", "a.png.resized.png")
 
 
-def test_the_owners_three_runs(tmp_path, monkeypatch):
+def test_three_runs_in_a_row(tmp_path, monkeypatch):
     def render(src, dst, config, **kwargs):
         pathlib.Path(dst).write_bytes(b"sheet of " + pathlib.Path(src).name.encode())
 

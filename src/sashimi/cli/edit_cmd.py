@@ -32,6 +32,7 @@ FLAGS = {
     "quality": "--quality",
     "lossless": "--lossless",
     "webp_method": "--webp-method",
+    "avif_speed": "--avif-speed",
     "png_compress_level": "--compress-level",
     "optimize": "--optimize/--no-optimize",
     "progressive": "--progressive",
@@ -42,6 +43,7 @@ FLAGS = {
     "keep": "--keep",
     "speed": "--speed",
     "target": "--output-format",
+    "animated": "--no-animated",
 }
 """Config field to CLI flag, for `edit` and `frames`."""
 
@@ -114,8 +116,13 @@ def _save_options(
     }
 
 
-def _configs(family: Any, options: dict[str, Any], fmt: str | None, kind: str) -> tuple[dict[str, Any], Any]:
-    """A validated config per target (or just `fmt`'s), and a function that returns one per source format."""
+def _configs(
+    family: Any, options: dict[str, Any], fmt: str | None, kind: str, *, quiet: tuple[str, ...] = ()
+) -> tuple[dict[str, Any], Any]:
+    """
+    A validated config per target (or just `fmt`'s), and a function that returns one per source
+    format. Options in `quiet` aren't named as having no effect on formats without them.
+    """
     from pydantic import ValidationError
 
     targets = [fmt] if fmt else list(family.targets)
@@ -128,14 +135,14 @@ def _configs(family: Any, options: dict[str, Any], fmt: str | None, kind: str) -
         except ValidationError as e:
             exit_on_invalid_options(e, FLAGS)
     used = {field for name in targets for field in family.model_for(target=name).model_fields}
-    unused = [field for field in opt.given(options) if field not in used]
+    unused = [field for field in opt.given(options) if field not in used and field not in quiet]
     warn_unused([FLAGS.get(field, field) for field in unused], f"{targets[0].upper()} {kind}" if fmt else kind)
     warned: set[str] = set()
 
     def config_for(source_format: str) -> Any:
         name = fmt or source_format
         model = family.model_for(target=name)
-        skipped = [f for f in opt.given(options) if f not in model.model_fields and f not in unused]
+        skipped = [f for f in opt.given(options) if f not in model.model_fields and f not in unused and f not in quiet]
         if skipped and name not in warned:
             warned.add(name)
             warn_unused([FLAGS.get(field, field) for field in skipped], f"{name.upper()} {kind}")
@@ -153,11 +160,16 @@ class EditFormat(str, Enum):
     bmp = "bmp"
     tiff = "tiff"
     tif = "tif"
+    avif = "avif"
+    apng = "apng"
 
 
 class FramesFormat(str, Enum):
     gif = "gif"
     webp = "webp"
+    avif = "avif"
+    apng = "apng"
+    png = "png"
 
 
 Quality = Annotated[
@@ -226,8 +238,9 @@ def edit_cmd(
     output_format: Annotated[
         Optional[EditFormat],
         opt.output_format_option(
-            "Output format: jpeg (or jpg), png, webp, gif, bmp or tiff (or tif), written with the extension as "
-            "typed [default: same as input]."
+            "Output format: jpeg (or jpg), png, webp, gif, bmp, tiff (or tif), avif or apng, written with the "
+            "extension as typed; an animation stays animated in png (as an animated PNG), webp, gif, avif and apng "
+            "[default: same as input]."
         ),
     ] = None,
     output: Annotated[Optional[pathlib.Path], opt.output_option()] = None,
@@ -243,6 +256,7 @@ def edit_cmd(
     quality: Quality = None,
     lossless: Lossless = False,
     webp_method: WebpMethod = None,
+    avif_speed: opt.AvifSpeed = None,
     compress_level: Annotated[
         Optional[int],
         _option("--compress-level", callback=opt.within(0, 9), help="PNG zlib level 0-9 [default: 6].", panel=SAVE),
@@ -267,6 +281,7 @@ def edit_cmd(
             panel=SAVE,
         ),
     ] = None,
+    animated: Annotated[Optional[bool], opt.animated_option("edit")] = None,
     metadata: opt.MetadataOpt = None,
     strip_icc: StripIcc = False,
     max_pixels: opt.MaxPixels = None,
@@ -276,7 +291,8 @@ def edit_cmd(
     Edit images: the photo's own orientation first, then [bold]--rotate[/bold] and
     [bold]--flip[/bold], then [bold]--crop[/bold] (or [bold]--aspect[/bold]), then
     [bold]--brightness[/bold], [bold]--contrast[/bold] and [bold]--saturation[/bold] (the same as
-    CSS filters). Each image keeps its format; animated GIFs and WebPs have every frame edited.
+    CSS filters). Each image keeps its format; animations (GIF, WebP, APNG, AVIF) have every frame
+    edited and stay animated, in PNG too (--no-animated for the first frame only).
     With no options, it writes a copy with the photo's own orientation applied.
     Writes [cyan]photo.jpg.edited.jpg[/cyan] for photo.jpg, next to each image, under
     --output-dir, or to -o for a single image.
@@ -285,6 +301,7 @@ def edit_cmd(
     """
     from sashimi.api.edit import edit_images_generator
     from sashimi.cli import _limits
+    from sashimi.cli.convert_cmd import _kept_switch
     from sashimi.config import IMAGE_EDIT
     from sashimi.config._base import normalize_target
 
@@ -304,6 +321,7 @@ def edit_cmd(
     typed = opt.format_from_output(opt.enum_value(output_format), output, suffixes)
     fmt = normalize_target(typed)
     options = {
+        "avif_speed": avif_speed,
         "rotate": int(rotate.value) if rotate else None,
         "flip": opt.enum_value(flip),
         **parse_crop(crop),
@@ -314,8 +332,9 @@ def edit_cmd(
             quality, lossless, webp_method, compress_level, optimize, progressive, subsampling, tiff_compression,
             metadata, strip_icc,
         ),
+        "animated": animated if animated is not None else _kept_switch("edit", "animated"),
     }  # fmt: skip
-    configs, config_for = _configs(IMAGE_EDIT, options, fmt, "images")
+    configs, config_for = _configs(IMAGE_EDIT, options, fmt, "images", quiet=("animated",))
     runner = BatchRunner("edit", "Edit", json_output, limit_output, dry_run=dry_run, yes=yes or force)
     naming = opt.naming_args("edit", output_name, output)
     with refusals():
@@ -357,7 +376,10 @@ def frames_cmd(
         _option("--speed", help="Playback speed: 2 is twice as fast, 0.5 half as fast [default: 1].", panel=FRAMES),
     ] = None,
     output_format: Annotated[
-        Optional[FramesFormat], opt.output_format_option("Output format: gif or webp [default: same as input].")
+        Optional[FramesFormat],
+        opt.output_format_option(
+            "Output format: gif, webp, avif, apng or png (an animated PNG, as apng) [default: same as input]."
+        ),
     ] = None,
     output: Annotated[Optional[pathlib.Path], opt.output_option()] = None,
     output_name: Annotated[Optional[str], opt.output_name_option("frames", "{input_name}.{role}.{output_ext}")] = None,
@@ -380,6 +402,7 @@ def frames_cmd(
     ] = None,
     lossless: Lossless = False,
     webp_method: WebpMethod = None,
+    avif_speed: opt.AvifSpeed = None,
     optimize: Annotated[
         Optional[bool],
         _option(
@@ -395,7 +418,7 @@ def frames_cmd(
     max_animation_bytes: opt.MaxAnimationBytes = None,
 ):
     """
-    Keep or drop frames of animated GIFs and WebPs, and change their speed. Kept frames play in
+    Keep or drop frames of animations (GIF, WebP, APNG, AVIF), and change their speed. Kept frames play in
     their original order, each as it looked in the animation. Each file keeps its format.
     Writes [cyan]clip.gif.frames.gif[/cyan] for clip.gif, next to each animation, under
     --output-dir, or to -o for a single animation. See the frames and their durations with [bold]sashimi info[/bold].
@@ -410,13 +433,18 @@ def frames_cmd(
 
     opt.single_file_or_fail(paths, output)
     limits = _limits.resolve(max_pixels=max_pixels, max_animation_bytes=max_animation_bytes)
-    fmt = opt.format_from_output(opt.enum_value(output_format), output, {".gif": "gif", ".webp": "webp"})
+    fmt = opt.format_from_output(
+        opt.enum_value(output_format),
+        output,
+        {".gif": "gif", ".webp": "webp", ".avif": "avif", ".apng": "apng", ".png": "png"},
+    )
     if keep is None and drop is None and speed in (None, 1) and fmt is None:
         fail(
             "Nothing to change: give --keep or --drop (frames, numbered from 1 as sashimi info lists them), "
             "--speed, or --output-format, e.g. sashimi frames anim.gif --drop 1-5."
         )
     options = {
+        "avif_speed": avif_speed,
         "keep": parse_frames(keep, "--keep"),
         "speed": speed,
         **_save_options(quality, lossless, webp_method, None, optimize, False, None, None, metadata, strip_icc),

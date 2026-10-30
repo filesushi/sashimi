@@ -29,6 +29,8 @@ EXTENSIONS: dict[str, tuple[str, ...]] = {
     "gif": ("gif",),
     "bmp": ("bmp",),
     "tiff": ("tif", "tiff"),
+    "avif": ("avif",),
+    "apng": ("apng", "png"),
     "ico": ("ico",),
     "zip": ("zip",),
     "mp4": ("mp4", "m4v"),
@@ -42,6 +44,8 @@ EXTENSIONS: dict[str, tuple[str, ...]] = {
     "flac": ("flac",),
 }
 """Every extension that names each output format; the first is sashimi's standard one."""
+ALSO_NAMED = {"jpeg": ("jfif", "jpe", "jif")}
+"""Other extensions of files in a format, which sashimi reads but never writes: a ``.jfif`` is a JPEG."""
 
 ROLES = {
     "resize": "resized",

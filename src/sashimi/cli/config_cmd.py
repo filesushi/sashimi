@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Annotated, Any, NoReturn, Optional
 import typer
 
 from sashimi.cli import _options as opt
-from sashimi.cli._output import console, fail
+from sashimi.cli._output import console, err_console, fail
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -92,6 +92,30 @@ def _split_key(key: str) -> tuple[str, str]:
     return section, option
 
 
+def _check_ffmpeg_path() -> None:
+    """Warns, after ``config set ffmpeg.path``, when the FFmpeg sashimi will now run can't be used, or isn't the one just set."""
+    from rich.markup import escape
+
+    from sashimi.cli import settings
+    from sashimi.core._ffmpeg import checked_paths, ffmpeg_paths
+    from sashimi.errors import FFmpegPathError
+
+    settings.load_raw_config.cache_clear()
+    try:
+        paths = checked_paths()
+    except FFmpegPathError as e:
+        err_console.print(f"[bold yellow]Warning:[/bold yellow] {escape(str(e))}")
+        return
+    kept = settings.ffmpeg_setting()
+    if kept is not None and paths.origin != kept[1]:
+        err_console.print(
+            f"[bold yellow]Warning:[/bold yellow] sashimi runs {escape(str(paths.ffmpeg))}, chosen by "
+            f"{escape(paths.origin)}, which comes before ffmpeg.path."
+        )
+    elif ffmpeg_paths().ffmpeg:
+        console.print(f"[dim]sashimi now runs {escape(str(paths.ffmpeg))} and {escape(str(paths.ffprobe))}.[/dim]")
+
+
 def _check(section: str, option: str, value: Any) -> None:
     """Refuses unknown keys and invalid values before anything is written."""
     from pydantic import ValidationError
@@ -102,9 +126,20 @@ def _check(section: str, option: str, value: Any) -> None:
 
     if option not in settings.known_keys(section):
         fail(f"Unknown option {section}.{option}.")
+    if section == "ffmpeg":
+        if not isinstance(value, str) or not value.strip() or "\0" in value:
+            fail(
+                "ffmpeg.path must be an ffmpeg executable, e.g. /opt/ffmpeg/bin/ffmpeg (ffprobe is the one beside "
+                "it; on Windows, .exe may be left off), or the folder holding ffmpeg and ffprobe."
+            )
+        return
     if option == "output_dir":
         if not isinstance(value, str) or not value.strip() or "\0" in value:
             fail(f"{section}.output_dir must be a folder, e.g. sheets or /home/me/sheets.")
+        return
+    if option in settings.COMMAND_KEYS.get(section, ()):
+        if not isinstance(value, bool):
+            fail(f"{section}.{option} must be true or false.")
         return
     if option == "output_name":
         from sashimi.api._naming import ROLES, NameTemplate
@@ -223,7 +258,9 @@ def set_(
     from sashimi.cli import settings
 
     section, option = _split_key(key)
-    parsed = _parse_value(value, as_text=option in settings.OUTPUT_KEYS or option in settings.PATH_KEYS)
+    parsed = _parse_value(
+        value, as_text=option in settings.OUTPUT_KEYS or option in settings.PATH_KEYS or section == "ffmpeg"
+    )
     _check(section, option, parsed)
     try:
         written = settings.set_config_value(section, option, parsed, scope=_scope(project))
@@ -231,6 +268,8 @@ def set_(
         _settings_error(e)
     console.print(f"[green]Set[/green] {section}.{option} = {escape(repr(parsed))} in {escape(str(written))}")
     console.print(f"[dim]({escape(_where(written))})[/dim]")
+    if section == "ffmpeg":
+        _check_ffmpeg_path()
     if option == "output_dir":
         import pathlib
 
@@ -380,7 +419,7 @@ def defaults(
                 default += f" [dim](Python: {escape(_defaults.format_value(row['model_default'], name))})[/dim]"
             if "sashimi_toml" in row:
                 toml_value = _defaults.format_value(row["sashimi_toml"], name, operation.value)
-                default += f"\n[yellow]sashimi.toml: {escape(toml_value)}[/yellow]"
+                default += f"\n[yellow]{TOML_LABEL}{escape(toml_value)}[/yellow]"
             cells.append((option, default, escape(row["accepted"]), escape(row["description"])))
         table = Table(
             title=heading,
@@ -397,16 +436,20 @@ def defaults(
         for cell in cells:
             table.add_row(*cell)
         if sum(widths) + 3 * len(widths) + 1 <= console.width:
-            console.print(table)
+            console.print(table, soft_wrap=False)
         else:
             _print_stacked(heading, escape(doc), cells)
         console.print()
 
 
+TOML_LABEL = "sashimi.toml: "
+
+
 def _widths(cells: list[tuple[str, str, str, str]]) -> list[int]:
     """
     The narrowest each column of a defaults table can be without cutting a word or a value: the
-    option in full, the longest word elsewhere, and at least 30 for the description, so it reads.
+    option in full, a value from sashimi.toml in full, the longest word elsewhere, and at least 30
+    for the description, so it reads.
     """
     from rich.measure import Measurement
     from rich.text import Text
@@ -420,12 +463,18 @@ def _widths(cells: list[tuple[str, str, str, str]]) -> list[int]:
                 widest[index] = max(widest[index], renderable.cell_len)
             else:
                 widest[index] = max(widest[index], Measurement.get(console, console.options, renderable).minimum)
+            if index == 1:
+                kept = [line.cell_len for line in renderable.split() if line.plain.startswith(TOML_LABEL)]
+                widest[index] = max(widest[index], *kept, 0)
     widest[3] = max(widest[3], 30)
     return widest
 
 
 def _print_stacked(heading: str, caption: str, cells: list[tuple[str, str, str, str]]) -> None:
-    """A defaults table for a terminal too narrow for its columns: one block per option, so nothing is cut."""
+    """
+    A defaults table for a terminal too narrow for its columns: one block per option, so nothing is cut;
+    a default is printed whole on its line, never broken.
+    """
     from rich.padding import Padding
     from rich.table import Table
     from rich.text import Text
@@ -435,10 +484,13 @@ def _print_stacked(heading: str, caption: str, cells: list[tuple[str, str, str, 
     for option, default, accepted, description in cells:
         console.print()
         console.print(option, style="cyan")
+        lines = default.split("\n")
+        console.print(f"  [bold]Default:[/bold]  [green]{lines[0]}[/green]")
+        for line in lines[1:]:
+            console.print(f"            [green]{line}[/green]")
         grid = Table.grid(padding=(0, 1))
         grid.add_column(style="bold", no_wrap=True)
         grid.add_column(overflow="fold")
-        grid.add_row("Default:", f"[green]{default}[/green]")
         grid.add_row("Accepted:", accepted)
-        console.print(Padding(grid, (0, 0, 0, 2)))
-        console.print(Padding(Text.from_markup(description, overflow="fold"), (0, 0, 0, 2)))
+        console.print(Padding(grid, (0, 0, 0, 2)), soft_wrap=False)
+        console.print(Padding(Text.from_markup(description, overflow="fold"), (0, 0, 0, 2)), soft_wrap=False)

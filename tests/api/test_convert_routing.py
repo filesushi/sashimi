@@ -13,7 +13,12 @@ from tests.conftest import needs_ffmpeg
 
 def finals(gen):
     items = list(gen)
-    return [(p.name, status, msg) for p, status, msg, _ in items[1:] if status != "starting"]
+    return [(p.name, status, without_fidelity(msg)) for p, status, msg, _ in items[1:] if status != "starting"]
+
+
+def without_fidelity(message):
+    """A result message without the fidelity statement the batch layer ends it with (tested on its own)."""
+    return message.split(" (lossy", 1)[0].split(" (lossless", 1)[0].split(" (picture", 1)[0].split(" (sound", 1)[0]
 
 
 def test_source_extensions_per_target():
@@ -29,7 +34,7 @@ def test_skip_reasons(tmp_path):
     (tmp_path / "a.mp3").write_bytes(b"x")
     (tmp_path / "b.txt").write_bytes(b"x")
     assert finals(convert_files_generator([tmp_path / "a.mp3", tmp_path / "b.txt"], "mp3")) == [
-        ("a.mp3", "skipped", "Already MP3"),
+        ("a.mp3", "skipped", "This file doesn't look like media we can read."),
         ("b.txt", "skipped", "Can't convert .txt to MP3; converting to MP3 works on videos and audio files."),
     ]
 

@@ -22,7 +22,8 @@ from sashimi.config import (
 )
 from sashimi.errors import InvalidOptionsError, MediaTooLargeError, UnsupportedMediaError
 
-from tests.conftest import leftovers
+from sashimi.core._imagemeta import stated_dpi
+from tests.conftest import leftovers, noise
 
 WHITE = (255, 255, 255)
 
@@ -76,7 +77,7 @@ def test_max_width_scales_down_and_never_up(tmp_path):
 
 
 def test_quality_and_lossless(tmp_path):
-    noisy = Image.effect_noise((256, 256), 64).convert("RGB")
+    noisy = noise((256, 256), 4)
     src = blob(tmp_path, noisy, "PNG")
     low, high = tmp_path / "low", tmp_path / "high"
     image.convert(src, low, JpegImageConfig(quality=10))
@@ -121,7 +122,7 @@ def test_non_images_are_user_errors(tmp_path):
 
 def test_truncated_image_is_a_user_error(tmp_path):
     buf = io.BytesIO()
-    Image.effect_noise((256, 256), 64).convert("RGB").save(buf, "PNG")
+    noise((256, 256), 5).save(buf, "PNG")
     src = tmp_path / "original.blob"
     src.write_bytes(buf.getvalue()[:2000])
     with pytest.raises(UnsupportedMediaError):
@@ -133,7 +134,7 @@ def test_oversized_images_are_refused(tmp_path):
     with pytest.raises(MediaTooLargeError) as e:
         image.convert(src, tmp_path / "r", PngImageConfig(), limits=Limits(max_pixels=5_000_000))
     assert e.value.user_message == (
-        "This image is too large to process: it has 6 megapixels (3000x2000), and the limit is 5."
+        "This image is too large to process: it has 6 megapixels (3000x2000), and the limit is 5 megapixels."
     )
     assert e.value.limit == "max_pixels"
     for call in (image.to_ico, image.favicon_pack):
@@ -154,18 +155,20 @@ def _gif_header(path, width, height):
 def test_limits_above_pillows_own_are_honoured(tmp_path):
     huge = _gif_header(tmp_path / "huge.gif", 20000, 20000)
     before = Image.MAX_IMAGE_PIXELS
+    out = tmp_path / "out.jpg"
     with pytest.raises(MediaTooLargeError) as e:
-        image.frames_info(huge)
+        image.convert(huge, out, JpegImageConfig())
     assert e.value.limit == "max_pixels"
     assert e.value.user_message == (
-        "This image is too large to process: it has more than 179 megapixels, and the limit is 64."
+        "This image is too large to process: it has more than 179 megapixels, and the limit is 64 megapixels."
     )
     with pytest.raises(MediaTooLargeError) as e:
-        image.frames_info(huge, limits=Limits(max_pixels=300_000_000))
-    assert "it has 400 megapixels (20000x20000), and the limit is 300." in e.value.user_message
-    assert image.frames_info(huge, limits=Limits(max_pixels=None)).width == 20000
-    assert image.frames_info(huge, limits=Limits(max_pixels=400_000_000)).height == 20000
+        image.convert(huge, out, JpegImageConfig(), limits=Limits(max_pixels=300_000_000))
+    assert "it has 400 megapixels (20000x20000), and the limit is 300 megapixels." in e.value.user_message
+    assert image.frames_info(huge).width == 20000
+    assert image.frames_info(huge, limits=Limits(max_pixels=100)).height == 20000
     assert Image.MAX_IMAGE_PIXELS == before
+    assert not out.exists()
 
 
 def test_resize_configs_need_a_size(tmp_path):
@@ -332,3 +335,34 @@ def test_a_cmyk_profile_stays_only_on_cmyk_output(tmp_path, target):
     with Image.open(tmp_path / "out") as out:
         assert out.info.get("icc_profile") == (profile if out.mode == "CMYK" else None)
         assert (out.mode == "CMYK") is (target == "tiff")
+
+
+DPI_SOURCES = {"BMP": {}, "JPEG": {"quality": 95}, "PNG": {}, "TIFF": {}}
+DPI_TARGETS = {"bmp": True, "jpeg": True, "png": True, "tiff": True, "webp": False, "gif": False, "avif": False}
+
+
+@pytest.mark.parametrize("source", list(DPI_SOURCES))
+@pytest.mark.parametrize("target", list(DPI_TARGETS))
+def test_a_stated_resolution_is_carried_where_the_target_can_hold_it(tmp_path, source, target):
+    path = blob(tmp_path, Image.new("RGB", (40, 30), (10, 120, 200)), source, dpi=(300, 300), **DPI_SOURCES[source])
+    out = tmp_path / f"out.{target}"
+    result = image.convert(path, out, IMAGE_CONVERT.from_params({}, target=target))
+    with Image.open(out) as written:
+        dpi = written.info.get("dpi")
+    if DPI_TARGETS[target]:
+        assert dpi is not None and [round(v) for v in dpi] == [300, 300]
+        assert "resolution (DPI)" not in result.fidelity.text
+    else:
+        assert "resolution (DPI) dropped" in result.fidelity.text
+
+
+def test_bmp_to_tiff_is_lossless_and_remove_all_drops_the_resolution(tmp_path):
+    path = blob(tmp_path, Image.new("RGB", (40, 30), (10, 120, 200)), "BMP", dpi=(300, 300))
+    result = image.convert(path, tmp_path / "o.tiff", IMAGE_CONVERT.from_params({}, target="tiff"))
+    assert result.fidelity.level == "lossless" and result.fidelity.text == "lossless"
+    removed = image.convert(
+        path, tmp_path / "r.tiff", IMAGE_CONVERT.from_params({"metadata": "remove_all"}, target="tiff")
+    )
+    with Image.open(tmp_path / "r.tiff") as written:
+        assert stated_dpi(written) is None
+    assert "resolution (DPI) removed as asked" in removed.fidelity.text

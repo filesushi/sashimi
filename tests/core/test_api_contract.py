@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 The FileSushi Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""What FileSushi's web app and workers rely on, beyond the models' fields and defaults (docs/FILESUSHI_HANDBACK.md)."""
+"""What callers of the Python API rely on, beyond the models' fields and defaults."""
 
 import types
 import typing
@@ -90,7 +90,7 @@ def test_every_bounded_number_has_an_inclusive_upper_bound_in_its_metadata(model
         assert upper == ([] if maximum is None else [maximum]), name
 
 
-def test_bounds_filesushi_reads():
+def test_upper_bounds_are_readable():
     def upper(model, name):
         return next(m.le for m in model.model_fields[name].metadata if isinstance(m, annotated_types.Le))
 
@@ -138,14 +138,14 @@ def test_user_errors_take_a_message_and_a_detail(error_type):
     assert plain.detail is None and str(plain) == "A sentence."
 
 
-def test_new_in_0_6_0_for_filesushi():
+def test_new_in_0_6_0():
     assert config.IcoConfig.model_fields["background_color"].default is None
     assert config.FaviconPackConfig.model_fields["background_color"].default == (255, 255, 255)
     assert config.FAVICON_PNG_SIZES == (16, 32, 48, 180, 192, 512)
     assert config.CONTACT_SHEET.model_for(animated=True).model_fields["cols"].default == "auto"
 
 
-FILESUSHI = {
+EVERY_LIMIT = {
     "max_pixels": 24_000_000,
     "max_video_seconds": 600,
     "max_audio_seconds": 3600,
@@ -154,21 +154,23 @@ FILESUSHI = {
     "max_frame_bytes": 400 * 1024 * 1024,
     "max_animation_bytes": 256 * 1024 * 1024,
     "max_sheet_pixels": 64_000_000,
+    "max_scan_packets": 1_000_000,
 }
-"""The limits the hand-back tells FileSushi to pass, so that it accepts what it accepted before."""
+"""A value for every limit."""
 
 
-def test_limits_filesushi_passes():
-    limits = config.Limits(**FILESUSHI)
-    assert set(FILESUSHI) == set(config.Limits.model_fields)
-    assert limits == config.Limits.from_params({key: str(value) for key, value in FILESUSHI.items()})
+def test_limits_round_trip():
+    limits = config.Limits(**EVERY_LIMIT)
+    assert set(EVERY_LIMIT) == set(config.Limits.model_fields)
+    assert limits == config.Limits.from_params({key: str(value) for key, value in EVERY_LIMIT.items()})
     assert config.Limits.from_params({"max_video_seconds": "none"}).max_video_seconds is None
-    assert config.Limits.unlimited() == config.Limits(**dict.fromkeys(FILESUSHI))
+    assert config.Limits.unlimited() == config.Limits(**dict.fromkeys(EVERY_LIMIT))
     defaults = config.Limits()
     assert (defaults.max_pixels, defaults.max_sheet_pixels) == (64_000_000, 64_000_000)
     assert (defaults.max_frame_bytes, defaults.max_animation_bytes) == (2**30, 2**30)
     assert [defaults.max_video_seconds, defaults.max_audio_seconds, defaults.max_gif_seconds] == [None] * 3
     assert defaults.max_preview_clips is None
+    assert defaults.max_scan_packets == 2_000_000
     with pytest.raises(ValidationError):
         limits.max_pixels = 1
 
@@ -186,7 +188,7 @@ def test_old_limit_names_are_gone():
         assert not hasattr(config, name), name
 
 
-def test_new_in_0_6_0_for_filesushis_editors():
+def test_new_in_0_6_0_for_editors():
     assert config.EDIT_QUALITY == 92
     assert config.JpegEditConfig.model_fields["quality"].default == 92
     assert config.MIN_FRAME_MS == 20
@@ -252,7 +254,7 @@ def test_metadata_is_one_field_that_keeps_by_default():
     assert e.value.user_message == "Unknown option: keep_exif."
 
 
-def test_metadata_tools_for_filesushi():
+def test_metadata_tools():
     import inspect
 
     from sashimi import metadata

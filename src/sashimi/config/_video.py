@@ -35,6 +35,11 @@ class _H264Options(SourceMetadata):
     """AAC audio bitrate in kb/s."""
     mute: bool = False
     """Drop the audio track."""
+    keep_hdr: bool = False
+    """
+    Keep HDR video (PQ or HLG) as HDR: 10-bit HEVC with its colour and mastering-display settings,
+    instead of H.264 tone-mapped to standard range. Standard-range video is unaffected.
+    """
 
 
 class _Vp9Options(SourceMetadata):
@@ -48,6 +53,11 @@ class _Vp9Options(SourceMetadata):
     """Opus audio bitrate in kb/s. Opus allows at most 256 per channel, so mono audio gets at most 256."""
     mute: bool = False
     """Drop the audio track."""
+    keep_hdr: bool = False
+    """
+    Keep HDR video (PQ or HLG) as HDR: 10-bit VP9 (profile 2) with its colour and mastering-display
+    settings, instead of tone-mapping it to standard range. Standard-range video is unaffected.
+    """
 
 
 class _Clip(ParamsModel):
@@ -139,10 +149,35 @@ class _Transform(ParamsModel):
 
 
 class Mp4TransformConfig(_H264Options, _Transform):
-    """Rotate and/or flip a video, re-encoding it as MP4 (H.264 + AAC)."""
+    """
+    Rotate and/or flip a video into an MP4. A rotation alone of a video MP4 can hold as it is
+    (H.264, HEVC, AV1 or VP9) sets its display rotation, without re-encoding; anything else is
+    re-encoded as H.264 + AAC.
+    """
 
     target: Annotated[Literal["mp4"], TargetName] = "mp4"
     """The output format."""
+    reencode: bool = False
+    """
+    Re-encode, so the picture itself is turned, for players that ignore a video's display
+    rotation. Off, a rotation alone is lossless where it can be: only the display rotation is set.
+    """
+
+
+class MovTransformConfig(_H264Options, _Transform):
+    """
+    Rotate and/or flip a video into a MOV. A rotation alone of a video MOV can hold as it is
+    (H.264, HEVC or ProRes) sets its display rotation, without re-encoding, and keeps every
+    stream MOV holds (PCM sound included); anything else is re-encoded as H.264 + AAC.
+    """
+
+    target: Annotated[Literal["mov"], TargetName] = "mov"
+    """The output format."""
+    reencode: bool = False
+    """
+    Re-encode, so the picture itself is turned, for players that ignore a video's display
+    rotation. Off, a rotation alone is lossless where it can be: only the display rotation is set.
+    """
 
 
 class WebmTransformConfig(_Vp9Options, _Transform):
@@ -268,7 +303,7 @@ class WebpPreviewConfig(_Preview):
 
 VideoConvertConfig = GifVideoConfig | WebpVideoConfig | WebmVideoConfig | Mp4VideoConfig
 """Any video conversion config: one model per output format."""
-TransformConfig = Mp4TransformConfig | WebmTransformConfig
+TransformConfig = Mp4TransformConfig | WebmTransformConfig | MovTransformConfig
 """Any rotate/flip config."""
 TrimConfig = CopyTrimConfig | H264TrimConfig | Vp9TrimConfig
 """Any trim config: a stream copy, or an accurate re-encode."""
@@ -290,9 +325,11 @@ Previews (short clips sampled from across a video, played in turn), by ``target`
 """
 
 VIDEO_TRANSFORM: ConfigFamily[TransformConfig] = ConfigFamily(
-    "video transform", {"mp4": Mp4TransformConfig, "webm": WebmTransformConfig}, default="mp4"
+    "video transform",
+    {"mp4": Mp4TransformConfig, "webm": WebmTransformConfig, "mov": MovTransformConfig},
+    default="mp4",
 )
-"""Rotate/flip, by ``target``: mp4 (the default) or webm."""
+"""Rotate/flip, by ``target``: mp4 (the default), webm or mov."""
 
 
 class _TrimFamily(ConfigFamily[TrimConfig]):

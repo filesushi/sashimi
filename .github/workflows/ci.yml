@@ -17,9 +17,6 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  FFMPEG_SERIES: "8.1"
-
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -49,8 +46,18 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.11", "3.12", "3.13", "3.14"]
+        ffmpeg: ["8.1"]
+        include:
+          - os: ubuntu-latest
+            python-version: "3.14"
+            ffmpeg: "9.0"
+          - os: windows-latest
+            python-version: "3.14"
+            ffmpeg: "9.0"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      FFMPEG_SERIES: ${{ matrix.ffmpeg }}
 
     steps:
       - name: Check out repository
@@ -110,7 +117,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: filesushi/sashimi
           files: coverage.xml
-          flags: ${{ runner.os }}-py${{ matrix.python-version }}
+          flags: ${{ runner.os }}-py${{ matrix.python-version }}-ffmpeg${{ matrix.ffmpeg }}
 
   ci-success:
     needs: [lint, build-and-test]

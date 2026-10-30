@@ -1,15 +1,24 @@
 # SPDX-FileCopyrightText: 2026 The FileSushi Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared CLI plumbing: consoles, the batch progress/results renderer, and option validation errors."""
+"""
+Shared CLI plumbing: consoles, the batch progress/results renderer, and option validation errors.
+
+Every message is printed as one line however long it is (a terminal wraps it on screen, a pipe or
+a log gets it whole), and nothing is coloured by guesswork, so a path or a command can always be
+copied as it is. Tables are printed only when every row fits the width on one line; otherwise the
+same rows are printed one per line.
+"""
 
 from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import pathlib
 import time
+import traceback
 from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING, Any, NoReturn
 
@@ -22,8 +31,8 @@ if TYPE_CHECKING:
 
     from sashimi.api._batch import YieldType
 
-console = Console()
-err_console = Console(stderr=True)
+console = Console(soft_wrap=True, highlight=False)
+err_console = Console(stderr=True, soft_wrap=True, highlight=False)
 
 STATUS_STYLES = {
     "success": "[bold green]Success[/bold green]",
@@ -42,6 +51,13 @@ def display_path(path: pathlib.Path) -> str:
         return str(path)
 
 
+def refusal(error: Any) -> str:
+    """A user error's message, followed by how to change the limit it names (``sashimi config set limits.…``), if any."""
+    from sashimi.cli._limits import with_hint
+
+    return with_hint(error.user_message, getattr(error, "limit", None))
+
+
 def fail(message: str, code: int = 2, *, markup: bool = False) -> NoReturn:
     """Prints `message` as an error and exits with `code`. The message is plain text unless `markup`."""
     err_console.print(f"[bold red]Error:[/bold red] {message if markup else escape(message)}")
@@ -56,7 +72,7 @@ def refusals() -> Iterator[None]:
     try:
         yield
     except UserInputError as e:
-        fail(e.user_message)
+        fail(refusal(e))
 
 
 def exit_on_invalid_options(err: ValidationError, flags: dict[str, str]) -> NoReturn:
@@ -97,6 +113,49 @@ def warn_unknown_settings(path: pathlib.Path, keys: list[str], project: bool) ->
         f"[yellow]Warning: {path} has settings sashimi doesn't use: {', '.join(keys)}; they're ignored.{hint}[/yellow]",
         highlight=False,
     )
+
+
+def print_fields(rows: Iterable[tuple[str, str]]) -> None:
+    """
+    Prints label and value rows (plain text) as two aligned columns, one line per row however long the
+    value, so a path is never cut short or broken; a value of several lines keeps its lines, aligned.
+    """
+    from rich.cells import cell_len
+
+    rows = list(rows)
+    width = max((cell_len(label) for label, _ in rows), default=0)
+    indent = "\n" + " " * (width + 6)
+    for label, value in rows:
+        pad = " " * (width - cell_len(label))
+        console.print(f"  {pad}[bold cyan]{escape(label)}[/bold cyan]    {indent.join(escape(value).splitlines())}")
+
+
+class LineLogHandler(logging.Handler):
+    """Log records on stderr as one line each (time, level, message), never wrapped or coloured by guesswork."""
+
+    def __init__(self, level: int = logging.NOTSET) -> None:
+        super().__init__(level)
+        self.console = Console(stderr=True, soft_wrap=True, highlight=False)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        from datetime import datetime
+
+        from rich.text import Text
+
+        try:
+            message = record.getMessage()
+            if record.exc_info:
+                message += "\n" + "".join(traceback.format_exception(*record.exc_info)).rstrip()
+            name = record.levelname
+            line = Text.assemble(
+                (datetime.fromtimestamp(record.created).strftime("[%X] "), "log.time"),
+                (name.ljust(8), f"logging.level.{name.lower()}"),
+                " ",
+                message,
+            )
+            self.console.print(line, markup=False)
+        except Exception:
+            self.handleError(record)
 
 
 def print_json(payload: Any) -> None:
@@ -174,7 +233,7 @@ class BatchRunner:
         try:
             plan = generator.plan()
         except UserInputError as e:
-            fail(e.user_message)
+            fail(refusal(e))
         if not (plan.searched and plan.mixed):
             return plan
         roots = [path for path in self._inputs if path.is_dir()]
@@ -208,6 +267,22 @@ class BatchRunner:
         from sashimi.api._consume import build_report
         from sashimi.errors import UserInputError
 
+        from sashimi.api._batch import FFMPEG_REFUSALS, LIMIT_HINT
+        from sashimi.cli._limits import hint
+
+        token = LIMIT_HINT.set(hint)
+        self._refusals: dict[str, None] = {}
+        gathered = FFMPEG_REFUSALS.set(None if self.json_output else self._refusals)
+        try:
+            self._run(generator, inputs)
+        finally:
+            LIMIT_HINT.reset(token)
+            FFMPEG_REFUSALS.reset(gathered)
+
+    def _run(self, generator: Iterator[YieldType], inputs: Iterable[pathlib.Path]) -> None:
+        from sashimi.api._consume import build_report
+        from sashimi.errors import UserInputError
+
         self._inputs = list(inputs)
         plan = self._plan(generator)
         start_time = time.perf_counter()
@@ -215,7 +290,7 @@ class BatchRunner:
         try:
             first = next(generator, 0)
         except UserInputError as e:
-            fail(e.user_message)
+            fail(refusal(e))
         total_files = first if isinstance(first, int) else 0
         started: set[pathlib.Path] = set()
 
@@ -298,6 +373,8 @@ class BatchRunner:
         else:
             self._print_summary(results, report["summary"], clashed)
         self._notes(plan)
+        for message in self._refusals:
+            console.print(f"[red]{escape(message)}[/red]")
         if failed:
             raise typer.Exit(code=1)
 
@@ -437,13 +514,37 @@ class BatchRunner:
         console.print(Panel(grid, title=f"{self.title} summary", border_style="blue", expand=False))
         console.print()
 
-        table = Table(show_header=True, header_style="bold magenta", expand=False)
-        table.add_column("File", style="cyan", overflow="ellipsis")
-        table.add_column("Status", style="magenta")
-        table.add_column("Details", style="green", overflow="fold")
-        for path, status, message, _ in results[: self.limit_output]:
-            table.add_row(
-                escape(display_path(path)), self._style(STATUS_STYLES, status, path in clashed), escape(message)
-            )
-        console.print(table)
+        rows = [
+            (display_path(path), self._style(STATUS_STYLES, status, path in clashed), message)
+            for path, status, message, _ in results[: self.limit_output]
+        ]
+        if _table_fits(rows, ("File", "Status", "Details")):
+            table = Table(show_header=True, header_style="bold magenta", expand=False)
+            table.add_column("File", style="cyan", no_wrap=True)
+            table.add_column("Status", style="magenta", no_wrap=True)
+            table.add_column("Details", style="green", no_wrap=True)
+            for shown, style, message in rows:
+                table.add_row(escape(shown), style, escape(message))
+            console.print(table)
+        else:
+            for shown, style, message in rows:
+                console.print(f"{style}: [cyan]{escape(shown)}[/cyan]: {escape(message)}")
         self._more(results)
+
+
+def _table_fits(rows: list[tuple[str, str, str]], headers: tuple[str, ...]) -> bool:
+    """
+    Whether a results table of `rows` (path, status markup, message) fits the console's width with
+    every cell on one line, so no path or message is broken or cut short.
+    """
+    from rich.cells import cell_len
+    from rich.text import Text
+
+    widths = [cell_len(header) for header in headers]
+    for shown, style, message in rows:
+        cells = (shown, Text.from_markup(style).plain, message)
+        for index, text in enumerate(cells):
+            if "\n" in text:
+                return False
+            widths[index] = max(widths[index], cell_len(text))
+    return sum(widths) + 3 * len(widths) + 1 <= console.width

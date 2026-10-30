@@ -7,7 +7,14 @@ import pytest
 
 from sashimi import audio, video
 from sashimi.config import AUDIO_CONVERT, OPUS_MAX_KBPS_PER_CHANNEL, VIDEO_CONVERT, VIDEO_TRANSFORM, VIDEO_TRIM
-from sashimi.core._mediameta import LOCATION_KEYS, dropped_streams, metadata_args, opus_kbps
+from sashimi.core._mediameta import (
+    LOCATION_KEYS,
+    dropped_streams,
+    merged_movflags,
+    metadata_args,
+    opus_kbps,
+    quicktime_tag_args,
+)
 from sashimi.core.probe import MediaInfo, StreamInfo
 
 SOURCE = MediaInfo(
@@ -119,3 +126,106 @@ def test_mono_opus_in_webm_is_lowered_too():
     mp4 = VIDEO_CONVERT.from_params({"audio_bitrate_kbps": 384}, target="mp4")
     cmd = video.build_convert_command("i", "o", mp4, duration=10.0, threads=1, source=SOURCE)
     assert cmd[cmd.index("-b:a") + 1] == "384k"
+
+
+def _tagged(**tags: str) -> MediaInfo:
+    return MediaInfo(container="mov,mp4,m4a,3gp,3g2,mj2", duration=1.0, has_video=True, tags=tags)
+
+
+IPHONE = _tagged(
+    major_brand="qt  ",
+    minor_version="0",
+    compatible_brands="qt  ",
+    creation_time="2024-09-06T16:08:07.000000Z",
+    **{"com.apple.quicktime.make": "Apple", "com.apple.quicktime.location.ISO6709": "+40+008/"},
+)
+
+
+@pytest.mark.parametrize("muxer", ["mp4", "mov", "ipod", "3gp"])
+def test_quicktime_keys_are_written_as_metadata_keys_with_the_source_creation_time(muxer):
+    assert quicktime_tag_args("keep", IPHONE, muxer) == [
+        "-movflags",
+        "+use_metadata_tags",
+        *("-metadata:g", "major_brand=", "-metadata:g", "minor_version=", "-metadata:g", "compatible_brands="),
+        *("-metadata:g", "creation_time=2024-09-06T16:08:07.000000Z"),
+    ]
+
+
+def test_remove_location_keeps_the_other_keys_and_remove_all_adds_nothing():
+    assert "+use_metadata_tags" in quicktime_tag_args("remove_location", IPHONE, "mp4")
+    only_location = _tagged(**{"com.apple.quicktime.location.ISO6709": "+40+008/", "title": "t"})
+    assert quicktime_tag_args("remove_location", only_location, "mp4") == []
+    assert quicktime_tag_args("keep", only_location, "mp4")[:2] == ["-movflags", "+use_metadata_tags"]
+    assert quicktime_tag_args("remove_all", IPHONE, "mp4") == []
+
+
+def test_tags_the_plain_writer_keeps_need_no_metadata_keys():
+    assert quicktime_tag_args("keep", _tagged(title="t", artist="a", encoder="Lavf"), "mp4") == []
+    assert quicktime_tag_args("keep", _tagged(title="t", location="+1+2/"), "mov") == []
+    assert quicktime_tag_args("keep", _tagged(title="t", location="+1+2/"), "mp4")[1] == "+use_metadata_tags"
+    assert quicktime_tag_args("keep", _tagged(composer="c"), "mov")[1] == "+use_metadata_tags"
+    assert quicktime_tag_args("keep", _tagged(firmware="x"), "matroska") == []
+    assert quicktime_tag_args("keep", None, "mp4") == []
+
+
+def test_only_a_well_formed_creation_time_is_carried():
+    assert quicktime_tag_args("keep", _tagged(creation_time="2019-11-18T15:41:25.000000Z"), "mp4") == [
+        "-metadata:g",
+        "creation_time=2019-11-18T15:41:25.000000Z",
+    ]
+    assert quicktime_tag_args("keep", _tagged(creation_time="yesterday"), "mp4") == []
+
+
+def test_movflags_are_merged_into_one():
+    cmd = ["ffmpeg", "-movflags", "+faststart", "-c", "copy", "-movflags", "+use_metadata_tags", "out"]
+    assert merged_movflags(cmd) == ["ffmpeg", "-movflags", "+faststart+use_metadata_tags", "-c", "copy", "out"]
+    assert merged_movflags(["ffmpeg", "-movflags", "+faststart", "out"]) == ["ffmpeg", "-movflags", "+faststart", "out"]
+
+
+def test_builders_merge_the_flags_for_a_tagged_source():
+    tagged = IPHONE.model_copy(update={"streams": [StreamInfo(type="video", codec="h264")]})
+    cmd = video.build_trim_command(
+        "in", "out", VIDEO_TRIM.from_params({"container": "mp4"}), duration=1.0, source=tagged
+    )
+    assert cmd.count("-movflags") == 1 and "+faststart+use_metadata_tags" in cmd
+
+
+def test_other_muxers_leave_out_the_sources_file_type_tags():
+    brands = ("-metadata:g", "major_brand=", "-metadata:g", "minor_version=", "-metadata:g", "compatible_brands=")
+    assert quicktime_tag_args("keep", IPHONE, "mp3") == [*brands]
+    assert quicktime_tag_args("remove_all", IPHONE, "matroska") == []
+
+
+@pytest.mark.parametrize("muxer", ["matroska", "webm"])
+@pytest.mark.parametrize("mode", ["keep", "remove_location"])
+def test_matroska_and_webm_get_the_sources_creation_time(muxer, mode):
+    brands = ("-metadata:g", "major_brand=", "-metadata:g", "minor_version=", "-metadata:g", "compatible_brands=")
+    assert quicktime_tag_args(mode, IPHONE, muxer) == [
+        *brands,
+        *("-metadata:g", "creation_time=2024-09-06T16:08:07.000000Z"),
+    ]
+    untimed = IPHONE.model_copy(update={"tags": {k: v for k, v in IPHONE.tags.items() if k != "creation_time"}})
+    assert quicktime_tag_args(mode, untimed, muxer) == [*brands]
+    assert quicktime_tag_args("remove_all", IPHONE, muxer) == []
+
+
+def test_a_creation_time_ffmpeg_9_states_twice_is_carried_once():
+    joined = _tagged(creation_time="2021-06-05T12:01:47.000000Z;2021-06-05T12:01:47.000000Z")
+    assert quicktime_tag_args("keep", joined, "mp4") == ["-metadata:g", "creation_time=2021-06-05T12:01:47.000000Z"]
+    differing = _tagged(creation_time="soon;2021-06-05T12:01:47.000000Z")
+    assert quicktime_tag_args("keep", differing, "mp4") == ["-metadata:g", "creation_time=2021-06-05T12:01:47.000000Z"]
+
+
+def test_ffprobe_tags_repeated_with_a_semicolon_are_read_once():
+    from sashimi.core.probe import parse_ffprobe_json
+
+    data = {
+        "format": {
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "duration": "1.0",
+            "tags": {"creation_time": "2021-06-05T12:01:47Z;2021-06-05T12:01:47Z", "major_brand": "isom;mp42"},
+        },
+        "streams": [],
+    }
+    tags = parse_ffprobe_json(data).tags
+    assert tags["creation_time"] == "2021-06-05T12:01:47Z" and tags["major_brand"] == "isom;mp42"

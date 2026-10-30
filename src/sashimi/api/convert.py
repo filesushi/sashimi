@@ -17,7 +17,7 @@ from sashimi.api._batch import (
     run_batch,
 )
 from sashimi.api._kinds import kind_of
-from sashimi.api._naming import EXTENSIONS, NameTemplate, check_output_ext, naming, output_format
+from sashimi.api._naming import ALSO_NAMED, EXTENSIONS, NameTemplate, check_output_ext, naming, output_format
 from sashimi.api._consume import consume_generator
 from sashimi.config import (
     AUDIO_CONVERT,
@@ -32,6 +32,7 @@ from sashimi.config import (
     VideoConvertConfig,
 )
 from sashimi.core import audio, image, video
+from sashimi.core.probe import probe
 from sashimi.config._base import normalize_target
 from sashimi.errors import InvalidOptionsError, UnsupportedMediaError
 
@@ -45,26 +46,41 @@ __all__ = [
     "to_png",
 ]
 
-Target = Literal["jpeg", "png", "webp", "gif", "bmp", "tiff", "ico", "webm", "mp4", "mp3", "m4a", "wav", "ogg", "flac"]
+Target = Literal[
+    "jpeg",
+    "png",
+    "webp",
+    "gif",
+    "bmp",
+    "tiff",
+    "avif",
+    "apng",
+    "ico",
+    "webm",
+    "mp4",
+    "mp3",
+    "m4a",
+    "wav",
+    "ogg",
+    "flac",
+]
 TARGET_SUFFIX = {target: f".{EXTENSIONS[target][0]}" for target in get_args(Target)}
-_STILL_CONVERTED = frozenset({".m4v"})
-"""Extensions of a target's format that converting to it still takes: an .m4v is converted to an .mp4."""
+_STILL_CONVERTED = {"mp4": frozenset({".m4v"}), "apng": frozenset({".png"})}
+"""
+Extensions of a target's format that converting to it still takes: an .m4v is converted to an
+.mp4, and a .png (usually a still picture) to an animated PNG.
+"""
 IMAGE_TARGETS = frozenset(IMAGE_CONVERT.targets) | {"ico"}
 VIDEO_TARGETS = frozenset(VIDEO_CONVERT.targets)
 AUDIO_TARGETS = frozenset(AUDIO_CONVERT.targets)
-
-ROUTE_MESSAGES = {
-    "copy": "Converted to {name} (video and audio copied, not re-encoded)",
-    "copy_video": "Converted to {name} (video copied, audio re-encoded)",
-}
-"""Success messages for the MP4 routes that skip a re-encode (see :func:`sashimi.video.plan_mp4_route`)."""
 
 Processor = Callable[[pathlib.Path, pathlib.Path, Callable[[float, str], None] | None], None]
 
 
 def own_extensions(target: str) -> frozenset[str]:
     """The extensions of files already in `target`'s format, which converting to it leaves alone."""
-    return frozenset(f".{ext}" for ext in EXTENSIONS[target]) - _STILL_CONVERTED
+    own = frozenset(f".{ext}" for ext in (*EXTENSIONS[target], *ALSO_NAMED.get(target, ())))
+    return own - _STILL_CONVERTED.get(target, frozenset())
 
 
 def _source_extensions(target: str) -> list[str]:
@@ -91,6 +107,35 @@ def _accepts(target: str) -> str:
     if target in VIDEO_TARGETS:
         return "images and videos"
     return "images"
+
+
+def _unreadable(path: pathlib.Path, target: str) -> str | None:
+    """
+    Why a file named like `target`'s format isn't one sashimi can read (an empty or damaged file),
+    or None when it reads it, so "Already MP4" is said only of files that are.
+    """
+    return _read_own(path, target)[0]
+
+
+def _read_own(path: pathlib.Path, target: str) -> tuple[str | None, bool]:
+    """:func:`_unreadable`'s answer, and whether the file is HDR video (which a conversion to its own format tone-maps)."""
+    from sashimi.core._hdr import is_hdr
+    from sashimi.errors import SashimiError
+
+    try:
+        if target in IMAGE_TARGETS:
+            from sashimi.core.edit import frames_info
+
+            frames_info(path)
+            return None, False
+        info = probe(path)
+    except SashimiError as e:
+        return getattr(e, "user_message", None) or "This file isn't one sashimi can read.", False
+    if target in AUDIO_TARGETS and not info.has_audio:
+        return "This file doesn't look like audio we can read.", False
+    if target in VIDEO_TARGETS and not info.has_video:
+        return video.NOT_A_VIDEO, False
+    return None, target in ("mp4", "webm") and is_hdr(info)
 
 
 def route_for(target: str, path: pathlib.Path) -> str | None:
@@ -157,20 +202,17 @@ def convert_files_generator(
     video_cfg = video_config or (VIDEO_CONVERT.from_params(target=target) if target in VIDEO_TARGETS else None)
     audio_cfg = audio_config or (AUDIO_CONVERT.from_params(target=target) if target in AUDIO_TARGETS else None)
 
-    def process(src: pathlib.Path, dst: pathlib.Path, progress: Callable[[float, str], None] | None) -> str | None:
+    def process(src: pathlib.Path, dst: pathlib.Path, progress: Callable[[float, str], None] | None) -> Any:
         route = route_for(target, src)
         if route == "audio" and audio_cfg:
-            audio.convert(src, dst, audio_cfg, max_workers=max_workers, limits=limits, on_progress=progress)
-        elif route == "video" and video_cfg:
-            route = video.convert(src, dst, video_cfg, max_workers=max_workers, limits=limits, on_progress=progress)
-            return ROUTE_MESSAGES.get(route)
-        elif route == "ico":
-            image.to_ico(src, dst, ico_config, limits=limits, on_progress=progress)
-        elif route == "image" and image_cfg:
-            image.convert(src, dst, image_cfg, limits=limits, on_progress=progress)
-        else:
-            raise UnsupportedMediaError(f"Can't convert {src.suffix or 'this file'} to {target.upper()}.")
-        return None
+            return audio.convert(src, dst, audio_cfg, max_workers=max_workers, limits=limits, on_progress=progress)
+        if route == "video" and video_cfg:
+            return video.convert(src, dst, video_cfg, max_workers=max_workers, limits=limits, on_progress=progress)
+        if route == "ico":
+            return image.to_ico(src, dst, ico_config, limits=limits, on_progress=progress)
+        if route == "image" and image_cfg:
+            return image.convert(src, dst, image_cfg, limits=limits, on_progress=progress)
+        raise UnsupportedMediaError(f"Can't convert {src.suffix or 'this file'} to {target.upper()}.")
 
     own_format = own_extensions(target)
     check_output_ext(output_ext, (target,))
@@ -179,9 +221,23 @@ def convert_files_generator(
     names = naming("convert", lambda _: fmt, output_name, fixed=fmt)
     accepts = _accepts(target)
 
+    readable: dict[pathlib.Path, tuple[str | None, bool]] = {}
+    tone_maps = video_cfg is not None and not getattr(video_cfg, "keep_hdr", False)
+
+    def unreadable(path: pathlib.Path) -> str | None:
+        if path not in readable:
+            readable[path] = _read_own(path, target)
+        return readable[path][0]
+
+    def tone_mapped(path: pathlib.Path) -> bool:
+        return path.suffix.lower() in own_format and unreadable(path) is None and tone_maps and readable[path][1]
+
+    def is_already(path: pathlib.Path) -> bool:
+        return path.suffix.lower() in own_format and unreadable(path) is None and not tone_mapped(path)
+
     def reject_reason(path: pathlib.Path) -> str:
         if path.suffix.lower() in own_format:
-            return f"Already {target.upper()}"
+            return unreadable(path) or f"Already {target.upper()}"
         return f"Can't convert {path.suffix or 'this file'} to {target.upper()}; converting to {target.upper()} works on {accepts}."
 
     return run_batch(
@@ -196,10 +252,11 @@ def convert_files_generator(
         route=lambda path: route_for(target, path) or "unsupported",
         on_file_progress=on_file_progress,
         reject_reason=reject_reason,
-        already=lambda path: path.suffix.lower() in own_format,
+        already=is_already,
         output=output,
         output_dir=output_dir,
         dry_run=dry_run,
+        takes_named=tone_mapped,
     )
 
 

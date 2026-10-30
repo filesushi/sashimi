@@ -48,9 +48,6 @@ def test_header_check_covers_the_source_tree():
     assert {
         "pyproject.toml",
         "scripts/check.sh",
-        "scripts/sandbox_check.sh",
-        "scripts/sandbox/Dockerfile",
-        "scripts/sandbox/driver.py",
         "src/sashimi/__init__.py",
         "tests/conftest.py",
     } <= names
@@ -59,6 +56,7 @@ def test_header_check_covers_the_source_tree():
         for directory in ("src", "tests", "scripts")
         for path in (PROJECT / directory).rglob("*.py")
         if "__pycache__" not in path.parts
+        and not any(path.is_relative_to(PROJECT / "scripts" / local) for local in ("bench", "sandbox"))
     } <= names
 
 

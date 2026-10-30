@@ -19,10 +19,19 @@ from sashimi.core.edit import (
     plan_frame_strip,
     select_frames,
 )
-from sashimi.core.image import convert, favicon_html, favicon_manifest, favicon_pack, heif_available, to_ico
+from sashimi.core.image import (
+    ImageConversion,
+    convert,
+    favicon_html,
+    favicon_manifest,
+    favicon_pack,
+    heif_available,
+    to_ico,
+)
 
 __all__ = [
     "FrameStrip",
+    "ImageConversion",
     "FramesInfo",
     "adjust_colors",
     "aspect_crop",

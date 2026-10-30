@@ -31,6 +31,12 @@ app = typer.Typer(
 )
 
 
+def _kept_ffmpeg() -> tuple[str, str, str] | None:
+    from sashimi.cli import settings
+
+    return settings.ffmpeg_setting()
+
+
 @app.callback()
 def main_callback(
     version: Annotated[
@@ -53,6 +59,9 @@ def main_callback(
     sashimi: convert and edit images, video and audio, make video contact sheets and previews, and
     trim videos losslessly. Logging and warnings go to stderr, so --json output on stdout stays clean.
     """
+    from sashimi.core._ffmpeg import use_setting
+
+    use_setting(_kept_ffmpeg)
     if verbose >= 2:
         log_level = logging.DEBUG
     elif verbose == 1:
@@ -60,15 +69,9 @@ def main_callback(
     else:
         log_level = logging.WARNING
 
-    from rich.console import Console
-    from rich.logging import RichHandler
+    from sashimi.cli._output import LineLogHandler
 
-    logging.basicConfig(
-        level=log_level,
-        format="%(message)s",
-        datefmt="[%X]",
-        handlers=[RichHandler(rich_tracebacks=True, show_path=False, console=Console(stderr=True))],
-    )
+    logging.basicConfig(level=log_level, handlers=[LineLogHandler()])
     logger = logging.getLogger("sashimi")
     logger.setLevel(log_level)
     if verbose > 0:
@@ -161,7 +164,7 @@ app.command(
     name="info",
     no_args_is_help=True,
     rich_help_panel=INSPECT,
-    short_help="Show a media file's format, duration and codecs, or an image's frames.",
+    short_help="Show a media file's format, duration and codecs, an image's frames, or the FFmpeg in use.",
 )(files_cmd.info_cmd)
 app.command(
     name="metadata",

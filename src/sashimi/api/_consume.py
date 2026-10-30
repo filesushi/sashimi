@@ -25,6 +25,18 @@ def _folder_clash(plan: BatchPlan) -> dict[str, Any] | None:
     }
 
 
+def _row(row: ResultTuple) -> dict[str, Any]:
+    path, status, message, out = row
+    told = getattr(row, "fidelity", None)
+    return {
+        "file": str(path),
+        "status": status,
+        "message": message,
+        "output": str(out) if out else None,
+        "fidelity": told.model_dump() | {"text": told.text} if told is not None else None,
+    }
+
+
 def build_report(
     command: str,
     total_found: int,
@@ -45,7 +57,7 @@ def build_report(
          "clash_note": "..." or null,
          "folder_clash": {"files": [...], "output_dir", "holder", "same_files"} or null,
          "summary": {"total_found", "success", "exists", "skipped", "errors", "time_taken_seconds", "avg_time_seconds"},
-         "results": [{"file", "status", "message", "output"}, ...]}
+         "results": [{"file", "status", "message", "output", "fidelity"}, ...]}
 
     ``dry_run`` is true when nothing was written and the results say what would have been.
     With the batch's `plan`, ``kinds`` and ``routes`` count the files it planned to process,
@@ -56,7 +68,8 @@ def build_report(
     one output name, and where it was set, and ``folder_clash`` (:class:`~sashimi.api.FolderClash`) lists the
     files skipped because ``output_dir`` gathered them from different folders, with the folder that holds
     them all and whether searching it recursively would take the same files (``null`` when it wasn't
-    checked). `extra` keys are added at the top level (``flatten`` adds
+    checked). Each result's ``fidelity`` says what a written output kept of its input
+    (:class:`~sashimi.fidelity.Fidelity`, with its ``text``), or is null. `extra` keys are added at the top level (``flatten`` adds
     ``renamed`` and ``removed_dirs``).
     """
     rows = list(results)
@@ -91,10 +104,7 @@ def build_report(
             "time_taken_seconds": round(seconds, 2),
             "avg_time_seconds": round(seconds / success, 2) if success else 0.0,
         },
-        "results": [
-            {"file": str(path), "status": status, "message": message, "output": str(out) if out else None}
-            for path, status, message, out in rows
-        ],
+        "results": [_row(row) for row in rows],
     }
 
 

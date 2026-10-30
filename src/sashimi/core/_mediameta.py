@@ -100,6 +100,105 @@ def metadata_args(mode: MetadataMode, info: MediaInfo | None, outputs: Sequence[
     return args
 
 
+QUICKTIME_MUXERS = frozenset({"mp4", "mov", "ipod", "3gp", "3g2"})
+"""The muxers that write QuickTime/ISO tags, where ``use_metadata_tags`` decides which tags survive."""
+_ITUNES_TAGS = frozenset(
+    {
+        "title",
+        "artist",
+        "album_artist",
+        "composer",
+        "album",
+        "date",
+        "encoder",
+        "comment",
+        "genre",
+        "copyright",
+        "grouping",
+        "lyrics",
+        "description",
+        "synopsis",
+        "show",
+        "episode_id",
+        "network",
+        "keywords",
+        "media_type",
+        "hd_video",
+        "gapless_playback",
+        "compilation",
+        "track",
+        "disc",
+    }
+)
+_MOV_TAGS = frozenset({"title", "artist", "album", "date", "comment", "genre", "copyright", "make", "model"})
+MATROSKA_MUXERS = frozenset({"matroska", "webm"})
+"""The muxers that write a Matroska segment, whose ``DateUTC`` holds the creation time."""
+_PLAIN_TAGS = {"mov": _MOV_TAGS | {"location", "location-eng"}}
+"""
+The tags each muxer writes without ``use_metadata_tags`` (measured on FFmpeg 8.1.3 and 9.0.2):
+MP4 and M4A keep iTunes' list, MOV QuickTime's user-data strings; every other tag is dropped.
+"""
+_CONTAINER_KEYS = ("major_brand", "minor_version", "compatible_brands")
+"""Source tags that describe the source's file type, not its content: never written as tags."""
+_ISO_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z?")
+
+
+def _kept_tags(mode: MetadataMode, info: MediaInfo) -> list[str]:
+    lowered = {key.lower() for key in LOCATION_KEYS}
+    return [
+        key
+        for key in info.tags
+        if key.lower() not in _CONTAINER_KEYS
+        and key.lower() != "creation_time"
+        and not (mode == "remove_location" and (key.lower() in lowered or is_location_key(key)))
+    ]
+
+
+def quicktime_tag_args(mode: MetadataMode, info: MediaInfo | None, muxer: str) -> list[str]:
+    """
+    Output options that keep the source's tags and creation time in an MP4, MOV or M4A output.
+    FFmpeg's plain writer keeps only iTunes' or
+    QuickTime's fixed list, so when the source has any other tag that `mode` keeps (an iPhone's
+    ``com.apple.quicktime.*`` keys, a camera's ``firmware``), the tags are written as QuickTime
+    metadata keys (``use_metadata_tags``), without the source's file-type tags. The source's
+    creation time is written as given, so reruns stay byte-identical; Matroska and WebM outputs
+    get it too, in the segment's own date field (``DateUTC``), which FFmpeg
+    and sashimi read back as ``creation_time``. Other muxers (MP3, Ogg, …) only leave out the
+    source's file-type tags (``major_brand`` and the like, which FFmpeg would copy as tags, and
+    FFmpeg 9.0 joins with ``;``), as Matroska and WebM do too. Nothing for ``remove_all``, which
+    drops every tag; merge with :func:`merged_movflags`.
+    """
+    if info is None or mode == "remove_all":
+        return []
+    created = next((value for key, value in info.tags.items() if key.lower() == "creation_time"), "")
+    stated = next((part.strip() for part in created.split(";") if _ISO_TIME.fullmatch(part.strip())), None)
+    when = ["-metadata:g", f"creation_time={stated}"] if stated else []
+    if muxer not in QUICKTIME_MUXERS:
+        args = [arg for key in info.tags if key.lower() in _CONTAINER_KEYS for arg in ("-metadata:g", f"{key}=")]
+        return [*args, *when] if muxer in MATROSKA_MUXERS else args
+    args = []
+    plain = _PLAIN_TAGS.get(muxer, _ITUNES_TAGS)
+    if any(key.lower() not in plain for key in _kept_tags(mode, info)):
+        args += ["-movflags", "+use_metadata_tags"]
+        for key in info.tags:
+            if key.lower() in _CONTAINER_KEYS:
+                args += ["-metadata:g", f"{key}="]
+    return [*args, *when]
+
+
+def merged_movflags(cmd: list[str]) -> list[str]:
+    """`cmd` with every ``-movflags`` combined into the first (FFmpeg keeps only the last one given). Pure."""
+    at = [index for index, arg in enumerate(cmd) if arg == "-movflags" and index + 1 < len(cmd)]
+    if len(at) < 2:
+        return cmd
+    flags = "".join(cmd[index + 1] for index in at)
+    merged = list(cmd)
+    merged[at[0] + 1] = flags
+    for index in reversed(at[1:]):
+        del merged[index : index + 2]
+    return merged
+
+
 def opus_kbps(requested: int, channels: int | None) -> int:
     """
     The Opus bitrate to ask for: `requested`, lowered to Opus's ceiling of
@@ -108,3 +207,18 @@ def opus_kbps(requested: int, channels: int | None) -> int:
     if channels is None or channels < 1:
         return requested
     return min(requested, OPUS_MAX_KBPS_PER_CHANNEL * channels)
+
+
+OPUS_LAYOUTS = ("mono", "stereo", "3.0", "quad", "5.0", "5.1", "6.1", "7.1")
+"""The channel layouts Opus encodes with speaker positions (Vorbis channel order) that browsers play."""
+
+
+def opus_layout_filter(channels: int | None) -> str | None:
+    """
+    An audio filter that gives libopus a layout it takes, for sound of more than two channels (a
+    5.1 with side speakers becomes 5.1, 7.1 wide becomes 7.1, and so on, as ffmpeg remixes them),
+    or None for mono and stereo. A layout Opus already takes passes through unchanged.
+    """
+    if channels is None or channels <= 2:
+        return None
+    return "aformat=channel_layouts=" + "|".join(OPUS_LAYOUTS)

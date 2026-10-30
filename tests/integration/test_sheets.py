@@ -89,19 +89,21 @@ def test_clip_shorter_than_a_tile_gets_one_tile(silent_video_blob, tmp_path):
         assert img.size == (400, 224) and img.n_frames == 12
 
 
-def test_too_short_for_animated(tmp_path):
+def test_a_clip_shorter_than_a_second_is_one_animated_tile(tmp_path):
     short = tmp_path / "original.blob"
     subprocess.run(
         ["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=s=160x90:r=10:d=0.6", "-c:v", "libx264",
          "-f", "mp4", str(short)],
         check=True,
     )  # fmt: skip
-    with pytest.raises(MediaTooShortError):
-        sheets.render(short, tmp_path / "r", AnimatedWebpSheetConfig())
+    sheets.render(short, tmp_path / "r", AnimatedWebpSheetConfig())
+    assert Image.open(tmp_path / "r").n_frames > 1
 
 
 def test_animated_sheet_default_grid(video_blob, rotated_video_blob, tmp_path):
-    config = AnimatedWebpSheetConfig(fps=2, sample_duration=1, show_header=False, gap=0)
+    config = AnimatedWebpSheetConfig(
+        fps=2, sample_duration=0.25, show_header=False, gap=0, start_offset_percent=0, end_offset_percent=0
+    )
     sheets.render(video_blob, tmp_path / "land", config)
     sheets.render(rotated_video_blob, tmp_path / "portrait", config)
     with Image.open(tmp_path / "land") as land, Image.open(tmp_path / "portrait") as portrait:
