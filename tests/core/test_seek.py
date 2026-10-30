@@ -8,10 +8,10 @@ from array import array
 
 import pytest
 
-from sashimi.core._seek import VideoIndex, _index, clip_frames, clip_route, decoding_args
+from sashimi.core._seek import HELD_FRAMES, VideoIndex, _index, clip_frames, clip_route, decoding_args
 from sashimi.core.probe import MediaInfo
 from sashimi.core.sheets.animated import build_clip_command
-from sashimi.core.sheets.static import build_frame_command, build_frames_command, sheet_route
+from sashimi.core.sheets.static import build_frame_command, pick_tiles, sheet_route, tile_windows
 
 
 def index(frames: int, gop: int, *, fps: int = 25, delay: int = 0, missing_pts: bool = False) -> VideoIndex:
@@ -89,11 +89,61 @@ def test_the_clip_command_keeps_its_length_when_it_decodes_from_earlier():
     assert keyed[keyed.index("-vf") + 1].startswith("trim=start=10:end=12,setpts=PTS-10/TB,fps=12,")
 
 
-def test_the_frames_command_picks_the_first_frame_at_or_after_each_time():
-    cmd = build_frames_command("in", [1.0, 2.5], 160, 90, 2, decode_from=0.0)
-    graph = cmd[cmd.index("-vf") + 1]
-    assert graph.startswith("select='if(eq(selected_n,0),gte(t,1),if(eq(selected_n,1),gte(t,2.5),0))'")
-    assert cmd[cmd.index("-frames:v") + 1] == "2" and cmd[cmd.index("-t") + 1] == "3.5"
+def held(shown: list[float], fps: int = 30) -> VideoIndex:
+    """A stream showing frames at `shown` (seconds), all keyframes, at a nominal `fps`."""
+    times = array("d", shown)
+    return _index([(t, t, True) for t in times], MediaInfo(container="mp4", fps=fps), 1e9, 1e9, None)
+
+
+def _picked(times, tiles, held_after):
+    frames = [(t, f"{t:.3f}".encode()) for t in times]
+    return {slot: data.decode() for slot, data in pick_tiles(frames, tiles, held_after)}
+
+
+def test_tiles_closer_together_than_frames_share_frames_and_none_is_lost():
+    frames = [n / 10 for n in range(20)]
+    tiles = [0.2 + i * 1.6 / 29 for i in range(30)]
+    picked = _picked(frames, tiles, HELD_FRAMES / 10)
+    assert sorted(picked) == list(range(30))
+    for slot, time in enumerate(tiles):
+        first_after = min(t for t in frames if t >= round(time, 3) - 1e-6)
+        assert picked[slot] == f"{first_after:.3f}"
+
+
+def test_a_tile_inside_a_held_frame_shows_the_frame_on_screen():
+    frames = [n / 30 for n in range(300)] + [10.0] + [30 + n / 30 for n in range(30)]
+    picked = _picked(frames, [9.99, 15.0, 29.0, 29.99, 30.0, 30.01], HELD_FRAMES / 30)
+    assert picked == {0: "10.000", 1: "10.000", 2: "10.000", 3: "30.000", 4: "30.000", 5: "30.033"}
+
+
+def test_tiles_after_the_last_frame_show_the_last_frame():
+    picked = _picked([0.0, 0.5, 1.0], [0.4, 1.2, 5.0], 0.75)
+    assert picked == {0: "0.500", 1: "1.000", 2: "1.000"}
+
+
+def test_the_index_finds_the_frame_shown_for_a_time_and_where_to_seek_for_it():
+    stream = held([n / 30 for n in range(300)] + [10.0] + [30 + n / 30 for n in range(30)])
+    assert stream.interval == pytest.approx(1 / 30)
+    assert stream.frame_for(5.01) == pytest.approx(5 + 1 / 30)
+    assert stream.held_from(5.01) is None and stream.seek_time(5.01) == 5.01
+    assert stream.frame_for(15.0) == 10.0 and stream.held_from(15.0) == 10.0
+    assert stream.seek_time(15.0) == 10.0
+    assert stream.frame_for(29.99) == 30.0 and stream.held_from(29.99) is None
+    assert stream.frame_for(99.0) == pytest.approx(30 + 29 / 30)
+    late = held([0.5 + n / 30 for n in range(30)])
+    assert late.frame_for(0.0) == 0.5 and late.held_from(0.0) is None
+
+
+def test_a_held_frame_seek_lands_at_or_before_it():
+    stream = held([n / 30 for n in range(31)] + [1 + 1 / 30 + 5.0])
+    assert stream.seek_time(3.0) == math.floor((1.0) * 1000) / 1000
+
+
+def test_tile_windows_reach_back_to_a_held_frame():
+    stream = held([n / 30 for n in range(300)] + [10.0] + [30 + n / 30 for n in range(30)])
+    (start, end), (dense_start, dense_end) = tile_windows(stream, [15.0, 30.51])
+    assert start == pytest.approx(10.0 - 1 / 60) and end == pytest.approx(15.0 + 1 / 60)
+    assert dense_start == pytest.approx(30.51 - 1 / 60) and dense_end == pytest.approx(30.5 + 1 / 30 + 1 / 60)
 
 
 def test_sparse_keyframes_take_one_pass_and_dense_ones_a_seek_each():
@@ -118,7 +168,7 @@ def test_resampling_follows_the_fps_filter():
     times = [n / 25 + 0.038 for n in range(100)]
     picked = _resampled(times, [(1.202, 1.0)], 15)
     assert len(picked[0]) == 15
-    assert picked[0][:3] == ["1.28", "1.28", "1.36"]
+    assert picked[0][:3] == ["1.28", "1.36", "1.40"]
 
 
 def test_resampling_pads_a_clip_that_ends_early_and_skips_frames_before_it():
@@ -213,3 +263,54 @@ def test_half_ticks_round_up_like_the_fps_filter_even_when_read_a_little_low():
     frames = [(float(t) - 1e-6, f"{float(t):.4f}".encode()) for t in exact]
     picked = [data.decode() for _, data in clip_frames(frames, [(5.075, 2.0)], fps)]
     assert picked == wanted
+
+
+def _resampled_held(times, clips, fps, hold):
+    frames = [(t, f"{t:.2f}".encode()) for t in times]
+    order: list[int] = []
+    out: dict[int, list[str]] = {}
+    for slot, data in clip_frames(frames, clips, fps, hold):
+        order.append(slot)
+        out.setdefault(slot, []).append(data.decode())
+    return out, order
+
+
+VFR = [n / 30 for n in range(300)] + [10.0] + [30 + n / 30 for n in range(900)]
+
+
+def test_a_clip_inside_a_held_frame_shows_that_frame_and_is_not_dropped():
+    clips = [(6.0, 2.0), (17.5, 2.0), (29.0, 2.0), (40.5, 2.0)]
+    picked, order = _resampled_held(VFR, clips, 15, HELD_FRAMES / 30)
+    assert [len(picked[slot]) for slot in range(4)] == [30, 30, 30, 30]
+    assert set(picked[1]) == {"10.00"}
+    assert picked[2][:15] == ["10.00"] * 15 and picked[2][15] == "30.00"
+    assert order == sorted(order)
+
+
+def test_without_held_clips_resample_exactly_as_before():
+    times = [n / 25 + 0.038 for n in range(400)]
+    clips = [(1.202, 1.0), (5.0, 2.0), (9.97, 1.5)]
+    assert _resampled_held(times, clips, 15, None)[0] == _resampled_held(times, clips, 15, HELD_FRAMES / 25)[0]
+
+
+def test_clips_are_settled_in_order_when_a_frame_passes_their_end():
+    times = [0.0, 0.1, 5.0, 5.1]
+    picked, order = _resampled_held(times, [(0.0, 1.0), (5.0, 1.0)], 5, None)
+    assert order == [0] * 5 + [1] * 5 and picked[0] == ["0.00"] + ["0.10"] * 4
+
+
+def test_a_frame_reaches_a_time_as_ffmpeg_rounds_it_to_the_time_base():
+    from sashimi.core._seek import reaches
+
+    assert reaches(0.5, 0.504, (1, 100)) and not reaches(0.5, 0.505, (1, 100))
+    assert not reaches(0.5, 0.501, None) and reaches(0.5, 0.5, None)
+    assert not reaches(0.2, 0.201, (1, 10240))
+    picked = _picked([n / 10 for n in range(10)], [0.501, 0.504, 0.505], 0.15)
+    assert picked == {0: "0.600", 1: "0.600", 2: "0.600"}
+    frames = [(n / 10, f"{n / 10:.3f}".encode()) for n in range(10)]
+    coarse = {slot: data.decode() for slot, data in pick_tiles(frames, [0.501, 0.504, 0.505], 0.15, (1, 100))}
+    assert coarse == {0: "0.500", 1: "0.500", 2: "0.600"}
+    stream = _index(
+        [(n / 10, n / 10, True) for n in range(10)], MediaInfo(container="mp4", fps=10), 9, 9, None, (1, 100)
+    )
+    assert stream.frame_for(0.504) == 0.5 and stream.frame_for(0.505) == pytest.approx(0.6)

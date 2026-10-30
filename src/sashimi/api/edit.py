@@ -66,7 +66,7 @@ def edit_images_generator(
     if crop_aspect is not None and not callable(config) and config.crops:
         raise InvalidOptionsError("Give a crop box or a crop shape, not both.")
 
-    def process(src: pathlib.Path, dst: pathlib.Path, progress: Callable[[float, str], None] | None) -> None:
+    def process(src: pathlib.Path, dst: pathlib.Path, progress: Callable[[float, str], None] | None) -> Any:
         chosen = config_for(src)
         if crop_aspect is not None:
             info = core.frames_info(src, limits=limits)
@@ -74,7 +74,7 @@ def edit_images_generator(
             left, top, crop_width, crop_height = core.aspect_crop(width, height, crop_aspect)
             box = {"crop_left": left, "crop_top": top, "crop_width": crop_width, "crop_height": crop_height}
             chosen = type(chosen).model_validate({**chosen.model_dump(), **box})
-        core.edit(src, dst, chosen, limits=limits, on_progress=progress)
+        return core.edit(src, dst, chosen, limits=limits, on_progress=progress)
 
     fixed = None
     if not callable(config):
@@ -145,7 +145,7 @@ def edit_frames_generator(
         target = "webp" if path.suffix.lower() == ".webp" else "gif"
         return config(target) if callable(config) else config
 
-    def process(src: pathlib.Path, dst: pathlib.Path, progress: Callable[[float, str], None] | None) -> None:
+    def process(src: pathlib.Path, dst: pathlib.Path, progress: Callable[[float, str], None] | None) -> Any:
         chosen = config_for(src)
         if dropped:
             total = core.frames_info(src, limits=limits).frames
@@ -157,7 +157,7 @@ def edit_frames_generator(
             if not keep:
                 raise InvalidOptionsError("That would drop every frame; keep at least one.")
             chosen = type(chosen).model_validate({**chosen.model_dump(), "keep": keep})
-        core.select_frames(src, dst, chosen, limits=limits, on_progress=progress)
+        return core.select_frames(src, dst, chosen, limits=limits, on_progress=progress)
 
     fixed = None if callable(config) else output_format(config.target)
     names = naming("frames", lambda p: output_format(config_for(p).target, p), output_name, fixed=fixed)

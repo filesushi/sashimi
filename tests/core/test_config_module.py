@@ -14,6 +14,7 @@ from PIL.PngImagePlugin import PngInfo
 from sashimi import audio, config, image, video
 from sashimi.core._imagemeta import Carriers
 from sashimi.core.image import _render
+from sashimi.core.probe import MediaInfo
 from sashimi.errors import InvalidOptionsError
 
 
@@ -30,16 +31,16 @@ def test_importing_config_loads_only_pydantic():
 @pytest.mark.parametrize(
     "family, targets",
     [
-        (config.IMAGE_CONVERT, ("jpeg", "png", "webp", "gif", "bmp", "tiff")),
-        (config.IMAGE_RESIZE, ("jpeg", "png", "webp", "gif", "bmp", "tiff")),
+        (config.IMAGE_CONVERT, ("jpeg", "png", "webp", "gif", "bmp", "tiff", "avif", "apng")),
+        (config.IMAGE_RESIZE, ("jpeg", "png", "webp", "gif", "bmp", "tiff", "avif", "apng")),
         (config.VIDEO_CONVERT, ("gif", "webp", "webm", "mp4")),
-        (config.VIDEO_TRANSFORM, ("mp4", "webm")),
+        (config.VIDEO_TRANSFORM, ("mp4", "webm", "mov")),
         (config.VIDEO_PREVIEW, ("gif", "webp")),
         (config.VIDEO_TRIM, ("mkv", "mp4", "webm", "mov")),
         (config.AUDIO_CONVERT, ("mp3", "m4a", "ogg", "wav", "flac")),
         (config.CONTACT_SHEET, ("jpeg", "png", "webp", "gif")),
-        (config.IMAGE_EDIT, ("jpeg", "png", "webp", "gif", "bmp", "tiff")),
-        (config.IMAGE_FRAMES, ("gif", "webp")),
+        (config.IMAGE_EDIT, ("jpeg", "png", "webp", "gif", "bmp", "tiff", "avif", "apng")),
+        (config.IMAGE_FRAMES, ("gif", "webp", "avif", "apng", "png")),
     ],
 )
 def test_family_targets(family, targets):
@@ -106,6 +107,7 @@ FORMAT_UPPER_BOUNDS = {
     "flac_compression_level": {12},
     "png_compress_level": {9},
     "webp_method": {6},
+    "avif_speed": {10},
     "fps": {config.MAX_ANIMATION_FPS},
     "start_offset_percent": {100},
     "end_offset_percent": {100},
@@ -178,7 +180,21 @@ VIDEO_ALTERNATIVES = {
     "wav_bit_depth": 24,
     "flac_compression_level": 8,
     "metadata": "remove_all",
+    "keep_hdr": True,
+    "reencode": True,
 }
+HDR_SOURCE = MediaInfo(
+    container="mov,mp4,m4a,3gp,3g2,mj2",
+    duration=100.0,
+    has_video=True,
+    width=64,
+    height=36,
+    video_codec="hevc",
+    pixel_format="yuv420p10le",
+    color_transfer="smpte2084",
+    color_primaries="bt2020",
+    color_space="bt2020nc",
+)
 DISCRIMINATORS = {"target", "container", "accurate"}
 
 
@@ -207,6 +223,21 @@ def test_every_ffmpeg_option_changes_the_command(model):
     reference = build("i", "o", model(**base), duration=100.0, threads=1)
     for name in set(model.model_fields) - DISCRIMINATORS:
         changed = model(**{**base, name: VIDEO_ALTERNATIVES[name]})
+        if name == "reencode":
+            from sashimi.video import plan_rotation
+
+            source = MediaInfo(container="mov", duration=100.0, has_video=True, width=64, height=36, video_codec="h264")
+            turn = model(rotate=90)
+            assert (
+                plan_rotation(source, turn) == "display"
+                and plan_rotation(source, model(rotate=90, reencode=True)) == "encode"
+            )
+            continue
+        if name == "keep_hdr":
+            hdr = build("i", "o", model(**base), duration=100.0, threads=1, source=HDR_SOURCE)
+            assert build("i", "o", changed, duration=100.0, threads=1, source=HDR_SOURCE) != hdr, name
+            assert build("i", "o", changed, duration=100.0, threads=1) == reference, name
+            continue
         assert build("i", "o", changed, duration=100.0, threads=1) != reference, name
 
 
@@ -226,6 +257,7 @@ IMAGE_ALTERNATIVES = {
     "png_compress_level": 1,
     "webp_method": 6,
     "tiff_compression": "none",
+    "avif_speed": 0,
 }
 IMAGE_CONTEXT = {"resample": {"max_width": 16}, "background_color": {"preserve_transparency": False}}
 
@@ -272,7 +304,7 @@ def _written(tmp_path, model, **fields):
 
 @pytest.mark.parametrize("model", config.IMAGE_CONVERT.models, ids=lambda m: m.__name__)
 def test_every_image_option_changes_the_output(model, tmp_path):
-    for name in set(model.model_fields) - DISCRIMINATORS:
+    for name in set(model.model_fields) - DISCRIMINATORS - {"animated"}:
         context = {k: v for k, v in IMAGE_CONTEXT.get(name, {}).items() if k in model.model_fields}
         if model is config.TiffImageConfig and name == "quality":
             context = {"tiff_compression": "jpeg"}

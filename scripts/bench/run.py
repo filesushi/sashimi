@@ -618,6 +618,26 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Compare two saved JSON benchmark reports and print a Markdown diff table.",
     )
+    corpus = parser.add_argument_group(
+        "corpus benchmark",
+        "Every task that applies to each file of a corpus manifest, run through the CLI with its defaults "
+        "(see scripts/bench/corpus.py). --task and --clip filter tasks and paths, --list lists the cases, "
+        "--resume continues the newest corpus report, --machine and --tag name it.",
+    )
+    corpus.add_argument("--corpus", type=Path, help="A corpus manifest (JSON list of entries) to benchmark.")
+    corpus.add_argument(
+        "--corpus-extra", type=Path, action="append", help="A manifest adding 'tests' notes to corpus entries."
+    )
+    corpus.add_argument(
+        "--scratch-dir", type=Path, help="Where cases write (default: bench-scratch beside the manifest)."
+    )
+    corpus.add_argument("--ffmpeg-dir", help="Folder whose ffmpeg and ffprobe to put first on PATH.")
+    corpus.add_argument("--timeout", type=float, default=600.0, help="Wall-clock seconds per case (default: 600).")
+    corpus.add_argument(
+        "--keep-outputs-mb", type=float, default=25.0, help="Keep outputs up to this size for review (default: 25)."
+    )
+    corpus.add_argument("--no-capability", action="store_true", help="Don't rerun limit refusals with every limit off.")
+    parser.add_argument("--corpus-child", type=Path, help=argparse.SUPPRESS)
     parser.add_argument(
         "--worker-child",
         nargs=3,
@@ -630,6 +650,18 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.corpus_child:
+        from scripts.bench.corpus import run_child
+
+        return run_child(args.corpus_child)
+
+    if args.corpus:
+        from scripts.bench import corpus as corpus_bench
+
+        if args.results_dir == DEFAULT_RESULTS_DIR:
+            args.results_dir = None
+        return corpus_bench.main(args)
 
     if args.worker_child:
         task_name, input_str, workers_str = args.worker_child

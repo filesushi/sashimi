@@ -260,7 +260,7 @@ def test_strip_removes_metadata_without_re_encoding(tmp_path, name, mode):
     src = tmp_path / "source"
     src.write_bytes(STRIP_SOURCES[name]())
     out = tmp_path / "out"
-    extension = metadata.strip(src, out, mode)
+    extension = metadata.strip(src, out, mode).format
     assert extension == STRIP_EXTENSIONS[name]
     assert _frames(out) == _frames(src)
     held = SOURCE_CARRIERS.get(name, {"comment", "XMP"} if name.startswith("gif") else {"EXIF", "XMP"})

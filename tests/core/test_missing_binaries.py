@@ -68,7 +68,7 @@ def test_ffprobe_missing_from_path(media, monkeypatch):
     monkeypatch.setenv("PATH", "")
     with pytest.raises(BinaryNotFoundError) as e:
         sashimi.probe(media)
-    assert "'ffprobe' was not found on PATH" in str(e.value)
+    assert str(e.value).startswith("No ffmpeg was found on PATH.")
 
 
 def test_batch_reports_a_missing_ffprobe_as_a_failure(tmp_path):
@@ -76,7 +76,8 @@ def test_batch_reports_a_missing_ffprobe_as_a_failure(tmp_path):
     clip.write_bytes(b"\x00" * 1024)
     sashimi.set_ffmpeg_paths(ffprobe=MISSING)
     results = [item for item in convert_files_generator(clip, "gif") if isinstance(item, tuple)]
-    assert results[-1][1] == "error" and MISSING in results[-1][2]
+    beside = os.path.join(os.path.dirname(MISSING), "ffmpeg")
+    assert results[-1][1] == "error" and beside in results[-1][2] and "doesn't exist" in results[-1][2]
 
 
 @needs_ffmpeg

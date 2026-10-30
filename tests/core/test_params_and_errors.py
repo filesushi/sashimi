@@ -30,7 +30,7 @@ def test_invalid_value_message_names_the_option():
     "fields, message",
     [
         ({}, "Missing option: target."),
-        ({"target": "tga"}, "Invalid value for target: must be jpeg, png, webp, gif, bmp or tiff."),
+        ({"target": "tga"}, "Invalid value for target: must be jpeg, png, webp, gif, bmp, tiff, avif or apng."),
     ],
 )
 def test_missing_or_unknown_target(fields, message):

@@ -40,7 +40,7 @@ from sashimi.core import probe as probe_module
 from sashimi.core.sheets import animated, static
 from sashimi.errors import InvalidOptionsError, MediaTooLargeError
 
-from tests.conftest import _ffmpeg as make_media, leftovers, needs_ffmpeg
+from tests.conftest import made_by_current_ffmpeg, needs_trusted_cuts, _ffmpeg as make_media, leftovers, needs_ffmpeg
 
 pytestmark = needs_ffmpeg
 
@@ -95,6 +95,7 @@ def finalized_late(tmp_path_factory, late_capture) -> pathlib.Path:
     return path
 
 
+@made_by_current_ffmpeg
 def test_the_fixtures_are_what_they_claim(capture, late_capture, finalized_late):
     data = _ffprobe(capture)
     assert "duration" not in data["format"]
@@ -198,7 +199,7 @@ def test_convert_keeps_the_whole_recording(late_capture, tmp_path, target, param
     out = tmp_path / "out"
     result = video.convert(late_capture, out, VIDEO_CONVERT.from_params(params, target=target), max_workers=2)
     if route is not None:
-        assert result == route
+        assert result.route == route
     if target in ("gif", "webp"):
         with Image.open(out) as img:
             assert img.n_frames == SECONDS * 5
@@ -235,8 +236,11 @@ def test_remux_and_rotate_an_unfinalized_capture(late_capture, tmp_path):
     assert abs(_length(tmp_path / "remuxed") - SECONDS) < 0.15
     video.transform(late_capture, tmp_path / "rotated", Mp4TransformConfig(rotate=90), max_workers=2)
     assert abs(_length(tmp_path / "rotated") - SECONDS) < 0.15
-    rotated = _ffprobe(tmp_path / "rotated")["streams"][0]
-    assert (rotated["width"], rotated["height"]) == (180, 320)
+    rotated = probe(tmp_path / "rotated")
+    assert (rotated.width, rotated.height, rotated.display_turn) == (180, 320, 90)
+    video.transform(late_capture, tmp_path / "turned", Mp4TransformConfig(rotate=90, reencode=True), max_workers=2)
+    turned = _ffprobe(tmp_path / "turned")["streams"][0]
+    assert (turned["width"], turned["height"]) == (180, 320)
 
 
 def test_cli_thumbs_and_info_on_a_live_dump(late_capture, tmp_path, monkeypatch):
@@ -297,6 +301,7 @@ def remuxed_span(tmp_path_factory) -> pathlib.Path:
     return _stated_as_a_span(late, folder / "original.blob", 10.031)
 
 
+@made_by_current_ffmpeg
 def test_a_late_matroska_stating_its_span_is_not_shortened(remuxed_span, tmp_path):
     stated = _ffprobe(remuxed_span)["format"]
     assert stated["tags"]["ENCODER"].startswith("Lavf") and float(stated["start_time"]) == 2.0
@@ -344,6 +349,7 @@ def test_every_route_honours_the_scan_limit(dense_capture, tmp_path):
     assert not list(tmp_path.iterdir())
 
 
+@needs_trusted_cuts
 def test_a_file_is_measured_once_per_call(late_capture, tmp_path, monkeypatch):
     probe_module._scans.clear()
     work = tmp_path / "work"
@@ -385,7 +391,8 @@ def test_cli_refuses_past_the_kept_scan_limit(dense_capture, tmp_path, monkeypat
     (row,) = json.loads(result.output)["results"]
     assert row["status"] == "error" and "more than 1,000 audio and video packets" in row["message"]
     assert row["message"].endswith(
-        "To change the limit, run: sashimi config set limits.max_scan_packets 10000000 (or none for no limit)."
+        "To raise the limit (now 1000), run: sashimi config set limits.max_scan_packets 2000 "
+        "(or any higher value, or none for no limit)."
     )
     info = runner.invoke(app, ["info", "dense.mkv"], env={"COLUMNS": "1000"})
     assert info.exit_code == 1 and "more than 1,000 audio and video packets" in info.output

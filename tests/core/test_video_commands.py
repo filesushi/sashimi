@@ -413,7 +413,10 @@ def test_copy_check_lets_text_subtitles_through():
     check_copy_compatible(_info(("video", "h264"), ("subtitle", "subrip")), "mp4")
     with pytest.raises(InvalidOptionsError) as e:
         check_copy_compatible(_info(("video", "h264"), ("subtitle", "hdmv_pgs_subtitle")), "mp4")
-    assert e.value.user_message == "This video can't be trimmed to MP4 without re-encoding. Try MKV instead."
+    assert e.value.user_message == (
+        "This video can't be copied into MP4 without re-encoding: MP4 can't hold its hdmv_pgs_subtitle subtitle. "
+        "Try MKV instead, or convert it (which re-encodes)."
+    )
 
 
 def h264(**fields):

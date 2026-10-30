@@ -50,6 +50,14 @@ def test_display_matrix_rotation_swaps_dimensions():
     assert round(info.display_aspect_ratio, 4) == round(1080 / 1920, 4)
 
 
+def test_a_dolby_vision_configuration_record_is_noticed():
+    dovi = {"side_data_type": "DOVI configuration record", "dv_profile": 8, "dv_bl_signal_compatibility_id": 4}
+    info = parse_ffprobe_json({"format": {"format_name": "mov,mp4"}, "streams": [video_stream(side_data_list=[dovi])]})
+    assert info.dolby_vision
+    plain = parse_ffprobe_json({"format": {"format_name": "mov,mp4"}, "streams": [video_stream()]})
+    assert not plain.dolby_vision
+
+
 def test_legacy_rotate_tag():
     info = parse_ffprobe_json(
         {"format": {"format_name": "mov", "duration": "5"}, "streams": [video_stream(tags={"rotate": "270"})]}

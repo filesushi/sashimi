@@ -14,6 +14,7 @@ import subprocess
 import pytest
 from typer.testing import CliRunner
 
+from sashimi import probe
 from sashimi.api._kinds import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, kind_of
 from sashimi.api.strip import STRIP_EXTENSIONS
 from sashimi.cli import settings
@@ -41,7 +42,7 @@ NEW = {
     ".vob": (*VIDEO, *AUDIO, "-c:v", "mpeg2video", "-c:a", "mp2", "-f", "vob"),
 }
 """The extensions added in 0.7.0, each with an ffmpeg recipe for a small file of that kind."""
-STRIPPED = {".mka", ".m4b", ".weba", ".mk3d"}
+STRIPPED = {".mka", ".m4b", ".weba", ".mk3d", ".m2ts", ".mts", ".3g2", ".vob"}
 """The new extensions ``strip`` takes: the ones written by a muxer it keeps the format with."""
 
 
@@ -117,7 +118,10 @@ def test_video_routes(media, tmp_path, ext):
 def test_strip_keeps_the_format_and_extension(media, tmp_path, ext):
     source = copy(media[ext], tmp_path / "in", f"s{ext}")
     assert statuses(run("strip", str(source))) == ["success"]
-    assert (source.parent / f"s{ext}.stripped{ext}").is_file()
+    out = source.parent / f"s{ext}.stripped{ext}"
+    assert out.is_file()
+    assert [s.codec for s in probe(out).streams] == [s.codec for s in probe(source).streams]
+    assert abs(probe(out).duration - probe(source).duration) < 0.1
 
 
 @pytest.mark.parametrize("ext", sorted(set(NEW) - STRIPPED))
@@ -127,8 +131,8 @@ def test_strip_says_which_formats_it_takes(media, tmp_path, ext):
     (row,) = json.loads(result.stdout)["results"]
     assert row["status"] == "skipped"
     assert row["message"] == (
-        "strip works on JPEG, PNG, WebP, GIF and TIFF images and MKV, WebM, MP4, MOV, M4A, MP3, FLAC, OGG and WAV "
-        f"files, not {ext} files."
+        "strip works on JPEG, PNG, WebP, GIF, TIFF, HEIC and AVIF images and MKV, WebM, MP4, MOV, 3GP, MPEG-TS, "
+        f"MPEG-PS, FLV, WMV, AVI, OGG, M4A, MP3, FLAC and WAV files, not {ext} files."
     )
 
 
@@ -241,7 +245,7 @@ def test_added_audio_formats_convert_whole(tmp_path, ext):
         assert abs(_length(source.parent / f"m{ext}.{target}") - 3) < 0.15
     info = runner.invoke(app, ["info", str(source), "--json"])
     assert info.exit_code == 0 and abs(json.loads(info.stdout)["duration"] - 3) < 0.25
-    assert stripped(source) == ("success" if ext == ".m4r" else "skipped")
+    assert stripped(source) == ("success" if ext in (".m4r", ".wma") else "skipped")
 
 
 @pytest.mark.parametrize("ext", sorted(MORE_VIDEO))
@@ -255,4 +259,4 @@ def test_added_video_formats_take_every_video_route(tmp_path, ext):
     assert statuses(run("extract", str(source), "1s", "--accurate", "-o", str(tmp_path / "acc.mp4"))) == ["success"]
     assert statuses(run("remux", str(source))) == ["success"]
     assert statuses(run("rotate", str(source), "90")) == ["success"]
-    assert stripped(source) == ("success" if ext == ".f4v" else "skipped")
+    assert stripped(source) == ("success" if ext in (".f4v", ".ogv", ".divx") else "skipped")

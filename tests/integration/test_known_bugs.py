@@ -107,7 +107,7 @@ def test_frames_info_decodes_no_pixels(tmp_path, monkeypatch):
     assert (infos["still.png"].width, infos["still.png"].height) == (30, 40)
     assert (infos["late-exif.png"].width, infos["late-exif.png"].height) == (30, 40)
     assert infos["anim.png"].frames == 3 and infos["anim.png"].durations_ms == [50, 120, 70]
-    assert infos["anim.png"].loop == 2 and not infos["anim.png"].animated
+    assert infos["anim.png"].loop == 2 and infos["anim.png"].animated
     assert infos["anim.gif"].frames == 3 and infos["anim.webp"].frames == 3
     assert (infos["photo.jpg"].width, infos["photo.jpg"].height) == (30, 40)
     assert infos["pages.tif"].frames == 3 and infos["double.mpo"].frames == 2

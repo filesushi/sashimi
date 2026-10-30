@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 The FileSushi Authors
 # SPDX-License-Identifier: Apache-2.0
 
+import math
 from typing import Annotated, Any, Self
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError
@@ -93,14 +94,51 @@ def rough_length_text(seconds: float) -> str:
     return length_text(round(seconds / 60) * 60 if seconds >= 60 else max(seconds, 1))
 
 
+def _length_words(seconds: float, decimals: int) -> str:
+    total = max(0.0, seconds)
+    hours, rest = divmod(int(total), 3600)
+    minutes = rest // 60
+    secs = round(total - hours * 3600 - minutes * 60, decimals)
+    if secs >= 60:
+        minutes, secs = minutes + 1, secs - 60
+        if minutes == 60:
+            hours, minutes = hours + 1, 0
+    words = [f"{n} {unit}{'' if n == 1 else 's'}" for n, unit in ((hours, "hour"), (minutes, "minute")) if n]
+    if secs:
+        text = f"{secs:.{decimals}f}".rstrip("0").rstrip(".") if decimals else str(int(secs))
+        words.append(f"{text} second{'' if text == '1' else 's'}")
+    return " ".join(words) if words else "0 seconds"
+
+
+def _exact_length(seconds: float) -> tuple[str, float]:
+    for decimals in range(4):
+        if abs(round(seconds, decimals) - seconds) < 1e-9:
+            return _length_words(seconds, decimals), round(seconds, decimals)
+    return _length_words(seconds, 3), round(seconds, 3)
+
+
+def over_limit_texts(length: float, limit: float) -> tuple[str, str]:
+    """
+    A length refused under `limit` and the limit, as words in the same units ("10 minutes 0.4
+    seconds" and "10 minutes"), with the length given as precisely as it takes to read as more
+    than the limit: to the second when that is enough, else to the tenth, hundredth or
+    thousandth of a second, rounded down, or as "just over" the limit.
+    """
+    limit_words, shown_limit = _exact_length(limit)
+    if round(length) > shown_limit:
+        return _length_words(round(length), 0), limit_words
+    for decimals in (1, 2, 3):
+        cut = math.floor(length * 10**decimals) / 10**decimals
+        if cut > shown_limit:
+            return _length_words(cut, decimals), limit_words
+    return f"just over {limit_words}", limit_words
+
+
 def too_long_text(kind: str, length: float, start: float, limit: float) -> str:
     """Why a whole `kind` (from `start`) is refused under a length limit, and what to do."""
-    what = (
-        f"This {kind} is {length_text(length)} long"
-        if start <= 0
-        else f"From {start:g}s, this {kind} runs {length_text(length)}"
-    )
-    return f"{what}, and the limit is {duration_text(limit)}. Set a shorter duration to convert part of it."
+    length_words, limit_words = over_limit_texts(length, limit)
+    what = f"This {kind} is {length_words} long" if start <= 0 else f"From {start:g}s, this {kind} runs {length_words}"
+    return f"{what}, and the limit is {limit_words}. Set a shorter duration to convert part of it."
 
 
 def megabytes(size: int) -> str:
@@ -147,7 +185,7 @@ class Limits(BaseModel):
     max_frame_bytes: _Count = 1024 * MIB
     """Video frames held in memory at once, at width x height x 3 bytes each: an animated contact sheet's clips, which are composited from memory. GIFs made from a video and GIF previews build their palette in a first pass, hold a few frames at a time, and don't count against it."""
     max_animation_bytes: _Count = 1024 * MIB
-    """The frames of an animated GIF or WebP being edited, at width x height x 4 bytes each (edits, frame selection, frame strips)."""
+    """The frames of an animation held in memory, at width x height x 4 bytes each: edits, frame selection and frame strips of animated GIFs and WebPs, and converting or resizing an animation to an animated GIF or WebP (at the output size)."""
     max_sheet_pixels: _Count = 64_000_000
     """The largest contact sheet, in pixels."""
     max_video_seconds: _Seconds = None
@@ -194,3 +232,16 @@ DEFAULT_LIMITS = Limits()
 def resolve_limits(limits: Limits | None) -> Limits:
     """`limits`, or the defaults when it is ``None``."""
     return DEFAULT_LIMITS if limits is None else limits
+
+
+def check_webp_size(width: int, height: int) -> None:
+    """Refuses a WebP output wider or taller than WebP can store (:data:`WEBP_MAX_SIDE`) with MediaTooLargeError."""
+    from sashimi.errors import MediaTooLargeError
+
+    if max(width, height) > WEBP_MAX_SIDE:
+        raise MediaTooLargeError(
+            f"This picture would be {width}x{height} pixels, and WebP can't be wider or taller than "
+            f"{WEBP_MAX_SIDE:,} pixels. Set a maximum width and height of {WEBP_MAX_SIDE:,} or less, or choose "
+            "another format.",
+            detail=f"{width}x{height} > {WEBP_MAX_SIDE}",
+        )

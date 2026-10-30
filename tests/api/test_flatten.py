@@ -82,6 +82,7 @@ def test_dry_run_changes_nothing_and_reports_the_plan(tmp_path):
             "status": "success",
             "message": "Would move to a_x.txt (renamed: x.txt is taken)",
             "output": str(tmp_path / "a_x.txt"),
+            "fidelity": None,
         }
     ]
     assert report["removed_dirs"] == [str(tmp_path / "a")]

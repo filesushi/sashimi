@@ -215,14 +215,17 @@ class BatchRunner:
         from sashimi.api._consume import build_report
         from sashimi.errors import UserInputError
 
-        from sashimi.api._batch import LIMIT_HINT
+        from sashimi.api._batch import FFMPEG_REFUSALS, LIMIT_HINT
         from sashimi.cli._limits import hint
 
         token = LIMIT_HINT.set(hint)
+        self._refusals: dict[str, None] = {}
+        gathered = FFMPEG_REFUSALS.set(None if self.json_output else self._refusals)
         try:
             self._run(generator, inputs)
         finally:
             LIMIT_HINT.reset(token)
+            FFMPEG_REFUSALS.reset(gathered)
 
     def _run(self, generator: Iterator[YieldType], inputs: Iterable[pathlib.Path]) -> None:
         from sashimi.api._consume import build_report
@@ -318,6 +321,8 @@ class BatchRunner:
         else:
             self._print_summary(results, report["summary"], clashed)
         self._notes(plan)
+        for message in self._refusals:
+            console.print(f"[red]{escape(message)}[/red]")
         if failed:
             raise typer.Exit(code=1)
 

@@ -85,7 +85,10 @@ def test_no_emoji_and_one_line_for_one_file(tmp_path):
     Image.new("RGB", (40, 20), "red").save(tmp_path / "a.png")
     result = runner.invoke(app, ["convert", "a.png", "webp"])
     assert result.exit_code == 0
-    assert re.fullmatch(r"Success: a\.png: Converted to a\.png\.webp \(\d+\.\ds\)", result.stdout.strip())
+    assert re.fullmatch(
+        r"Success: a\.png: Converted to a\.png\.webp \(lossy: saved as WebP at quality 85\)\s+\(\d+\.\ds\)",
+        result.stdout.strip(),
+    )
     assert not EMOJI.search(result.output)
 
 
@@ -114,7 +117,7 @@ def test_json_report_is_the_same_everywhere(tmp_path):
         assert list(report["summary"]) == [
             "total_found", "success", "exists", "skipped", "errors", "time_taken_seconds", "avg_time_seconds",
         ]  # fmt: skip
-        assert all(set(row) == {"file", "status", "message", "output"} for row in report["results"])
+        assert all(set(row) == {"file", "status", "message", "output", "fidelity"} for row in report["results"])
     assert [r["command"] for r in reports] == ["convert", "resize", "favicon", "thumbs", "flatten"]
     assert reports[0]["results"][0]["output"] == "a.png.jpeg"
 
@@ -142,14 +145,16 @@ def test_force_reports_replacements(tmp_path):
     assert kept["status"] == "exists" and (tmp_path / "a.png.jpg").read_bytes() == b"an earlier conversion"
     assert kept["message"] == "Output already exists: a.png.jpg"
     replaced = json.loads(runner.invoke(app, ["convert", "a.png", "jpg", "-f", "--json"]).stdout)["results"][0]
-    assert replaced["message"] == "Converted to a.png.jpg (replaced the existing file)"
+    assert (
+        replaced["message"] == "Converted to a.png.jpg (replaced the existing file; lossy: saved as JPEG at quality 85)"
+    )
     assert (tmp_path / "a.jpg").read_bytes() == b"someone's photo"
     stem = ["--output-name", "{input_stem}.{output_ext}", "--json"]
     plain = json.loads(runner.invoke(app, ["convert", "a.png", "jpg", *stem]).stdout)["results"][0]
     assert plain["status"] == "exists" and "can't tell whether an earlier run made it" in plain["message"]
     assert (tmp_path / "a.jpg").read_bytes() == b"someone's photo"
     forced = json.loads(runner.invoke(app, ["convert", "a.png", "jpg", "-f", *stem]).stdout)["results"][0]
-    assert forced["message"] == "Converted to a.jpg (replaced the existing file)"
+    assert forced["message"] == "Converted to a.jpg (replaced the existing file; lossy: saved as JPEG at quality 85)"
     assert (tmp_path / "a.jpg").read_bytes() != b"someone's photo"
 
 
@@ -210,7 +215,8 @@ def test_preview_command(video_blob, tmp_path):
     assert too_long.exit_code == 1
     assert json.loads(too_long.stdout)["results"][0]["message"] == (
         "Previews can be at most 30 seconds long. Use fewer clips or shorter ones. "
-        "To change the limit, run: sashimi config set limits.max_gif_seconds 2h (or none for no limit)."
+        "To raise the limit (now 30s), run: sashimi config set limits.max_gif_seconds 1m "
+        "(or any higher value, or none for no limit)."
     )
 
 

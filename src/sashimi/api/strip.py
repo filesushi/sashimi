@@ -16,12 +16,21 @@ from sashimi.core.metadata import strip
 __all__ = ["STRIP_EXTENSIONS", "strip_files", "strip_files_generator"]
 
 STRIP_EXTENSIONS = (
-    ".jpg", ".jpeg", ".png", ".webp", ".gif", ".tif", ".tiff",
-    ".mp4", ".m4v", ".f4v", ".mov", ".mkv", ".mk3d", ".webm",
-    ".mp3", ".m4a", ".m4b", ".m4r", ".mka", ".weba", ".flac", ".ogg", ".opus", ".oga", ".wav",
+    ".jpg", ".jpeg", ".jfif", ".jpe", ".jif", ".png", ".apng", ".webp", ".gif", ".tif", ".tiff",
+    ".heic", ".heif", ".avif", ".bmp", ".ico", ".tga", ".psd",
+    ".mp4", ".m4v", ".f4v", ".mov", ".mkv", ".mk3d", ".webm", ".3gp", ".3g2",
+    ".ts", ".m2ts", ".mts", ".vob", ".mpg", ".mpeg", ".flv", ".wmv", ".asf", ".avi", ".divx", ".ogv",
+    ".mp3", ".m4a", ".m4b", ".m4r", ".mka", ".weba", ".flac", ".ogg", ".opus", ".oga", ".wav", ".wma",
 )  # fmt: skip
-"""The extensions :func:`strip_files_generator` picks up: the formats :func:`sashimi.metadata.strip` handles."""
-STRIP_ACCEPTS = "JPEG, PNG, WebP, GIF and TIFF images and MKV, WebM, MP4, MOV, M4A, MP3, FLAC, OGG and WAV files"
+"""
+The extensions :func:`strip_files_generator` picks up: the formats :func:`sashimi.metadata.strip`
+handles, and BMP, ICO, TGA and PSD, which it refuses with the reason (they hold no metadata, or
+it can't be removed without re-encoding).
+"""
+STRIP_ACCEPTS = (
+    "JPEG, PNG, WebP, GIF, TIFF, HEIC and AVIF images and MKV, WebM, MP4, MOV, 3GP, MPEG-TS, MPEG-PS, FLV, WMV, "
+    "AVI, OGG, M4A, MP3, FLAC and WAV files"
+)
 """What :func:`strip_files_generator` works on, in words, for its message about a file it skips."""
 
 
@@ -50,8 +59,8 @@ def strip_files_generator(
     """
     names = naming("strip", source_format, output_name)
 
-    def process(src: Any, dst: Any, progress: Any) -> None:
-        strip(src, dst, mode, keep_icc=keep_icc, limits=limits, on_progress=progress)
+    def process(src: Any, dst: Any, progress: Any) -> Any:
+        return strip(src, dst, mode, keep_icc=keep_icc, limits=limits, on_progress=progress)
 
     return run_batch(
         paths,

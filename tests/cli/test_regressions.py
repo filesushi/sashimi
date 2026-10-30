@@ -283,7 +283,7 @@ def test_a_folder_given_to_info_or_metadata_is_called_a_folder(tmp_path, command
 def test_rotate_says_what_it_did(tmp_path, angle, flip, said):
     Image.new("RGB", (16, 8), "red").save(tmp_path / "photo.jpg")
     row = report("rotate", "photo.jpg", angle, "--flip", flip)["results"][0]
-    assert row["message"] == f"{said} photo.jpg.rotated.jpg"
+    assert row["message"] == f"{said} photo.jpg.rotated.jpg (lossy: saved as JPEG at quality 92)"
 
 
 def test_an_empty_search_says_what_the_command_works_on(tmp_path):
@@ -529,12 +529,14 @@ def test_every_processing_command_runs_with_the_limits_in_sashimi_toml(tmp_path,
     assert seen.get("limits") is not None and seen["limits"].max_pixels == 1234, command
 
 
-def test_strip_keeps_to_the_pixel_limit_in_sashimi_toml(tmp_path):
+def test_strip_decodes_no_pixels_so_the_pixel_limit_does_not_apply(tmp_path):
     Image.new("RGB", (20, 20), "red").save(tmp_path / "photo.png")
     sashimi("config", "set", "limits.max_pixels", "100")
     result = runner.invoke(app, ["strip", "photo.png", "--json"])
-    assert json.loads(result.stdout)["results"][0]["status"] == "error"
-    assert files(tmp_path) == ["photo.png"]
+    assert json.loads(result.stdout)["results"][0]["status"] == "success"
+    assert files(tmp_path) == ["photo.png", "photo.png.stripped.png"]
+    convert = runner.invoke(app, ["convert", "photo.png", "jpeg", "--json"])
+    assert json.loads(convert.stdout)["results"][0]["status"] == "error"
 
 
 @pytest.mark.parametrize("command", sorted(PROCESSING))

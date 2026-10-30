@@ -143,8 +143,9 @@ def test_plan_falls_back_to_the_whole_video_and_centres_one_clip():
 
 def test_plan_for_a_clip_shorter_than_one_sample():
     assert plan_preview(1.5, 5, 2.0, 10, 10) == [(0.0, 1.5)]
+    assert plan_preview(0.4, 5, 2.0, 10, 10) == [(0.0, 0.4)]
     with pytest.raises(MediaTooShortError) as e:
-        plan_preview(0.4, 5, 2.0, 10, 10)
+        plan_preview(0.0, 5, 2.0, 10, 10)
     assert e.value.user_message == "This video is too short for a preview."
 
 

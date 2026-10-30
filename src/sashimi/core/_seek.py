@@ -15,11 +15,13 @@ itself, seeks to just before it, and drops the frames before the wanted time aft
 
 import bisect
 import collections
+import functools
 import math
 import os
+import statistics
 import threading
 from array import array
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Generator, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -32,18 +34,40 @@ from sashimi.core._ffmpeg import (
     file_arg,
     fmt_seconds,
     stream_ffmpeg,
+    stream_timed_frames,
 )
 from sashimi.core.probe import MediaInfo, _file_key, _lines, _signed_float
 from sashimi.errors import BinaryNotFoundError, MediaTooLargeError, ProcessingError
 
-__all__ = ["VideoIndex", "Decoding", "video_index", "decoding_args", "FORWARD_SEEKING", "DEFAULT_FRAME_SECONDS"]
+__all__ = [
+    "VideoIndex",
+    "Decoding",
+    "video_index",
+    "decoding_args",
+    "clip_pass",
+    "FORWARD_SEEKING",
+    "DEFAULT_FRAME_SECONDS",
+    "HELD_FRAMES",
+]
 
 FORWARD_SEEKING = frozenset({"mpegts", "mpeg", "ogg"})
+LATER_ORIGIN = frozenset({"mpegts", "mpeg"})
+"""
+Demuxers with timestamp discontinuities, for which ffmpeg counts a command's output timestamps
+from the later of its seek and the earliest start among the streams it maps, not from the file's
+start: a command that maps only a video starting after the audio is shifted by the difference.
+"""
 """Demuxers whose seek lands after the time when keyframes are far apart, which stream copies must avoid too."""
 SHOWN_SEEKING = frozenset({"mov"})
 """Demuxers that seek a stream copy to the keyframe decoded at or before the time, which can be shown after it (open GOPs)."""
 _PLAIN_SEEKING = frozenset({"gif"})
 DEFAULT_FRAME_SECONDS = 0.04
+HELD_FRAMES = 1.5
+"""
+How many frame intervals after a time the next frame may start and still be the one shown for it,
+as ffmpeg's seek shows it; past that, the frame still on screen (held from before the time, as
+variable-frame-rate recordings hold an unchanged picture) is shown instead.
+"""
 _TIE = 5e-4
 """How far below a half tick a time may read and still round up: frame times come from ffprobe to the microsecond, while the ``fps`` filter rounds exact integer timestamps, halves away from zero."""
 NEAR_THE_START = 1.0
@@ -52,6 +76,20 @@ _READ_PAST = 2.0
 _REORDER = 1.0
 _CHUNK = 1 << 16
 _CACHE_SIZE = 64
+
+
+def reaches(frame_time: float, time: float, time_base: tuple[int, int] | None) -> bool:
+    """
+    Whether a frame shown at `frame_time` (seconds) is at or after `time` (read to the millisecond)
+    as ffmpeg's seek and ``trim`` decide it: `time` rounded to the nearest tick of `time_base`
+    (halves up), against the frame's own tick. Without a time base, to the microsecond. Pure.
+    """
+    micros = round(round(time, 3) * 1_000_000)
+    if time_base is None:
+        return round(frame_time * 1_000_000) >= micros
+    num, den = time_base
+    scale = num * 1_000_000
+    return round(frame_time * den / num) >= (micros * den + scale // 2) // scale
 
 
 @dataclass(frozen=True)
@@ -77,6 +115,69 @@ class VideoIndex:
     """The packet limit that stopped the reading, if one did."""
     forward: bool = False
     """Whether the demuxer's own seek lands after the time (MPEG-TS, MPEG-PS, Ogg), so it is never used."""
+    interval: float = DEFAULT_FRAME_SECONDS
+    """The usual time between frames shown (the median), in seconds: what a held frame is measured against."""
+    time_base: tuple[int, int] | None = None
+    """The stream's time base as ``(num, den)``, which ffmpeg rounds a seek's time to; None if unknown."""
+    video_start: float = 0.0
+    """When the video stream starts, in seconds from the file's start (on :data:`LATER_ORIGIN` demuxers; else 0)."""
+    audio_start: float | None = None
+    """When the first audio stream starts, the same way; None without audio or off :data:`LATER_ORIGIN` demuxers."""
+    plain: bool = False
+    """Whether ffmpeg's own seek is always right in this file (GIFs), so :meth:`start_for` never overrides it."""
+
+    def origin(self, decode_from: float, *, audio: bool = False) -> float:
+        """
+        Where a command that seeks to `decode_from` (0: no seek) counts its output timestamps from,
+        in seconds from the file's start: `decode_from`, or on :data:`LATER_ORIGIN` demuxers the
+        later of it and the earliest start among the streams the command maps (the video, plus
+        the first audio stream with `audio`). ``trim`` filters and frame times are measured from it.
+        """
+        starts = [self.video_start]
+        if audio and self.audio_start is not None:
+            starts.append(self.audio_start)
+        return max(decode_from, min(starts))
+
+    def reaches(self, frame_time: float, time: float) -> bool:
+        """Whether a frame shown at `frame_time` counts as at or after `time`, as ffmpeg's seek decides it."""
+        return reaches(frame_time, time, self.time_base)
+
+    @functools.cached_property
+    def _order(self) -> list[float]:
+        return sorted(self.shown)
+
+    def frame_for(self, time: float) -> float:
+        """
+        When the frame shown for `time` starts (seconds): the first frame at or after `time` when it
+        starts within :data:`HELD_FRAMES` frame intervals, as ffmpeg's seek picks it, else the frame
+        still on screen at `time`. `time` is read to the millisecond, as commands give it.
+        """
+        at = round(time, 3)
+        order = self._order
+        position = bisect.bisect_left(order, at - 1e-6)
+        while position > 0 and self.reaches(order[position - 1], at):
+            position -= 1
+        following = order[position] if position < len(order) else None
+        previous = order[position - 1] if position > 0 else None
+        if following is not None and (previous is None or following - at <= HELD_FRAMES * self.interval + 1e-6):
+            return following
+        return previous if previous is not None else at
+
+    def held_from(self, time: float) -> float | None:
+        """
+        When the frame on screen at `time` started, if that frame is shown for `time` and started
+        before it (see :meth:`frame_for`); None when the frame shown starts at or after `time`.
+        """
+        shown = self.frame_for(time)
+        return None if self.reaches(shown, time) else shown
+
+    def seek_time(self, time: float) -> float:
+        """
+        The time to seek to for :meth:`frame_for`'s frame (the first frame at or after the result):
+        `time` itself, or for a held frame its start, rounded down to the millisecond.
+        """
+        held = self.held_from(time)
+        return time if held is None else math.floor(held * 1000 + 1e-6) / 1000
 
     def start_for(self, time: float) -> float | None:
         """
@@ -88,6 +189,8 @@ class VideoIndex:
         keyframe is decoded at or before `time` but shown after it (MP4 and MOV pick keyframes by
         decoding time, and lose the frames an open-GOP keyframe shows before itself).
         """
+        if self.plain:
+            return None
         if self.forward or not self.keys:
             return self.decode_from(time)
         if time < self.shown[self.keys[0]] + NEAR_THE_START:
@@ -152,16 +255,19 @@ class Decoding:
     """The same for audio, or None."""
 
 
-def decoding_args(decode_from: float, time: float, length: float | None = None) -> Decoding:
+def decoding_args(
+    decode_from: float, time: float, length: float | None = None, origin: float | None = None
+) -> Decoding:
     """
     Decoding from `decode_from` (seconds; 0 is the start of the file) and keeping `length`
     seconds (None: to the end) from `time`: what an input ``-ss time -t length`` does when the
-    demuxer lands on the right keyframe, with the same frames and timestamps. Pure.
+    demuxer lands on the right keyframe, with the same frames and timestamps. `origin` is where
+    the command's output timestamps start (:meth:`VideoIndex.origin`; None: `decode_from`). Pure.
     """
     inputs = ["-ss", fmt_seconds(decode_from)] if decode_from > 0 else []
-    skip = round(time - decode_from, 3)
     if length is not None:
-        inputs += ["-t", fmt_seconds(length + skip)]
+        inputs += ["-t", fmt_seconds(length + round(time - decode_from, 3))]
+    skip = round(time - (decode_from if origin is None else origin), 3)
     if skip <= 0:
         return Decoding(inputs, None, None)
     span = f"start={fmt_seconds(skip)}" + (f":end={fmt_seconds(skip + length)}" if length is not None else "")
@@ -179,8 +285,8 @@ _indexes_lock = threading.Lock()
 
 
 def needs_index(info: MediaInfo) -> bool:
-    """Whether seeking in this file goes through its keyframe index: every video container except GIF."""
-    return info.has_video and not info.container_names <= _PLAIN_SEEKING
+    """Whether a file has a video stream to index (GIFs too, for their frame times; ffmpeg seeks in them by itself)."""
+    return info.has_video
 
 
 def _too_many(cap: int) -> MediaTooLargeError:
@@ -198,8 +304,9 @@ def video_index(
 ) -> VideoIndex | None:
     """
     The first video stream's packets up to `until` seconds (plus a little), read once per file
-    and remembered while the file is unchanged. None for files ffmpeg seeks in correctly by
-    itself (GIFs) and when the packets hold no keyframe. Raises MediaTooLargeError
+    and remembered while the file is unchanged. None when the packets hold no keyframe. A GIF's
+    index is :attr:`~VideoIndex.plain`: ffmpeg seeks in it by itself, and the index only gives
+    its frame times. Raises MediaTooLargeError
     (``limit="max_scan_packets"``) when that means reading more than ``limits.max_scan_packets``
     video packets.
     """
@@ -230,42 +337,56 @@ def video_index(
     return index if index.keys else None
 
 
-def _parse(lines: Iterable[bytes]) -> Iterable[tuple[float | None, float | None, bool]]:
+_Packet = tuple[float | None, float | None, bool]
+
+
+def _parse(lines: Iterable[bytes]) -> Iterable[_Packet | tuple[int, int]]:
+    """Packets (``(pts, dts, keyframe)``) from ffprobe's csv, then the stream's time base as ``(num, den)``."""
     for line in lines:
         fields = line.decode("ascii", "replace").strip().split(",")
         if len(fields) >= 3:
             yield _signed_float(fields[0]), _signed_float(fields[1]), "K" in fields[2]
+        elif len(fields) == 1 and fields[0].count("/") == 1:
+            num, _, den = fields[0].partition("/")
+            if num.isdigit() and den.isdigit() and int(num) > 0 and int(den) > 0:
+                yield int(num), int(den)
 
 
 def _scan(input_path: str | os.PathLike[str], info: MediaInfo, until: float, cap: int | None) -> VideoIndex:
     end = info.start_time + until + _READ_PAST
     cmd = [ffprobe_binary(), "-hide_banner", "-loglevel", "error", *INPUT_PROTOCOLS, "-select_streams", "V:0"]
-    cmd += ["-read_intervals", f"%{fmt_seconds(end)}", "-show_entries", "packet=pts_time,dts_time,flags"]
+    cmd += ["-read_intervals", f"%{fmt_seconds(end)}"]
+    cmd += ["-show_entries", "packet=pts_time,dts_time,flags:stream=time_base"]
     cmd += ["-of", "csv=p=0", file_arg(input_path)]
-    packets: list[tuple[float | None, float | None, bool]] = []
+    packets: list[_Packet] = []
+    time_base = None
     capped = None
     chunks = stream_ffmpeg(cmd, _CHUNK)
     try:
-        for packet in _parse(_lines(chunks)):
+        for item in _parse(_lines(chunks)):
+            if len(item) == 2:
+                time_base = item
+                continue
             if cap is not None and len(packets) >= cap:
                 capped = cap
                 break
-            packets.append(packet)
+            packets.append(item)
     except BinaryNotFoundError:
         raise
     except ProcessingError:
         pass
     finally:
         chunks.close()
-    return _index(packets, info, until, end, capped)
+    return _index(packets, info, until, end, capped, time_base)
 
 
 def _index(
-    packets: Sequence[tuple[float | None, float | None, bool]],
+    packets: Sequence[_Packet],
     info: MediaInfo,
     until: float,
     end: float,
     capped: int | None,
+    time_base: tuple[int, int] | None = None,
 ) -> VideoIndex:
     origin = info.start_time
     delay = max((pts - dts for pts, dts, _ in packets if pts is not None and dts is not None), default=0.0)
@@ -288,6 +409,9 @@ def _index(
         shown.append(show - origin)
         decoded.append(decode)
     frame = 1.0 / info.fps if info.fps and info.fps > 1 else DEFAULT_FRAME_SECONDS
+    order = sorted(shown)
+    gaps = [b - a for a, b in zip(order, order[1:], strict=False) if b - a > 1e-6]
+    interval = statistics.median(gaps) if gaps else frame
     if capped is not None:
         read_to = max(last - _REORDER, -1.0)
     elif latest + origin < end - _READ_PAST / 2:
@@ -295,7 +419,33 @@ def _index(
     else:
         read_to = until
     forward = bool(info.container_names & FORWARD_SEEKING)
-    return VideoIndex(shown, decoded, tuple(keys), missing, frame, read_to, capped, forward)
+    video_start, audio_start = _stream_starts(info)
+    return VideoIndex(
+        shown,
+        decoded,
+        tuple(keys),
+        missing,
+        frame,
+        read_to,
+        capped,
+        forward,
+        interval,
+        time_base,
+        video_start,
+        audio_start,
+        info.container_names <= _PLAIN_SEEKING,
+    )
+
+
+def _stream_starts(info: MediaInfo) -> tuple[float, float | None]:
+    """When the first video and audio streams start, from the file's start, on :data:`LATER_ORIGIN` demuxers."""
+    if not info.container_names & LATER_ORIGIN:
+        return 0.0, None
+    video = next((s for s in info.streams if s.type == "video" and not s.attached_pic), None)
+    audio = next((s for s in info.streams if s.type == "audio"), None)
+    video_start = max(video.start_time - info.start_time, 0.0) if video and video.start_time is not None else 0.0
+    audio_start = max(audio.start_time - info.start_time, 0.0) if audio and audio.start_time is not None else None
+    return video_start, audio_start
 
 
 def clip_route(index: VideoIndex | None, clips: Sequence[tuple[float, float]]) -> Literal["seek", "pass"]:
@@ -322,17 +472,20 @@ def build_pass_command(
     ffmpeg: str = "ffmpeg",
     *,
     decode_from: float = 0.0,
+    origin: float | None = None,
 ) -> list[str]:
     """
     Decodes the first video stream once, from `decode_from` to the end of the last of `windows`
     (``(start, end)`` in seconds from the file's start, ascending), and writes the frames shown
     inside any window, through `vf`, as raw RGB on stdout, printing each one's time on stderr
-    (:data:`~sashimi.core._ffmpeg.FRAME_PROGRESS`; add `decode_from` to it). Pure.
+    (:data:`~sashimi.core._ffmpeg.FRAME_PROGRESS`), counted from `origin` (where the command's
+    timestamps start, :meth:`VideoIndex.origin`; None: `decode_from`): add it to get the time
+    from the file's start. Pure.
     """
     seek = ["-ss", fmt_seconds(decode_from)] if decode_from > 0 else []
+    base = decode_from if origin is None else origin
     picks = "+".join(
-        f"between(t,{fmt_seconds(max(start - decode_from, 0.0))},{fmt_seconds(end - decode_from)})"
-        for start, end in windows
+        f"between(t,{fmt_seconds(max(start - base, 0.0))},{fmt_seconds(end - base)})" for start, end in windows
     )
     reach = windows[-1][1] - decode_from + 1.0
     return [
@@ -367,50 +520,108 @@ def _ticks(seconds: float, fps: int) -> int:
 
 
 def clip_frames(
-    frames: Iterable[tuple[float, bytes]], clips: Sequence[tuple[float, float]], fps: int
+    frames: Iterable[tuple[float, bytes]],
+    clips: Sequence[tuple[float, float]],
+    fps: int,
+    held: float | None = None,
 ) -> Iterator[tuple[int, bytes]]:
     """
     Resamples timed frames (``(seconds from the file's start, frame)``, in display order) to `fps`
     for each clip (``(start, length)``) as ffmpeg's ``fps`` filter does after ``-ss start -t
     length`` into raw video: each tick shows the last frame whose time, rounded to the nearest
-    tick, isn't after it, and the first frame also fills the ticks before its own (as the raw
-    output's constant frame rate does). Yields ``(clip, frame)``
-    in the order they are settled, ``round(length * fps)`` frames per clip at most; a clip whose
-    video ends early repeats its last frame. Pure.
+    tick, isn't after it, and the output starts at the first frame's tick (ffmpeg doesn't fill
+    the ticks before it, so a clip whose first frame starts a tick or more after it runs that
+    much early, within one source frame). Yields ``(clip, frame)`` in the order they are settled
+    (a clip is settled once a frame after its end, or the end of `frames`, is reached),
+    ``round(length * fps)`` frames per clip at most; a clip whose video ends early repeats its
+    last frame. Pure.
+
+    With `held` (seconds), a clip whose first frame starts more than `held` after the clip does
+    shows the frame still on screen at its start (the last frame given before it) until then,
+    and a clip with no frame of its own shows that frame throughout, as a player shows a
+    variable-frame-rate recording's held picture; its own frames then keep their ticks.
     """
     counts = [max(1, round(length * fps)) for _, length in clips]
     clips = [(float(fmt_seconds(start)), float(fmt_seconds(length))) for start, length in clips]
     done = [0] * len(clips)
-    held: list[bytes | None] = [None] * len(clips)
+    shown_now: list[bytes | None] = [None] * len(clips)
+    before: list[bytes | None] = [None] * len(clips)
     tick: list[int | None] = [None] * len(clips)
-    lead = [0] * len(clips)
+    base = [0] * len(clips)
 
-    def emit(slot: int, frame: bytes) -> Iterator[tuple[int, bytes]]:
-        for _ in range(1 + lead[slot]):
+    def emit(slot: int, frame: bytes, copies: int = 1) -> Iterator[tuple[int, bytes]]:
+        for _ in range(copies):
             if done[slot] < counts[slot]:
                 yield slot, frame
                 done[slot] += 1
-        lead[slot] = 0
+
+    def finish(slot: int) -> Iterator[tuple[int, bytes]]:
+        last = shown_now[slot]
+        if last is None and held is not None:
+            last = before[slot]
+        if last is None:
+            return
+        while done[slot] < counts[slot]:
+            yield from emit(slot, last)
 
     for time, data in frames:
         for slot, (start, length) in enumerate(clips):
             offset = time - start
-            if offset < -1e-6 or offset >= length - 1e-6 or done[slot] >= counts[slot]:
+            if done[slot] >= counts[slot]:
                 continue
-            at = _ticks(offset, fps)
+            if offset >= length - 1e-6:
+                yield from finish(slot)
+                continue
             current = tick[slot]
-            if current is None:
-                tick[slot], held[slot], lead[slot] = at, data, max(at, 0)
+            if offset < -1e-6:
+                if held is not None and current is None:
+                    before[slot] = data
                 continue
-            shown = held[slot]
+            at = _ticks(offset, fps) - base[slot]
+            if current is None:
+                carried = before[slot]
+                if held is not None and carried is not None and offset > held + 1e-6 and at > 0:
+                    yield from emit(slot, carried, at)
+                    tick[slot], shown_now[slot] = at, data
+                else:
+                    tick[slot], shown_now[slot], base[slot] = 0, data, at
+                continue
+            shown = shown_now[slot]
             assert shown is not None
             while done[slot] < counts[slot] and at > current:
                 yield from emit(slot, shown)
                 current += 1
-            tick[slot], held[slot] = current, data
+            tick[slot], shown_now[slot] = current, data
     for slot in range(len(clips)):
-        last = held[slot]
-        if last is None:
-            continue
-        while done[slot] < counts[slot]:
-            yield from emit(slot, last)
+        yield from finish(slot)
+
+
+def clip_pass(
+    input_path: str | os.PathLike[str],
+    index: VideoIndex,
+    clips: Sequence[tuple[float, float]],
+    vf: str,
+    fps: int,
+    frame_bytes: int,
+    threads: int,
+    ffmpeg: str = "ffmpeg",
+) -> Generator[tuple[int, bytes], None, None]:
+    """
+    Decodes `clips` (``(start, length)``, ascending) in one pass over the video and yields each
+    clip's frames at `fps`, through `vf` (which must not change the frame rate), as
+    :func:`clip_frames` settles them: ``(clip, raw RGB frame of frame_bytes)``. A clip that starts
+    while a frame from before it is still on screen (:meth:`VideoIndex.held_from`) shows that
+    frame until its own first frame. Raises ProcessingError (after the frames it got) if ffmpeg
+    fails; closing the generator stops ffmpeg.
+    """
+    earliest = [min(start, index.frame_for(start)) for start, _ in clips]
+    windows = [(early - index.interval, start + length) for early, (start, length) in zip(earliest, clips, strict=True)]
+    decode_from = index.decode_from(earliest[0])
+    origin = index.origin(decode_from)
+    cmd = build_pass_command(input_path, windows, vf, threads, ffmpeg, decode_from=decode_from, origin=origin)
+    timed = stream_timed_frames(cmd, frame_bytes)
+    try:
+        frames = ((time + origin, data) for time, data in timed)
+        yield from clip_frames(frames, clips, fps, HELD_FRAMES * index.interval)
+    finally:
+        timed.close()

@@ -27,6 +27,7 @@ _LABELS = (
     ("creation_time", "Created"),
     ("comment", "Comment"),
     ("has_color_profile", "Colour profile"),
+    ("display_rotation", "Shown turned"),
 )
 
 
@@ -73,6 +74,9 @@ def metadata_cmd(
         elif field == "has_color_profile":
             if value:
                 table.add_row(label, "yes")
+        elif field == "display_rotation":
+            if value:
+                table.add_row(label, f"{value}° clockwise (display rotation; kept by every --remove mode)")
         elif value:
             table.add_row(label, str(value))
     for key, value in info.tags.items():
@@ -104,11 +108,11 @@ def strip_cmd(
     dry_run: opt.DryRun = False,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
-    max_pixels: opt.MaxPixels = None,
 ):
     """
     Remove metadata (camera, dates, GPS, titles, comments) from images, videos and audio without
-    re-encoding: the pictures and sound are copied as they are. Writes
+    re-encoding: the pictures and sound are copied as they are (HEIC and AVIF too, gain maps
+    and depth included). Writes
     [cyan]clip.mov.stripped.mov[/cyan] for clip.mov, in the file's own format, next to each file,
     under --output-dir, or to -o for a single file; [cyan]--output-name '{input_name}' -f[/cyan]
     strips files in place. Removal is best effort: it covers the places sashimi knows metadata
@@ -118,7 +122,7 @@ def strip_cmd(
     from sashimi.cli import _limits
 
     opt.single_file_or_fail(paths, output)
-    limits = _limits.resolve(max_pixels=max_pixels)
+    limits = _limits.resolve()
     chosen = opt.enum_value(mode) or "remove_all"
     runner = BatchRunner(
         "strip",

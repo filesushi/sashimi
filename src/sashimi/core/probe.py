@@ -5,6 +5,7 @@
 
 import collections
 import json
+import re
 import math
 import os
 import threading
@@ -25,7 +26,7 @@ from sashimi.core._ffmpeg import (
 from sashimi.config._limits import Limits, resolve_limits, rough_length_text
 from sashimi.errors import BinaryNotFoundError, MediaTooLargeError, ProcessingError, UnsupportedMediaError
 
-__all__ = ["MediaInfo", "StreamInfo", "probe", "VIDEO_CONTAINERS", "AUDIO_CONTAINERS"]
+__all__ = ["MediaInfo", "StreamInfo", "anamorphic", "check_decodable", "probe", "VIDEO_CONTAINERS", "AUDIO_CONTAINERS"]
 
 _SEGMENT_TIMESTAMPS = frozenset({"matroska", "webm"})
 _PAST_THE_END = "999999999"
@@ -55,6 +56,8 @@ class StreamInfo(BaseModel):
     """The stream's metadata tags as ffprobe shows them (title, handler name, …)."""
     codec_tag: str | None = None
     """ffprobe's codec tag (e.g. ``avc1``; ``text`` for a QuickTime chapter track)."""
+    start_time: float | None = None
+    """The timestamp the stream starts at, in seconds on the file's clock (compare with ``MediaInfo.start_time``), if ffprobe states one."""
 
     @property
     def chapter_track(self) -> bool:
@@ -85,12 +88,24 @@ class MediaInfo(BaseModel):
     width: int | None = None
     height: int | None = None
     rotation: int = 0
-    """Display rotation in degrees (0, 90, 180 or 270) that players apply."""
+    """Display rotation in degrees (0, 90, 180 or 270) that players apply, in either direction (see ``display_turn``)."""
+    display_turn: int = 0
+    """The clockwise turn (0, 90, 180 or 270 degrees) players apply to show the picture, from its display matrix."""
+    display_mirrored: bool = False
+    """True when the display matrix also mirrors the picture."""
+    dolby_vision: bool = False
+    """True when the video carries a Dolby Vision configuration record (``dvcC``/``dvvC``), as iPhone HDR video does."""
     display_aspect_ratio: float | None = None
     fps: float | None = None
     video_codec: str | None = None
     pixel_format: str | None = None
     """The video's pixel format as ffprobe names it, e.g. ``yuv420p`` (8-bit 4:2:0) or ``yuv420p10le``."""
+    color_space: str | None = None
+    """The video's colour matrix as ffprobe names it, e.g. ``bt709``, ``bt2020nc``, or ``ipt-c2`` for Dolby Vision's own."""
+    color_transfer: str | None = None
+    """The video's transfer function as ffprobe names it, e.g. ``bt709``, ``smpte2084`` (PQ) or ``arib-std-b67`` (HLG)."""
+    color_primaries: str | None = None
+    """The video's colour primaries as ffprobe names them, e.g. ``bt709`` or ``bt2020``."""
     audio_codec: str | None = None
     codecs: list[str] = []
     """Codec names of every stream, in stream order."""
@@ -182,13 +197,40 @@ def _rotation(stream: dict[str, Any]) -> int:
     return int(round(degrees / 90.0)) * 90 % 360
 
 
+def _display(stream: dict[str, Any]) -> tuple[int, bool]:
+    """The clockwise turn players apply to `stream` (0, 90, 180 or 270), and whether its display matrix mirrors it."""
+    for side_data in stream.get("side_data_list", []):
+        if "rotation" not in side_data:
+            continue
+        try:
+            counter = float(side_data["rotation"])
+        except (TypeError, ValueError):
+            return 0, False
+        numbers = [int(n) for n in re.findall(r"-?\d+", str(side_data.get("displaymatrix", "")).replace(":", " : "))]
+        cells = [n for i, n in enumerate(numbers) if i % 4]
+        mirrored = len(cells) >= 5 and cells[0] * cells[4] - cells[1] * cells[3] < 0
+        return int(round(-counter / 90.0)) * 90 % 360, mirrored
+    tagged = _float(stream.get("tags", {}).get("rotate"))
+    return (int(round(tagged / 90.0)) * 90 % 360 if tagged is not None else 0), False
+
+
 def _int(value: Any) -> int | None:
     return value if isinstance(value, int) and value > 0 else None
 
 
 def _tags(entry: dict[str, Any]) -> dict[str, str]:
+    """
+    A file's or stream's tags. FFmpeg 9.0's ffprobe joins a value stated twice with ``;`` (an MP4's
+    ``creation_time`` in its header and as a metadata key): a value repeated that way is shown once.
+    """
     tags = entry.get("tags")
-    return {str(k): str(v) for k, v in tags.items()} if isinstance(tags, dict) else {}
+    if not isinstance(tags, dict):
+        return {}
+    shown = {}
+    for key, value in tags.items():
+        parts = str(value).split(";")
+        shown[str(key)] = parts[0] if len(parts) > 1 and len(set(parts)) == 1 else str(value)
+    return shown
 
 
 def _stream(stream: dict[str, Any]) -> StreamInfo:
@@ -202,6 +244,7 @@ def _stream(stream: dict[str, Any]) -> StreamInfo:
         channels=_int(stream.get("channels")) if stream.get("codec_type") == "audio" else None,
         tags=tags,
         codec_tag=stream.get("codec_tag_string") or None,
+        start_time=_signed_float(stream.get("start_time")),
     )
 
 
@@ -238,6 +281,7 @@ def parse_ffprobe_json(data: dict[str, Any]) -> MediaInfo:
         sar = _ratio(video.get("sample_aspect_ratio")) or 1.0
         dar = width * sar / height if width and height else _ratio(video.get("display_aspect_ratio"))
         rotation = _rotation(video)
+        turn, mirrored = _display(video)
         if rotation in (90, 270):
             width, height = height, width
             dar = 1.0 / dar if dar else None
@@ -245,12 +289,53 @@ def parse_ffprobe_json(data: dict[str, Any]) -> MediaInfo:
             width=width or None,
             height=height or None,
             rotation=rotation,
+            display_turn=turn,
+            display_mirrored=mirrored,
+            dolby_vision=any(
+                str(side.get("side_data_type", "")).startswith("DOVI configuration")
+                for side in video.get("side_data_list", [])
+            ),
             display_aspect_ratio=round(dar, 6) if dar else None,
             fps=_ratio(video.get("avg_frame_rate")) or _ratio(video.get("r_frame_rate")),
             video_codec=video.get("codec_name"),
             pixel_format=video.get("pix_fmt"),
+            color_space=_known(video.get("color_space")),
+            color_transfer=_known(video.get("color_transfer")),
+            color_primaries=_known(video.get("color_primaries")),
         )
     return MediaInfo(**info)
+
+
+def anamorphic(source: MediaInfo | None) -> bool:
+    """True when `source`'s pixels aren't square: its display shape differs from its stored one (a SAR other than 1)."""
+    if source is None or not source.width or not source.height or not source.display_aspect_ratio:
+        return False
+    return abs(source.display_aspect_ratio - source.width / source.height) > 1e-3 * source.display_aspect_ratio
+
+
+def _known(value: Any) -> str | None:
+    return value if isinstance(value, str) and value and value not in ("unknown", "reserved", "unspecified") else None
+
+
+DOLBY_VISION_COLOURS = "This is Dolby Vision video whose colours need Dolby's own processing, which sashimi can't do."
+PRORES_RAW = (
+    "This is ProRes RAW video, which has to be developed like a camera's raw photos; FFmpeg reads it without its "
+    "colours, so sashimi can't make pictures from it."
+)
+LOSSLESS_STILL_WORK = "Lossless copies (remux, a cut that isn't accurate, removing metadata) still work."
+
+
+def check_decodable(info: MediaInfo) -> None:
+    """
+    Refuses, with UnsupportedMediaError, video whose pictures FFmpeg can't decode faithfully: Dolby
+    Vision whose base layer is in Dolby's IPT colour space (``ipt-c2``: profiles 5 and 20), which
+    only Dolby's reshaping turns into viewable colours, and ProRes RAW, which FFmpeg reads as
+    undeveloped sensor data. Routes that copy streams without decoding still work on them.
+    """
+    if info.color_space == "ipt-c2":
+        raise UnsupportedMediaError(f"{DOLBY_VISION_COLOURS} {LOSSLESS_STILL_WORK}", detail="color_space=ipt-c2")
+    if info.video_codec == "prores_raw":
+        raise UnsupportedMediaError(f"{PRORES_RAW} {LOSSLESS_STILL_WORK}", detail="codec=prores_raw")
 
 
 def probe(input_path: str | os.PathLike[str], *, limits: Limits | None = None) -> MediaInfo:
@@ -292,6 +377,10 @@ def probe(input_path: str | os.PathLike[str], *, limits: Limits | None = None) -
     if not data.get("format"):
         raise UnsupportedMediaError("This file doesn't look like media we can read.")
     info = parse_ffprobe_json(data)
+    if "gif" in info.container_names and info.duration and short_gif_frames(input_path):
+        from sashimi.core._animation import gif_shown_seconds
+
+        info = info.model_copy(update={"duration": gif_shown_seconds(input_path)})
     if info.duration is None and _needs_packet_scan(info):
         cap = resolve_limits(limits).max_scan_packets
         info = info.model_copy(update={"duration": _measured_duration(input_path, data, cap)})
@@ -300,6 +389,19 @@ def probe(input_path: str | os.PathLike[str], *, limits: Limits | None = None) -
         if (span := _late_span(input_path, data, cap)) is not None:
             info = info.model_copy(update={"duration": span})
     return info
+
+
+def short_gif_frames(input_path: str | os.PathLike[str]) -> bool:
+    """
+    True for a GIF with frames stored as shorter than 20 ms, which browsers play for 100 ms: its
+    length (``MediaInfo.duration``) and every video made from it follow the browsers' timing.
+    """
+    from sashimi.core._animation import gif_has_short_frames
+
+    try:
+        return gif_has_short_frames(input_path)
+    except OSError:
+        return False
 
 
 def _needs_packet_scan(info: MediaInfo) -> bool:

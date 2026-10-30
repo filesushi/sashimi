@@ -6,7 +6,7 @@ import re
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any, Literal
 
-from sashimi.api._batch import VIDEO_EXTENSIONS, Batch, FileProgress, PathInput, run_batch
+from sashimi.api._batch import VIDEO_EXTENSIONS, Batch, Done, FileProgress, PathInput, run_batch
 from sashimi.api._naming import NameTemplate, naming, output_format
 from sashimi.api._consume import consume_generator
 from sashimi.config import KEYFRAME_NOTE, VIDEO_TRIM, CopyTrimConfig, Limits, MetadataMode, TrimConfig
@@ -113,6 +113,7 @@ def extract_generator(
     audio_bitrate_kbps: int | None = None,
     mute: bool = False,
     metadata: MetadataMode = "keep",
+    keep_hdr: bool = False,
     recursive: bool = False,
     force: bool = False,
     max_workers: int | None = None,
@@ -135,7 +136,8 @@ def extract_generator(
     then (``preset`` is for H.264 and ``speed`` for WebM; see :data:`~sashimi.config.VIDEO_TRIM`).
 
     `metadata` is the clip's ``metadata`` field: keep the source's tags (the default), or remove
-    location tags or all of them (see :data:`~sashimi.config.VIDEO_TRIM`).
+    location tags or all of them (see :data:`~sashimi.config.VIDEO_TRIM`). `keep_hdr` keeps HDR
+    video as HDR in an accurate cut instead of tone-mapping it (a copy keeps it as it is anyway).
 
     The container is `container`, or else `output`'s extension if it names one, or else the
     input's (MKV for anything else). Each clip is written as
@@ -169,16 +171,17 @@ def extract_generator(
             duration_seconds=duration_s,
             accurate=accurate,
             mute=(mute or None) if accurate else None,
+            keep_hdr=(keep_hdr or None) if accurate else None,
             metadata=metadata,
         )
 
     fixed = output_format(container) if container is not None else None
     names = naming("extract", lambda p: output_format(container_for(p), p, container), output_name, fixed=fixed)
 
-    def process(source: pathlib.Path, target: pathlib.Path, progress: Callable[[float, str], None] | None) -> str:
+    def process(source: pathlib.Path, target: pathlib.Path, progress: Callable[[float, str], None] | None) -> Done:
         config = config_for(source)
-        trim(source, target, config, max_workers=max_workers, limits=limits, on_progress=progress)
-        return _clip_message(config, source, target, limits)
+        result = trim(source, target, config, max_workers=max_workers, limits=limits, on_progress=progress)
+        return Done(message=_clip_message(config, source, target, limits), fidelity=getattr(result, "fidelity", None))
 
     return run_batch(
         paths,

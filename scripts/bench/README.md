@@ -68,3 +68,14 @@ uv run python scripts/bench/run.py --compare \
 | `codecs` | 50 | Paired H.264 vs HEVC input decode overhead across sheets, animations, and `mp4-auto` |
 | `workers` | 32 | Worker scaling (`max_workers` ∈ {1, 2, 4, 6}) on static sheets, animated sheets, 720p GIF, and 720p MP4 re-encode |
 | `image` | 12 | `image.edit`, `image.select_frames`, `image.frame_strip` on 60-frame 480p GIFs, and `image.convert` on 1920px PNG contact sheets to lossless WebP |
+
+## Corpus benchmark (`--corpus`)
+
+`--corpus <manifest.json>` runs every task that applies to each file of a corpus manifest through the CLI with its defaults (`scripts/bench/corpus.py`): probing, `info`/`metadata`, image conversions, resize, rotate, edit, strip, favicons and frame tools, and for videos sheets, previews, conversions (re-encodes of inputs over 2 minutes on a 60 s stretch), extract, remux, rotate and strip. A manifest is a JSON list of entries with `path` (relative to the manifest's folder), `kind` (`image` or `video`), `categories` and `facts`; `--corpus-extra` adds `tests` notes from other manifests. Tasks are chosen from each entry's kind, facts and categories, so nothing names a file, and the corpus may hold media that must stay out of the repository.
+
+Each case runs in its own process with a wall-clock timeout (`--timeout`, default 600 s) and records the outcome as a user sees it (success, already done, refused, failed, timeout or crash), the message and exit code, the exception type and limit behind a refusal, CPU seconds, peak memory (the largest process, and the process tree sampled until the measured work ends), and a description of every output (opened, decoded and compared with the source by `corpus.assess`, whose flags are leads to look at, not verdicts). A refusal by a limit is run again with every limit set to `none`. Results and outputs go beside the manifest (`bench-results/<machine>/<date>_sashimi-<version>_corpus[_<tag>].json` and `.md`, `bench-scratch/`), never under `scripts/bench/results/`; `--resume` continues the newest report, `--list` lists the cases, and `--task`/`--clip` filter tasks and paths.
+
+```sh
+uv run python scripts/bench/run.py --corpus data/manifest.json --corpus-extra data/synthetic/manifest.json \
+    --ffmpeg-dir ~/.local/opt/ffmpeg/bin --machine ubuntu-laptop-xps13 --resume
+```

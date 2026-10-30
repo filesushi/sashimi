@@ -15,6 +15,7 @@ from sashimi.config import (
     WavAudioConfig,
 )
 from sashimi.config._limits import resolve_limits, too_long_text
+from sashimi.core.fidelity import Outcome, media_fidelity
 from sashimi.core._atomic import PathLike, atomic_output
 from sashimi.core._ffmpeg import (
     INPUT_PROTOCOLS,
@@ -27,7 +28,14 @@ from sashimi.core._ffmpeg import (
     holds_packets,
     run_ffmpeg,
 )
-from sashimi.core._mediameta import first_stream, metadata_args, opus_kbps
+from sashimi.core._mediameta import (
+    first_stream,
+    merged_movflags,
+    metadata_args,
+    opus_kbps,
+    opus_layout_filter,
+    quicktime_tag_args,
+)
 from sashimi.core._resources import resolve_max_workers
 from sashimi.core.probe import AUDIO_CONTAINERS, VIDEO_CONTAINERS, MediaInfo, probe
 from sashimi.errors import (
@@ -139,6 +147,8 @@ def build_convert_command(
     ]
     if config.mono:
         cmd += ["-ac", "1"]
+    elif isinstance(config, OggAudioConfig) and (layout := opus_layout_filter(output_channels(config, source))):
+        cmd += ["-af", layout]
     if config.sample_rate is not None:
         cmd += ["-ar", str(config.sample_rate)]
     if isinstance(config, WavAudioConfig):
@@ -153,8 +163,10 @@ def build_convert_command(
             kbps = opus_kbps(kbps, output_channels(config, source))
         cmd += ["-b:a", f"{kbps}k"]
     cmd += metadata_args(config.metadata, source, [first_stream(source, "audio")])
+    muxer = _MUXER_ARGS[config.target][-1]
+    cmd += quicktime_tag_args(config.metadata, source, muxer)
     cmd += ["-threads", str(threads), *OUTPUT_FLAGS, *_MUXER_ARGS[config.target], file_arg(output_path)]
-    return cmd
+    return merged_movflags(cmd)
 
 
 def output_channels(config: AudioConvertConfig, source: MediaInfo | None) -> int | None:
@@ -190,10 +202,10 @@ def convert(
     scratch_dir: PathLike | None = None,
     limits: Limits | None = None,
     on_progress: ProgressCallback | None = None,
-) -> None:
+) -> Outcome:
     """
     Extracts the first audio track of a video, or converts an audio file, to `config.target`
-    (see :data:`~sashimi.config.AUDIO_CONVERT`).
+    (see :data:`~sashimi.config.AUDIO_CONVERT`), and returns what the output kept (``fidelity``).
 
     The source's tags are kept, as far as the format holds them, unless ``metadata`` says to
     remove location tags or all of them. An OGG (Opus) bitrate above what Opus allows for the
@@ -236,5 +248,67 @@ def convert(
         run_ffmpeg(cmd, progress_total=expected, on_progress=on_progress, stage="encoding")
         if config.start_seconds > 0:
             _require_audio(temp, input_path, config.start_seconds, ffmpeg)
+    told = media_fidelity(
+        input_path,
+        output_path,
+        "sound",
+        changed=sound_changes(config, info, sample_format(input_path), sample_format(output_path)[1]),
+        removed_metadata=config.metadata,
+        kept=["display rotation", "Dolby Vision settings"],
+    )
     if on_progress:
         on_progress(1.0, "done")
+    return Outcome(fidelity=told)
+
+
+_LOSSY = {"mp3": "MP3", "m4a": "AAC", "ogg": "Opus"}
+_FLOAT_FORMATS = frozenset({"flt", "fltp", "dbl", "dblp"})
+
+
+def sample_format(input_path: PathLike) -> tuple[str | None, int | None, int | None]:
+    """The first audio track's sample format, bits per sample and sample rate, as ffprobe gives them (None when unknown)."""
+    from sashimi.core.metadata import _probe_full
+
+    streams = [s for s in _probe_full(input_path).get("streams", []) if s.get("codec_type") == "audio"]
+    if not streams:
+        return None, None, None
+    stream = streams[0]
+    fmt = stream.get("sample_fmt")
+    bits = int(stream.get("bits_per_raw_sample") or 0) or int(stream.get("bits_per_sample") or 0) or None
+    if bits is None and isinstance(fmt, str):
+        bits = {"u8": 8, "u8p": 8, "s16": 16, "s16p": 16, "s32": 32, "s32p": 32, "s64": 64}.get(fmt)
+    rate = int(stream.get("sample_rate") or 0) or None
+    return fmt if isinstance(fmt, str) else None, bits, rate
+
+
+def sound_changes(
+    config: AudioConvertConfig,
+    source: MediaInfo,
+    fmt: tuple[str | None, int | None, int | None],
+    written_bits: int | None = None,
+) -> list[str]:
+    """
+    How converting `source` with `config` changes its sound, for people: a lossy encoder, mixing
+    down to mono, resampling, and samples stored with fewer bits (or as integers, from floating
+    point). `written_bits` is what the output stores, as read from it (FLAC's encoder picks 16 or
+    24 bits from the source). Pure.
+    """
+    sample_fmt, bits, rate = fmt
+    changes = []
+    if config.target in _LOSSY:
+        kbps = getattr(config, "bitrate_kbps", None)
+        if isinstance(config, OggAudioConfig) and kbps is not None:
+            kbps = opus_kbps(kbps, output_channels(config, source))
+        changes.append(f"re-encoded as {_LOSSY[config.target]} at {kbps} kb/s")
+    if config.mono and (source.audio_channels or 1) > 1:
+        changes.append("mixed down to mono")
+    if config.sample_rate is not None and config.sample_rate != rate:
+        changes.append(f"resampled to {config.sample_rate} Hz")
+    if config.target in ("wav", "flac"):
+        guess = config.wav_bit_depth if isinstance(config, WavAudioConfig) else (24 if (bits or 16) > 16 else 16)
+        depth = written_bits or guess
+        if sample_fmt in _FLOAT_FORMATS:
+            changes.append(f"floating-point samples rounded to {depth} bits")
+        elif bits is not None and bits > depth:
+            changes.append(f"reduced to {depth} bits")
+    return changes

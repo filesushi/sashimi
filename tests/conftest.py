@@ -32,6 +32,26 @@ def _has_encoder(name: str) -> bool:
 HAS_WEBP_ANIM = _has_encoder("libwebp_anim")
 
 
+def _series() -> tuple[int, int] | None:
+    if not HAS_FFMPEG:
+        return None
+    from sashimi.core._ffmpeg import parse_ffmpeg_version
+
+    banner = subprocess.run(["ffmpeg", "-hide_banner", "-version"], capture_output=True, text=True, check=False)
+    return parse_ffmpeg_version(banner.stdout.splitlines()[0] if banner.stdout else "")
+
+
+FFMPEG_SERIES = _series()
+OLD_FFMPEG = FFMPEG_SERIES is not None and FFMPEG_SERIES < (8, 1)
+"""True when the FFmpeg on PATH is a release sashimi refuses some tasks on (see ``core/_capabilities.BEHAVIOURS``)."""
+needs_trusted_cuts = pytest.mark.skipif(
+    OLD_FFMPEG, reason="sashimi refuses lossless cuts and start times on this FFmpeg"
+)
+made_by_current_ffmpeg = pytest.mark.skipif(
+    OLD_FFMPEG, reason="the fixture's timestamps come out differently when FFmpeg 8.0 or older makes it"
+)
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
@@ -39,6 +59,13 @@ def pytest_runtest_makereport(item, call):
     if report.failed and not HAS_WEBP_ANIM and "Unknown encoder 'libwebp_anim'" in str(report.longrepr):
         report.outcome = "skipped"
         report.longrepr = (str(item.path), item.location[1] or 0, "Skipped: this ffmpeg has no libwebp_anim encoder")
+    elif (
+        report.failed
+        and OLD_FFMPEG
+        and any(text in str(report.longrepr) for text in ("can't be trusted with", "SASHIMI_FFMPEG to its ffmpeg"))
+    ):
+        report.outcome = "skipped"
+        report.longrepr = (str(item.path), item.location[1] or 0, "Skipped: sashimi refuses this task on this FFmpeg")
 
 
 def _ffmpeg(*args: str) -> None:

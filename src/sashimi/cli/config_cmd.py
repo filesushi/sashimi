@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Annotated, Any, NoReturn, Optional
 import typer
 
 from sashimi.cli import _options as opt
-from sashimi.cli._output import console, fail
+from sashimi.cli._output import console, err_console, fail
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -92,6 +92,30 @@ def _split_key(key: str) -> tuple[str, str]:
     return section, option
 
 
+def _check_ffmpeg_path() -> None:
+    """Warns, after ``config set ffmpeg.path``, when the FFmpeg sashimi will now run can't be used, or isn't the one just set."""
+    from rich.markup import escape
+
+    from sashimi.cli import settings
+    from sashimi.core._ffmpeg import checked_paths, ffmpeg_paths
+    from sashimi.errors import FFmpegPathError
+
+    settings.load_raw_config.cache_clear()
+    try:
+        paths = checked_paths()
+    except FFmpegPathError as e:
+        err_console.print(f"[bold yellow]Warning:[/bold yellow] {escape(str(e))}")
+        return
+    kept = settings.ffmpeg_setting()
+    if kept is not None and paths.origin != kept[1]:
+        err_console.print(
+            f"[bold yellow]Warning:[/bold yellow] sashimi runs {escape(str(paths.ffmpeg))}, chosen by "
+            f"{escape(paths.origin)}, which comes before ffmpeg.path."
+        )
+    elif ffmpeg_paths().ffmpeg:
+        console.print(f"[dim]sashimi now runs {escape(str(paths.ffmpeg))} and {escape(str(paths.ffprobe))}.[/dim]")
+
+
 def _check(section: str, option: str, value: Any) -> None:
     """Refuses unknown keys and invalid values before anything is written."""
     from pydantic import ValidationError
@@ -102,9 +126,20 @@ def _check(section: str, option: str, value: Any) -> None:
 
     if option not in settings.known_keys(section):
         fail(f"Unknown option {section}.{option}.")
+    if section == "ffmpeg":
+        if not isinstance(value, str) or not value.strip() or "\0" in value:
+            fail(
+                "ffmpeg.path must be an ffmpeg executable, e.g. /opt/ffmpeg/bin/ffmpeg (ffprobe is the one beside "
+                "it), or the folder holding ffmpeg and ffprobe."
+            )
+        return
     if option == "output_dir":
         if not isinstance(value, str) or not value.strip() or "\0" in value:
             fail(f"{section}.output_dir must be a folder, e.g. sheets or /home/me/sheets.")
+        return
+    if option in settings.COMMAND_KEYS.get(section, ()):
+        if not isinstance(value, bool):
+            fail(f"{section}.{option} must be true or false.")
         return
     if option == "output_name":
         from sashimi.api._naming import ROLES, NameTemplate
@@ -223,7 +258,9 @@ def set_(
     from sashimi.cli import settings
 
     section, option = _split_key(key)
-    parsed = _parse_value(value, as_text=option in settings.OUTPUT_KEYS or option in settings.PATH_KEYS)
+    parsed = _parse_value(
+        value, as_text=option in settings.OUTPUT_KEYS or option in settings.PATH_KEYS or section == "ffmpeg"
+    )
     _check(section, option, parsed)
     try:
         written = settings.set_config_value(section, option, parsed, scope=_scope(project))
@@ -231,6 +268,8 @@ def set_(
         _settings_error(e)
     console.print(f"[green]Set[/green] {section}.{option} = {escape(repr(parsed))} in {escape(str(written))}")
     console.print(f"[dim]({escape(_where(written))})[/dim]")
+    if section == "ffmpeg":
+        _check_ffmpeg_path()
     if option == "output_dir":
         import pathlib
 

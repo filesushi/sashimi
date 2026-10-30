@@ -69,7 +69,7 @@ if TYPE_CHECKING:
         to_jpeg,
         to_png,
     )
-    from ._batch import Batch, BatchPlan, FolderClash, PlannedFile, YieldType
+    from ._batch import Batch, BatchPlan, Done, FileResult, FolderClash, PlannedFile, YieldType
     from ._naming import NameTemplate, default_output_name
     from ._consume import build_report
     from .edit import edit_frames, edit_frames_generator, edit_images, edit_images_generator
@@ -87,6 +87,8 @@ _EXPORTS = {
     "YieldType": "._batch",
     "Batch": "._batch",
     "BatchPlan": "._batch",
+    "Done": "._batch",
+    "FileResult": "._batch",
     "FolderClash": "._batch",
     "PlannedFile": "._batch",
     "NameTemplate": "._naming",

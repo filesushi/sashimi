@@ -87,7 +87,7 @@ def test_max_pixels_flag_and_sashimi_toml(tmp_path):
     assert refused.exit_code == 1
     assert result_message(refused) == (
         "This image is too large to process: it has 6 megapixels (3000x2000), and the limit is 5 megapixels. "
-        "To change the limit, run: sashimi config set limits.max_pixels 200M (or none for no limit)."
+        "It was set with --max-pixels 5M: give a higher value, or --max-pixels none for no limit."
     )
     toml(tmp_path, '[limits]\nmax_pixels = "5M"\n')
     assert runner.invoke(app, ["resize", "big.png", "-w", "100", "--json"]).exit_code == 1
@@ -165,11 +165,15 @@ def test_video_limits_come_from_sashimi_toml(video_blob, tmp_path):
     assert video.exit_code == 1
     assert result_message(video) == (
         "This video is 6 seconds long, and the limit is 5 seconds. Set a shorter duration to convert part of it. "
-        "To change the limit, run: sashimi config set limits.max_video_seconds 2h (or none for no limit)."
+        "To raise the limit (now 5s), run: sashimi config set limits.max_video_seconds 30s "
+        "(or any higher value, or none for no limit)."
     )
     audio = runner.invoke(app, ["convert", "clip.mkv", "mp3", "--json"])
     assert result_message(audio).startswith("This video is 6 seconds long, and the limit is 3 seconds.")
-    assert result_message(audio).endswith("sashimi config set limits.max_audio_seconds 2h (or none for no limit).")
+    assert result_message(audio).endswith(
+        "To raise the limit (now 3s), run: sashimi config set limits.max_audio_seconds 30s "
+        "(or any higher value, or none for no limit)."
+    )
     assert runner.invoke(app, ["extract", "clip.mkv", "0", "--json"]).exit_code == 0
     accurate = runner.invoke(app, ["extract", "clip.mkv", "0", "-o", "a.mp4", "--accurate", "--json"])
     assert result_message(accurate).startswith("This video is 6 seconds long, and the limit is 5 seconds.")
@@ -196,3 +200,35 @@ def test_gifs_have_no_frame_budget(video_blob, tmp_path, command):
     made = runner.invoke(app, [*command, "--json"])
     assert made.exit_code == 0, made.output
     assert json.loads(made.stdout)["summary"]["success"] == 1
+
+
+@pytest.mark.parametrize(
+    "field, current, suggested",
+    [
+        ("max_pixels", 64_000_000, "100M"),
+        ("max_pixels", 300_000_000, "500M"),
+        ("max_frame_bytes", 2**30, "2G"),
+        ("max_gif_seconds", 30, "1m"),
+        ("max_gif_seconds", 3 * 3600, "6h"),
+        ("max_video_seconds", 90_000, "49h"),
+        ("max_scan_packets", 2_000_000, "5000000"),
+    ],
+)
+def test_the_hint_suggests_a_round_value_above_the_limit_in_force(monkeypatch, field, current, suggested):
+    from sashimi.config import Limits
+
+    monkeypatch.setitem(_limits._resolved, "limits", Limits(**{field: current}))
+    monkeypatch.setitem(_limits._resolved, "flags", {})
+    message = _limits.hint(field)
+    assert f"sashimi config set limits.{field} {suggested} " in message
+    assert _limits.parse(field, suggested) > current
+
+
+def test_the_hint_names_the_flag_that_set_the_limit(tmp_path):
+    Image.new("RGB", (2000, 2000), "red").save(tmp_path / "big.png")
+    toml(tmp_path, '[limits]\nmax_pixels = "200M"\n')
+    refused = runner.invoke(app, ["convert", "big.png", "jpg", "--max-pixels", "1M", "--json"])
+    assert refused.exit_code == 1
+    message = result_message(refused)
+    assert "config set" not in message
+    assert message.endswith("It was set with --max-pixels 1M: give a higher value, or --max-pixels none for no limit.")

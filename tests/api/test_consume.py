@@ -50,6 +50,7 @@ def test_rejected_inputs_are_reported_but_do_not_advance_progress(monkeypatch):
         "status": "exists",
         "message": "Contact sheet already exists",
         "output": "a.sheet.jpg",
+        "fidelity": None,
     }
 
 

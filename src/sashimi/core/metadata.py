@@ -7,6 +7,7 @@ import json
 import os
 import re
 import struct
+import tempfile
 from typing import Any, Literal
 
 from PIL import Image
@@ -35,13 +36,14 @@ from sashimi.core._imagemeta import (
     strip_image,
     xmp_has_location,
 )
-from sashimi.core._mediameta import dropped_streams, is_location_key, metadata_args
+from sashimi.core._mediameta import dropped_streams, is_location_key, merged_movflags, metadata_args, quicktime_tag_args
 from sashimi.core._tiffmeta import GPS_IFD
+from sashimi.core.fidelity import Fidelity, Outcome
 from sashimi.core.image import _open_image
 from sashimi.core.probe import MediaInfo, parse_ffprobe_json, probe
 from sashimi.errors import BinaryNotFoundError, InvalidOptionsError, ProcessingError, UnsupportedMediaError
 
-__all__ = ["MetadataInfo", "build_strip_command", "read", "strip", "strip_format"]
+__all__ = ["MetadataInfo", "StripResult", "build_strip_command", "read", "strip", "strip_format"]
 
 NOT_SUPPORTED = "Removing metadata from this kind of file isn't supported."
 NOT_MEDIA = "This file doesn't look like an image, video or audio file we can read."
@@ -102,6 +104,11 @@ class MetadataInfo(BaseModel):
     comment: str | None = None
     has_color_profile: bool = False
     """True if the file has a colour profile (``keep_icc`` decides whether outputs keep it)."""
+    display_rotation: int = 0
+    """
+    A video's display rotation: the clockwise turn players apply to show it (0, 90, 180 or 270).
+    It says how to show the picture, so every ``metadata`` mode keeps it; ``rotate`` changes it.
+    """
     tags: dict[str, str] = {}
     """Every other named field found (global tags of video and audio; a few EXIF and PNG text fields)."""
 
@@ -320,6 +327,7 @@ def _media_info(data: dict[str, Any]) -> MetadataInfo:
     fields["creation_time"] = _tag(every, "com.apple.quicktime.creationdate", "creation_time", "date")
     fields["date_taken"] = _tag(every, "com.apple.quicktime.creationdate", "creation_time")
     fields["comment"] = _tag(every, "comment", "description")
+    fields["display_rotation"] = info.display_turn
     fields["tags"] = global_tags
     return MetadataInfo(**{key: value for key, value in fields.items() if value is not None})
 
@@ -350,9 +358,39 @@ def read(input_path: PathLike, *, limits: Limits | None = None) -> MetadataInfo:
     return _media_info(_probe_full(input_path))
 
 
-_STRIP_IMAGE_EXTENSIONS = {"JPEG": "jpg", "MPO": "jpg", "PNG": "png", "WEBP": "webp", "GIF": "gif", "TIFF": "tif"}
+_STRIP_IMAGE_EXTENSIONS = {
+    "JPEG": "jpg",
+    "MPO": "jpg",
+    "PNG": "png",
+    "WEBP": "webp",
+    "GIF": "gif",
+    "TIFF": "tif",
+    "HEIF": "heic",
+    "AVIF": "avif",
+}
+_NO_METADATA = {"BMP": "BMP", "ICO": "ICO"}
+"""Image formats that hold no metadata sashimi knows of, so there is nothing to remove."""
+_UNSTRIPPABLE = {"TGA": "TGA", "PSD": "Photoshop (PSD)"}
+"""Image formats whose metadata sashimi can't remove without re-encoding."""
 _STRIP_MUXERS = {"matroska": "mkv", "webm": "webm", "mov": "mov", "mp4": "mp4", "ipod": "m4a"}
 _STRIP_MUXERS.update({"mp3": "mp3", "flac": "flac", "ogg": "ogg", "wav": "wav"})
+_STRIP_MUXERS.update({"mpegts": "ts", "m2ts": "m2ts", "vob": "vob", "mpeg": "mpg", "3gp": "3gp", "3g2": "3g2"})
+_STRIP_MUXERS.update({"flv": "flv", "asf": "wmv", "avi": "avi"})
+
+
+def _refuse_image(fmt: str) -> UnsupportedMediaError:
+    """Why :func:`strip` doesn't take an image of Pillow format `fmt`."""
+    if fmt in _NO_METADATA:
+        return UnsupportedMediaError(
+            f"{_NO_METADATA[fmt]} files hold no metadata, so there's nothing to remove.", detail=f"Pillow format {fmt}"
+        )
+    if fmt in _UNSTRIPPABLE:
+        return UnsupportedMediaError(
+            f"Removing metadata from {_UNSTRIPPABLE[fmt]} files isn't supported. Converting the file to PNG with "
+            "remove_all leaves its metadata out.",
+            detail=f"Pillow format {fmt}",
+        )
+    return UnsupportedMediaError(NOT_SUPPORTED, detail=f"Pillow format {fmt}")
 
 
 def _media_muxer(input_path: PathLike, info: MediaInfo) -> str:
@@ -371,8 +409,18 @@ def _media_muxer(input_path: PathLike, info: MediaInfo) -> str:
             return "mov"
         if brand in ("m4a", "m4b"):
             return "ipod"
+        if brand.startswith("3g2"):
+            return "3g2"
+        if brand.startswith("3gp"):
+            return "3gp"
         return "mp4"
-    for name in ("mp3", "flac", "ogg", "wav"):
+    if "mpegts" in names:
+        with open(os.fspath(input_path), "rb") as f:
+            head = f.read(5)
+        return "m2ts" if len(head) == 5 and head[4] == 0x47 and head[0] != 0x47 else "mpegts"
+    if "mpeg" in names:
+        return "mpeg" if info.video_codec == "mpeg1video" else "vob"
+    for name in ("mp3", "flac", "ogg", "wav", "flv", "asf", "avi"):
         if name in names:
             return name
     raise UnsupportedMediaError(NOT_SUPPORTED, detail=f"container={info.container}")
@@ -387,10 +435,10 @@ def strip_format(input_path: PathLike, *, limits: Limits | None = None) -> str:
         with _open_image(input_path, limits, load=False) as img:
             fmt = str(img.format)
         if fmt not in _STRIP_IMAGE_EXTENSIONS:
-            raise UnsupportedMediaError(NOT_SUPPORTED, detail=f"Pillow format {fmt}")
+            raise _refuse_image(fmt)
         return _STRIP_IMAGE_EXTENSIONS[fmt]
     except UnsupportedMediaError as e:
-        if e.user_message == NOT_SUPPORTED:
+        if e.detail and e.detail.startswith("Pillow format"):
             raise
     return _STRIP_MUXERS[_media_muxer(input_path, probe(input_path, limits=limits))]
 
@@ -412,15 +460,102 @@ def build_strip_command(
     if mode == "keep":
         raise InvalidOptionsError("Choose remove_location or remove_all.")
     dropped = dropped_streams(source, mode)
-    cmd = [ffmpeg, *base_args(1), *INPUT_PROTOCOLS, "-i", file_arg(input_path), "-map", "0"]
+    generated = ["-fflags", "+genpts"] if muxer in ("vob", "mpeg") else []
+    cmd = [ffmpeg, *base_args(1), *INPUT_PROTOCOLS, *generated, "-i", file_arg(input_path), "-map", "0"]
     for index in dropped:
         cmd += ["-map", f"-0:{index}"]
     cmd += ["-c", "copy"]
-    if muxer in ("mov", "mp4", "ipod"):
+    if muxer in ("mov", "mp4", "ipod", "3gp", "3g2"):
         cmd += ["-movflags", "+faststart"]
     kept = [index for index in range(len(source.streams)) if index not in dropped]
     cmd += metadata_args(mode, source, kept)
+    cmd = merged_movflags([*cmd, *quicktime_tag_args(mode, source, muxer)])
+    if muxer == "m2ts":
+        return [*cmd, *OUTPUT_FLAGS, "-mpegts_m2ts_mode", "1", "-f", "mpegts", file_arg(output_path)]
     return [*cmd, *OUTPUT_FLAGS, "-f", muxer, file_arg(output_path)]
+
+
+class StripResult(Outcome):
+    """What :func:`strip` wrote: the format's extension, and what the copy kept (``fidelity``)."""
+
+    format: str
+    """The extension of the format written, which is the source's (``jpg``, ``png``, ``mkv``, …)."""
+
+
+_STRIPPED_WITH_METADATA = ("motion photo video", "data after the picture")
+"""What :func:`strip` may remove from a JPEG with the metadata: data after the picture that holds metadata of its own."""
+_HOLDS = {"remove_location": "location (or tracks that can hold it)", "remove_all": "metadata"}
+MOTION_SAMSUNG = (
+    "The motion photo's video was removed: it holds {what}, and sashimi can't change a Samsung motion photo's "
+    "video without breaking the photo"
+)
+MOTION_FAILED = "The motion photo's video was removed: it holds {what}, and sashimi couldn't remove it from the video"
+MOTION_KEPT = {
+    "remove_location": "The motion photo's video was kept, without its location and data tracks",
+    "remove_all": "The motion photo's video was kept, without its metadata",
+}
+"""What :func:`strip` says (``fidelity.notes``) about a motion photo's video it changed or removed."""
+
+
+def _image_strip_fidelity(
+    input_path: PathLike, output_path: PathLike, mode: MetadataMode, keep_icc: bool, notes: list[str]
+) -> Fidelity:
+    from sashimi.core.fidelity import COLOUR_PROFILE, differences, fidelity, image_inventory
+
+    source, output = image_inventory(input_path), image_inventory(output_path)
+    asked = [name for name in source.items if name in _STRIPPED_WITH_METADATA and name not in output.items]
+    if not keep_icc:
+        asked.append(COLOUR_PROFILE)
+    lost, removed = differences(source, output, removed_metadata=mode, removed=asked)
+    return fidelity("picture", lost=lost, removed=removed, notes=notes, checked=source.checked)
+
+
+def _needs_stripping(inventory: Any, mode: MetadataMode) -> bool:
+    """Whether a motion photo's video holds what `mode` removes: location (or tracks that can hold it), or any metadata."""
+    if mode == "remove_all":
+        return bool(inventory.metadata)
+    tracks = [name for name in inventory.metadata if "track" in inventory.label(name)]
+    return bool(inventory.location or tracks)
+
+
+def _motion_choice(
+    data: bytes, mode: MetadataMode, folder: PathLike, limits: Limits | None
+) -> tuple[bytes | None, list[str]]:
+    """
+    What :func:`strip` does with a JPEG motion photo's video, and why when it drops it: kept byte
+    for byte when it holds nothing `mode` removes; else stripped the same way (streams copied) and
+    checked, then put back (Google's layout only: a Samsung trailer points into the old video);
+    else dropped. ``(None, [])`` for a JPEG without a video.
+    """
+    from sashimi.core._imagemeta import KEEP_VIDEO, motion_video
+    from sashimi.core.fidelity import media_inventory
+
+    motion = motion_video(data)
+    if motion is None:
+        return None, []
+    failed = (None, [MOTION_FAILED.format(what=_HOLDS[mode])])
+    with tempfile.TemporaryDirectory(prefix=".sashimi-", dir=os.fspath(folder)) as work:
+        source = os.path.join(work, "video.mp4")
+        with open(source, "wb") as f:
+            f.write(data[motion.start : motion.end])
+        try:
+            inventory = media_inventory(source)
+            if not _needs_stripping(inventory, mode):
+                return KEEP_VIDEO, []
+            if motion.samsung:
+                return None, [MOTION_SAMSUNG.format(what=_HOLDS[mode])]
+            info = probe(source, limits=limits)
+            stripped = os.path.join(work, "stripped.mp4")
+            run_ffmpeg(build_strip_command(source, stripped, mode, source=info, muxer="mp4", ffmpeg=ffmpeg_binary()))
+            after = media_inventory(stripped)
+            if _needs_stripping(after, mode) or not probe(stripped, limits=limits).has_video:
+                return failed
+            with open(stripped, "rb") as f:
+                return f.read(), [MOTION_KEPT[mode]]
+        except BinaryNotFoundError:
+            raise
+        except (ProcessingError, UnsupportedMediaError):
+            return failed
 
 
 def strip(
@@ -432,21 +567,37 @@ def strip(
     scratch_dir: PathLike | None = None,
     limits: Limits | None = None,
     on_progress: ProgressCallback | None = None,
-) -> str:
+) -> StripResult:
     """
     Writes a copy of a file without its metadata, in the same format, re-encoding nothing:
     images keep their compressed pixel data byte for byte (JPEG segments, PNG chunks, WebP
     chunks, GIF extensions and TIFF tags are dropped or filtered), and video and audio streams
-    are copied. Returns the format's extension (see :func:`strip_format`).
+    are copied. Returns the format's extension (see :func:`strip_format`) and what the copy kept
+    (:class:`StripResult`).
 
     `mode` is ``remove_all`` (keep only what showing or playing the file needs: the picture or
     streams, their layout, dispositions and languages, the display rotation, and the colour
     profile unless `keep_icc` is False) or ``remove_location`` (GPS data, location tags and place
     names, and timed metadata tracks; everything else stays). Removal is best effort: it covers
     the carriers sashimi knows of (see the README). An MPO's extra pictures are dropped, leaving
-    its main JPEG. Raises InvalidOptionsError for ``keep``, and UnsupportedMediaError for files it
-    can't handle: HEIC, BMP (which holds no metadata), BigTIFF, DNG, and containers other than
-    MKV, WebM, MP4, MOV, M4A, MP3, FLAC, OGG and WAV. Written atomically.
+    its main JPEG. HEIC and AVIF are rewritten in place (see below). Raises InvalidOptionsError for
+    ``keep``, and UnsupportedMediaError for files it can't handle, with the reason: BMP and ICO
+    (which hold no metadata), TGA and PSD, BigTIFF, DNG, and containers other than MKV, WebM, MP4,
+    MOV, M4A, 3GP, MP3, FLAC, OGG, WAV, MPEG-TS (and M2TS), MPEG-PS (VOB, MPG), FLV, ASF (WMV)
+    and AVI.
+
+    HEIC and AVIF keep every image item byte for byte (the photo, its tiles, the gain map, depth
+    and portrait mattes, thumbnails) and the orientation viewers apply; the EXIF and XMP items are
+    rewritten at the same size. ``remove_location`` removes the GPS directory and XMP location
+    properties; ``remove_all`` empties the EXIF item (keeping an orientation other than 1) and the
+    photo's XMP, and keeps the XMP that says how to show the gain map and other auxiliary images
+    (without location). An iPhone's HDR brightness for its gain map is in the EXIF maker notes on
+    older models, so ``remove_all`` makes viewers use their default there.
+
+    JPEG motion photos and Ultra HDR JPEGs keep their embedded video and gain map under
+    ``remove_location`` only when they hold no location (the video's own tags can); a JPEG's
+    data after the picture (the video, the gain map image) is otherwise removed, and so is the XMP
+    that points at it. Written atomically.
     """
     if mode not in ("remove_location", "remove_all"):
         raise InvalidOptionsError("Choose remove_location or remove_all.")
@@ -458,18 +609,24 @@ def strip(
         image_format = None
     if image_format is not None:
         if image_format not in _STRIP_IMAGE_EXTENSIONS:
-            raise UnsupportedMediaError(NOT_SUPPORTED, detail=f"Pillow format {image_format}")
+            raise _refuse_image(image_format)
         with open(os.fspath(input_path), "rb") as f:
             data = f.read()
-        stripped = strip_image(data, image_format, mode, keep_icc)
+        video: bytes | None = None
+        notes: list[str] = []
+        if image_format in ("JPEG", "MPO"):
+            folder = scratch_dir or os.path.dirname(os.path.abspath(os.fspath(output_path)))
+            video, notes = _motion_choice(data, mode, folder, limits)
+        stripped = strip_image(data, image_format, mode, keep_icc, video)
         try:
             with atomic_output(output_path, scratch_dir) as temp, open(temp, "wb") as out:
                 out.write(stripped)
         except OSError as e:
             raise ProcessingError(f"Cannot write {os.fspath(output_path)}: {e}") from e
+        told = _image_strip_fidelity(input_path, output_path, mode, keep_icc, notes)
         if on_progress:
             on_progress(1.0, "done")
-        return _STRIP_IMAGE_EXTENSIONS[image_format]
+        return StripResult(format=_STRIP_IMAGE_EXTENSIONS[image_format], fidelity=told)
     info = probe(input_path, limits=limits)
     if not info.streams or not (info.has_video or info.has_audio):
         raise UnsupportedMediaError(NOT_MEDIA, detail=f"container={info.container}")
@@ -477,6 +634,19 @@ def strip(
     with atomic_output(output_path, scratch_dir) as temp:
         cmd = build_strip_command(input_path, temp, mode, source=info, muxer=muxer, ffmpeg=ffmpeg_binary())
         run_ffmpeg(cmd)
+    from sashimi.core.fidelity import media_fidelity
+    from sashimi.core.video import _mode_removals, _timecode_kept, hidden_tail, tail_text
+
+    tail = hidden_tail(input_path, info) if info.has_video else 0
+    told = media_fidelity(
+        input_path,
+        output_path,
+        "picture and sound" if info.has_video and info.has_audio else "picture" if info.has_video else "sound",
+        changed=[tail_text(tail)] if tail else [],
+        removed_metadata=mode,
+        removed=_mode_removals(info, mode),
+        kept=_timecode_kept(info),
+    )
     if on_progress:
         on_progress(1.0, "done")
-    return _STRIP_MUXERS[muxer]
+    return StripResult(format=_STRIP_MUXERS[muxer], fidelity=told)

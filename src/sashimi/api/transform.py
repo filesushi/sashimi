@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 The FileSushi Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Batch rotation and flipping: photos and animations through the image editor, videos re-encoded."""
+"""Batch rotation and flipping: photos and animations through the image editor, videos losslessly where they can be."""
 
+import os
 import pathlib
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
@@ -13,11 +14,20 @@ from sashimi.api._consume import consume_generator
 from sashimi.api._kinds import kind_of, unsupported
 from sashimi.api._naming import EXTENSIONS, NameTemplate, OutputFormat, check_output_ext, naming, output_format
 from sashimi.api.resize import source_target
-from sashimi.config import IMAGE_EDIT, VIDEO_TRANSFORM, ImageEditConfig, Limits, TransformConfig
+from sashimi.config import (
+    IMAGE_EDIT,
+    VIDEO_TRANSFORM,
+    ImageEditConfig,
+    Limits,
+    MovTransformConfig,
+    Mp4TransformConfig,
+    TransformConfig,
+)
 from sashimi.config._base import normalize_target
 from sashimi.core import edit as image_edit
-from sashimi.core.video import transform
-from sashimi.errors import InvalidOptionsError
+from sashimi.core.probe import probe
+from sashimi.core.video import rotation_container, transform
+from sashimi.errors import InvalidOptionsError, SashimiError
 
 __all__ = [
     "ROTATE_EXTENSIONS",
@@ -31,6 +41,9 @@ ROTATE_EXTENSIONS = IMAGE_EXTENSIONS + VIDEO_EXTENSIONS
 """The extensions :func:`rotate_files_generator` picks up: images (animated GIFs and WebPs included) and videos."""
 
 ROTATE_ACCEPTS = "images, animations and videos"
+
+MOV_EXTENSIONS = frozenset({".mov"})
+"""Videos :func:`rotate_files_generator` writes as MOV by default (see :func:`sashimi.video.rotation_container`)."""
 
 
 def rotate_files_generator(
@@ -58,13 +71,16 @@ def rotate_files_generator(
     :func:`~sashimi.api.edit_images` with ``rotate`` (every frame of an animated GIF or WebP),
     and videos through :func:`sashimi.video.transform`, re-encoded. Each output is
     ``{input_name}.rotated.{output_ext}`` next to its input (``photo.jpg.rotated.jpg``,
-    ``clip.mkv.rotated.mp4``), under `output_dir`, or `output` for a single file.
+    ``clip.mkv.rotated.mp4``, ``clip.mov.rotated.mov``), under `output_dir`, or `output` for a single file.
 
     `output_format` chooses the format, and with it the files taken: an image format (``png``,
     ``jpg``, …) rotates images only, saved in it (``photo.jpg.rotated.png``, without the loss of
-    re-saving a JPEG), and a video format (``mp4``, ``webm``) rotates videos only. It is the
-    extension as given (``jpeg`` or ``jpg``). Without it, images keep their own format (HEIC
-    becomes JPEG, saved at high quality) and videos become MP4.
+    re-saving a JPEG), and a video format (``mp4``, ``webm``, ``mov``) rotates videos only. It is
+    the extension as given (``jpeg`` or ``jpg``). Without it, images keep their own format (HEIC
+    becomes JPEG, saved at high quality), MOV videos stay MOV (a lossless rotation then keeps
+    every stream MOV holds, PCM sound included) unless MP4 keeps more of them (Dolby Vision
+    settings, which FFmpeg writes only into MP4: :func:`sashimi.video.rotation_container`), and
+    other videos become MP4; an MP4 `video_config` gives its options to MOV videos too.
 
     `image_config` (one config, or a function from format name to config) and `video_config` set
     the save and encoding options. Their ``rotate`` and ``flip`` must match, and an image config
@@ -78,7 +94,9 @@ def rotate_files_generator(
     fmt = normalize_target(typed) if typed is not None else None
     if fmt is not None and fmt not in IMAGE_EDIT.targets and fmt not in VIDEO_TRANSFORM.targets:
         images = ", ".join(IMAGE_EDIT.targets)
-        raise InvalidOptionsError(f"rotate can't save {fmt.upper()}; choose an image format ({images}), mp4 or webm.")
+        raise InvalidOptionsError(
+            f"rotate can't save {fmt.upper()}; choose an image format ({images}), mp4, webm or mov."
+        )
     only = "image" if fmt in IMAGE_EDIT.targets else "video" if fmt in VIDEO_TRANSFORM.targets else None
     if fmt is not None:
         check_output_ext(typed, (fmt,))
@@ -96,6 +114,27 @@ def rotate_files_generator(
     video_cfg = video_config or VIDEO_TRANSFORM.from_params(
         target=fmt if only == "video" else "mp4", rotate=turn, flip=mirror
     )
+    as_mov = (
+        MovTransformConfig.model_validate(video_cfg.model_dump(exclude={"target"}))
+        if fmt is None and isinstance(video_cfg, Mp4TransformConfig)
+        else None
+    )
+
+    chosen: dict[str, TransformConfig] = {}
+
+    def video_config_for(path: pathlib.Path) -> TransformConfig:
+        if as_mov is None or path.suffix.lower() not in MOV_EXTENSIONS:
+            return video_cfg
+        key = os.path.abspath(path)
+        if key not in chosen:
+            assert isinstance(video_cfg, Mp4TransformConfig)
+            try:
+                kept = rotation_container(probe(path, limits=limits), video_cfg, as_mov)
+            except SashimiError:
+                kept = "mov"
+            chosen[key] = as_mov if kept == "mov" else video_cfg
+        return chosen[key]
+
     image_cfgs: dict[str, ImageEditConfig] = {}
 
     def image_config_for(path: pathlib.Path) -> ImageEditConfig:
@@ -118,13 +157,12 @@ def rotate_files_generator(
         return "edit" if kind_of(path) == "image" else "transform"
 
     def target_for(path: pathlib.Path) -> str:
-        return image_config_for(path).target if route(path) == "edit" else video_cfg.target
+        return image_config_for(path).target if route(path) == "edit" else video_config_for(path).target
 
-    def process(src: pathlib.Path, dst: pathlib.Path, progress: Callable[[float, str], None] | None) -> None:
+    def process(src: pathlib.Path, dst: pathlib.Path, progress: Callable[[float, str], None] | None) -> Any:
         if route(src) == "edit":
-            image_edit.edit(src, dst, image_config_for(src), limits=limits, on_progress=progress)
-        else:
-            transform(src, dst, video_cfg, max_workers=max_workers, limits=limits, on_progress=progress)
+            return image_edit.edit(src, dst, image_config_for(src), limits=limits, on_progress=progress)
+        return transform(src, dst, video_config_for(src), max_workers=max_workers, limits=limits, on_progress=progress)
 
     def reject_reason(path: pathlib.Path) -> str:
         kind = kind_of(path)

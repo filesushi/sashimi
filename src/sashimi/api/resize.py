@@ -25,12 +25,38 @@ _TARGET_FOR_SUFFIX = {
     ".tiff": "tiff",
     ".heic": "jpeg",
     ".heif": "jpeg",
+    ".jfif": "jpeg",
+    ".jpe": "jpeg",
+    ".jif": "jpeg",
+    ".apng": "apng",
+    ".avif": "avif",
+    ".ico": "png",
+    ".tga": "png",
+    ".psd": "png",
 }
 
 
 def source_target(path: pathlib.Path) -> str:
-    """The format that keeps an image's own, judged by its extension (HEIC/HEIF becomes JPEG)."""
-    return _TARGET_FOR_SUFFIX.get(path.suffix.lower(), "jpeg")
+    """
+    The format that keeps an image's own, judged by its extension, or comes closest: HEIC/HEIF
+    become JPEG; ICO, TGA and PSD become PNG. A ``.png`` that is an animated PNG (it has an
+    ``acTL`` chunk before its picture data) keeps ``apng``, so it stays animated.
+    """
+    target = _TARGET_FOR_SUFFIX.get(path.suffix.lower(), "jpeg")
+    if target == "png" and _animated_png(path):
+        return "apng"
+    return target
+
+
+def _animated_png(path: pathlib.Path) -> bool:
+    """True when the PNG file at `path` declares an animation (``acTL`` before ``IDAT``); reads only its first chunks."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(1 << 16)
+    except OSError:
+        return False
+    found = head.find(b"acTL")
+    return found > 0 and (head.find(b"IDAT") < 0 or found < head.find(b"IDAT"))
 
 
 def resize_images_generator(
@@ -69,6 +95,10 @@ def resize_images_generator(
         fixed = output_format(config.target, typed=output_ext)
     names = naming("resize", lambda p: output_format(config_for(p).target, p, output_ext), output_name, fixed=fixed)
 
+    def process(src: pathlib.Path, dst: pathlib.Path, progress: Callable[[float, str], None] | None) -> Any:
+        chosen = config_for(src)
+        return convert(src, dst, chosen, limits=limits, on_progress=progress)
+
     def reject_reason(path: pathlib.Path) -> str:
         if kind_of(path) == "video":
             return "resize works on images and animations; videos aren't supported yet."
@@ -80,7 +110,7 @@ def resize_images_generator(
         extensions=extensions,
         recursive=recursive,
         force=force,
-        process=lambda src, dst, progress: convert(src, dst, config_for(src), limits=limits, on_progress=progress),
+        process=process,
         success_message="Resized to {name}",
         accepts="images and animations",
         route=lambda _: "image",

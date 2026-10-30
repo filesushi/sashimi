@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from sashimi.config import GifPreviewConfig, Limits, PreviewConfig
-from sashimi.config._limits import resolve_limits
+from sashimi.config._limits import check_webp_size, resolve_limits
 from sashimi.core._atomic import PathLike, atomic_output
 from sashimi.core._ffmpeg import (
     INPUT_PROTOCOLS,
@@ -31,11 +31,12 @@ from sashimi.core._palette import (
     palette_use,
     scaled,
 )
+from sashimi.core._hdr import hdr_name, require_tone_mapping, with_tone_map
+from sashimi.core.fidelity import Outcome, derived
 from sashimi.core._resources import resolve_max_workers
 from sashimi.core._seek import (
     VideoIndex,
-    build_pass_command,
-    clip_frames,
+    clip_pass,
     clip_route,
     decoding_args,
     video_index,
@@ -54,7 +55,8 @@ __all__ = ["plan_preview", "preview_size", "build_preview_commands", "build_prev
 
 logger = logging.getLogger("sashimi")
 
-MIN_PREVIEW_SECONDS = 0.5
+MIN_PREVIEW_SECONDS = 0.0
+"""Videos at least this long get a preview: any video with a frame does (a short one gives itself, whole)."""
 TOO_SHORT_FOR_PREVIEW = "This video is too short for a preview."
 NO_PREVIEW_FRAMES = "We couldn't read any frames from this video. The file may be damaged."
 _CROP = {"9:16": 9 / 16, "1:1": 1.0}
@@ -72,7 +74,7 @@ def plan_preview(
     that part is shorter than one clip), and never overlap: when they don't all fit, fewer are
     taken. A video shorter than one clip gives one clip of the whole video.
     """
-    if duration < MIN_PREVIEW_SECONDS:
+    if duration <= MIN_PREVIEW_SECONDS:
         raise MediaTooShortError(TOO_SHORT_FOR_PREVIEW, detail=f"duration={duration}")
     if duration <= sample_duration:
         return [(0.0, duration)]
@@ -132,6 +134,7 @@ def build_preview_commands(
     limits: Limits | None = None,
     palette: bytes | None = None,
     index: VideoIndex | None = None,
+    tone_map: str | None = None,
 ) -> tuple[list[list[str]], list[str]]:
     """
     Builds the ffmpeg commands for :func:`preview`: one per clip, then the encoder. Pure.
@@ -149,7 +152,12 @@ def build_preview_commands(
 
     `index` is the video's keyframe index (:func:`sashimi.core._seek.video_index`): each clip then
     decodes from just before the keyframe its start needs and drops the frames before the start.
-    Without it, ffmpeg seeks by itself (``-ss start``).
+    Without it, ffmpeg seeks by itself (``-ss start``). :func:`preview` decodes a clip that starts
+    while an earlier frame is still on screen (:meth:`~sashimi.core._seek.VideoIndex.held_from`,
+    in variable-frame-rate video) with :func:`~sashimi.core._seek.clip_pass` instead of its
+    command here, so it shows that frame until its own first frame.
+
+    `tone_map` (:func:`sashimi.core._hdr.tone_map_filter`) follows the scaling and cropping, for HDR video.
     """
     limits = resolve_limits(limits)
     limits.check(config)
@@ -161,6 +169,7 @@ def build_preview_commands(
     vf = f"fps={config.fps},scale={scale_w}:{scale_h}:flags=lanczos,setsar=1"
     if (scale_w, scale_h) != (out_w, out_h):
         vf += f",crop={out_w}:{out_h}"
+    vf = with_tone_map(vf, tone_map)
     clip_commands = []
     for start, length in clips:
         cmd = [ffmpeg, *base_args(1), *INPUT_PROTOCOLS, "-threads", "1"]
@@ -176,7 +185,7 @@ def build_preview_commands(
                     cmd += ["-ss", fmt_seconds(start)]
                 cmd += ["-t", fmt_seconds(length)]
             else:
-                decoding = decoding_args(begin, start, length)
+                decoding = decoding_args(begin, start, length, index.origin(begin))
                 cmd += decoding.inputs
                 clip_vf = with_filter(decoding.video, vf)
         cmd += ["-i", file_arg(input_path), "-map", "0:V:0", "-vf", clip_vf]
@@ -224,7 +233,7 @@ def preview(
     scratch_dir: PathLike | None = None,
     limits: Limits | None = None,
     on_progress: ProgressCallback | None = None,
-) -> None:
+) -> Outcome:
     """
     Makes a preview of a video (see :data:`~sashimi.config.VIDEO_PREVIEW`): `config.samples`
     clips of `config.sample_duration` seconds, spread across the video between the offsets,
@@ -251,8 +260,11 @@ def preview(
     height = max(info.height or 0, 2)
     width = max(round(height * info.display_aspect_ratio) if info.display_aspect_ratio else info.width or 0, 2)
     out_w, out_h = preview_size(width, height, config)[1]
+    if config.target == "webp":
+        check_webp_size(out_w, out_h)
     frame_bytes = out_w * out_h * 3
     ffmpeg = ffmpeg_binary()
+    tone_map = require_tone_mapping(info, ffmpeg)
     sent = 0
     planned = plan_preview(
         info.duration, config.samples, config.sample_duration, config.start_offset_percent, config.end_offset_percent
@@ -260,13 +272,22 @@ def preview(
     index = video_index(input_path, info, planned[-1][0] + planned[-1][1], limits)
     one_pass = clip_route(index, planned) == "pass"
 
+    (scale_w, scale_h) = preview_size(width, height, config)[0]
+    pass_vf = f"scale={scale_w}:{scale_h}:flags=lanczos,setsar=1"
+    if (scale_w, scale_h) != (out_w, out_h):
+        pass_vf += f",crop={out_w}:{out_h}"
+    pass_vf = with_tone_map(pass_vf, tone_map)
+
     def frames(clip_commands: list[list[str]]) -> Iterator[bytes]:
         nonlocal sent
         if one_pass:
             assert index is not None
-            yield from passed(index)
+            yield from passed(index, planned, threads)
             return
-        for cmd in clip_commands:
+        for clip, cmd in zip(planned, clip_commands, strict=True):
+            if index is not None and index.held_from(clip[0]) is not None:
+                yield from passed(index, [clip], 1)
+                continue
             try:
                 for chunk in stream_ffmpeg(cmd, frame_bytes):
                     if len(chunk) == frame_bytes:
@@ -277,18 +298,11 @@ def preview(
             except ProcessingError as e:
                 logger.debug(f"Preview clip failed: {e}")
 
-    def passed(index: VideoIndex) -> Iterator[bytes]:
+    def passed(index: VideoIndex, clips: list[tuple[float, float]], workers: int) -> Iterator[bytes]:
         nonlocal sent
-        start = index.decode_from(planned[0][0])
-        windows = [(begin, begin + length) for begin, length in planned]
-        (scale_w, scale_h) = preview_size(width, height, config)[0]
-        vf = f"scale={scale_w}:{scale_h}:flags=lanczos,setsar=1"
-        if (scale_w, scale_h) != (out_w, out_h):
-            vf += f",crop={out_w}:{out_h}"
-        cmd = build_pass_command(input_path, windows, vf, threads, ffmpeg, decode_from=start)
-        timed = stream_timed_frames(cmd, frame_bytes)
+        timed = clip_pass(input_path, index, clips, pass_vf, config.fps, frame_bytes, workers, ffmpeg)
         try:
-            for _, frame in clip_frames(((time + start, data) for time, data in timed), planned, config.fps):
+            for _, frame in timed:
                 sent += 1
                 yield frame
         except BinaryNotFoundError:
@@ -311,6 +325,7 @@ def preview(
             limits=limits,
             palette=palette,
             index=index,
+            tone_map=tone_map,
         )
 
     def run(cmd: list[str], clip_commands: list[list[str]], **kwargs: Any) -> bytes:
@@ -341,5 +356,12 @@ def preview(
     with atomic_output(output_path, scratch_dir) as temp:
         clip_commands, encode = build(temp, palette)
         run(encode, clip_commands, progress_total=total, on_progress=report, stage="encoding")
+    kind = "GIF (256 colours)" if isinstance(config, GifPreviewConfig) else f"animated WebP, quality {config.quality}"
+    changes = [f"{len(planned)} {'clip' if len(planned) == 1 else 'clips'} at {config.fps} fps as {kind}"]
+    if (out_w, out_h) != (width, height):
+        changes.append(f"scaled to {out_w}x{out_h}")
+    if tone_map:
+        changes.append(f"tone-mapped from {hdr_name(info)}")
     if on_progress:
         on_progress(1.0, "done")
+    return Outcome(fidelity=derived(input_path, "picture", changes, media=True))

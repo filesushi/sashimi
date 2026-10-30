@@ -102,7 +102,7 @@ def test_audio_length_limit():
     with pytest.raises(MediaTooLongError) as e:
         build("mp3", duration=3601.0, limits=FILESUSHI)
     assert e.value.user_message == (
-        "This audio is 1 hour 1 second long, and the limit is 60 minutes. Set a shorter duration to convert part of it."
+        "This audio is 1 hour 1 second long, and the limit is 1 hour. Set a shorter duration to convert part of it."
     )
     assert e.value.limit == "max_audio_seconds"
     build("mp3", duration=7200.0, duration_seconds=3600, limits=FILESUSHI)

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pathlib
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any, Literal
 
 from sashimi.api._batch import VIDEO_EXTENSIONS, Batch, FileProgress, PathInput, run_batch
@@ -45,8 +45,10 @@ def remux_files_generator(
     `output_dir`, or to `output` for a single video. `output_name` sets the pattern
     (``{input_stem}.{output_ext}`` for ``clip.mkv``), as for every batch function (see
     :mod:`sashimi.api`). Every stream is kept (but timed metadata tracks when `metadata` removes anything, and
-    cover art for ``remove_all``); text subtitles the container can't hold are converted. Videos
-    whose streams the container can't hold are reported as errors before anything is written.
+    cover art for ``remove_all``); text subtitles the container can't hold are converted, and data
+    tracks it can't hold (a timecode, a GoPro's GPS, Apple's metadata) are left out, which the
+    success message says. Videos whose video, audio or subtitles the container can't hold are
+    reported as errors before anything is written.
     Sources are never changed or removed. Files already in that container aren't picked up.
     `metadata` keeps the source's tags (the default) or removes location tags or all of them.
     """
@@ -55,6 +57,9 @@ def remux_files_generator(
     label = config.container.upper()
     fmt = output_format(config.container)
     names = naming("remux", lambda _: fmt, output_name, fixed=fmt)
+
+    def process(src: pathlib.Path, dst: pathlib.Path, progress: Callable[[float, str], None] | None) -> Any:
+        return trim(src, dst, config, limits=limits, on_progress=progress)
 
     def reject_reason(path: pathlib.Path) -> str:
         return f"Already {label}" if path.suffix.lower() in own else unsupported("remux", "videos", path)
@@ -65,7 +70,7 @@ def remux_files_generator(
         extensions=extensions if extensions is not None else [ext for ext in VIDEO_EXTENSIONS if ext not in own],
         recursive=recursive,
         force=force,
-        process=lambda src, dst, progress: trim(src, dst, config, limits=limits, on_progress=progress),
+        process=process,
         success_message="Remuxed to {name}",
         accepts="videos",
         route=lambda _: "trim",
