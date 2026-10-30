@@ -16,6 +16,7 @@ from sashimi.core._imagemeta import Carriers
 from sashimi.core.image import _render
 from sashimi.core.probe import MediaInfo
 from sashimi.errors import InvalidOptionsError
+from tests.conftest import noise
 
 
 def test_importing_config_loads_only_pydantic():
@@ -262,8 +263,15 @@ IMAGE_ALTERNATIVES = {
 IMAGE_CONTEXT = {"resample": {"max_width": 16}, "background_color": {"preserve_transparency": False}}
 
 
-def _photo():
-    img = Image.effect_noise((64, 32), 40).convert("RGBA")
+def _two_colours():
+    img = Image.new("RGB", (64, 32), (200, 30, 30))
+    img.paste((20, 40, 220), (0, 0, 32, 32))
+    return img
+
+
+def _photo(pixels=None):
+    """A photo with an orientation, EXIF, an sRGB profile and a comment: noise, or `pixels` when given."""
+    img = (noise((64, 32), 3) if pixels is None else pixels).convert("RGBA")
     img.putpixel((0, 0), (0, 0, 0, 0))
     exif = Image.Exif()
     exif[0x0112] = 6
@@ -284,19 +292,18 @@ def _carriers():
     return Carriers(exif=_photo().info["exif"].removeprefix(b"Exif\x00\x00"), comments=[b"a comment"])
 
 
-def _rendered(model, **fields):
-    img, kwargs, _ = _render(_photo(), model(**fields), _carriers())
+def _rendered(model, pixels=None, **fields):
+    img, kwargs, _ = _render(_photo(pixels), model(**fields), _carriers())
     metadata = {k: v for k, v in kwargs.items() if k in ("exif", "comment", "pnginfo", "xmp", "extra")}
     others = {k: v for k, v in kwargs.items() if k not in metadata}
     return img.mode, img.size, img.tobytes(), others, sorted(metadata)
 
 
-def _written(tmp_path, model, **fields):
-    source = tmp_path / "photo.png"
+def _written(tmp_path, model, pixels=None, **fields):
+    source = tmp_path / ("photo.png" if pixels is None else "few.png")
     if not source.exists():
-        _photo().save(
-            source, "PNG", exif=_photo().getexif(), icc_profile=_photo().info["icc_profile"], pnginfo=_comment()
-        )
+        photo = _photo(pixels)
+        photo.save(source, "PNG", exif=photo.getexif(), icc_profile=photo.info["icc_profile"], pnginfo=_comment())
     out = tmp_path / "out"
     image.convert(source, out, model(**fields))
     return out.read_bytes()
@@ -310,6 +317,10 @@ def test_every_image_option_changes_the_output(model, tmp_path):
             context = {"tiff_compression": "jpeg"}
         default = model.model_fields[name].default
         alternative = (not default) if isinstance(default, bool) else IMAGE_ALTERNATIVES[name]
-        assert _rendered(model, **context) != _rendered(model, **context, **{name: alternative}), name
-        written = _written(tmp_path, model, **context)
-        assert written != _written(tmp_path, model, **context, **{name: alternative}), name
+        pixels = _two_colours() if model is config.GifImageConfig and name == "optimize" else None
+        assert _rendered(model, pixels, **context) != _rendered(model, pixels, **context, **{name: alternative}), name
+        written = _written(tmp_path, model, pixels, **context)
+        changed = _written(tmp_path, model, pixels, **context, **{name: alternative})
+        assert written != changed, name
+        if pixels is not None:
+            assert len(changed) < len(written), "optimize keeps only the GIF palette's used colours"

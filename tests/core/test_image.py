@@ -23,7 +23,7 @@ from sashimi.config import (
 from sashimi.errors import InvalidOptionsError, MediaTooLargeError, UnsupportedMediaError
 
 from sashimi.core._imagemeta import stated_dpi
-from tests.conftest import leftovers
+from tests.conftest import leftovers, noise
 
 WHITE = (255, 255, 255)
 
@@ -77,7 +77,7 @@ def test_max_width_scales_down_and_never_up(tmp_path):
 
 
 def test_quality_and_lossless(tmp_path):
-    noisy = Image.effect_noise((256, 256), 64).convert("RGB")
+    noisy = noise((256, 256), 4)
     src = blob(tmp_path, noisy, "PNG")
     low, high = tmp_path / "low", tmp_path / "high"
     image.convert(src, low, JpegImageConfig(quality=10))
@@ -122,7 +122,7 @@ def test_non_images_are_user_errors(tmp_path):
 
 def test_truncated_image_is_a_user_error(tmp_path):
     buf = io.BytesIO()
-    Image.effect_noise((256, 256), 64).convert("RGB").save(buf, "PNG")
+    noise((256, 256), 5).save(buf, "PNG")
     src = tmp_path / "original.blob"
     src.write_bytes(buf.getvalue()[:2000])
     with pytest.raises(UnsupportedMediaError):

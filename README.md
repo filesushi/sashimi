@@ -86,7 +86,8 @@ for example a static build, or `brew install ffmpeg` on macOS.
 sashimi runs ffmpeg and ffprobe as a pair, from the first of: `sashimi.set_ffmpeg_paths(ffmpeg)`
 (the ffprobe beside it), the `SASHIMI_FFMPEG` environment variable (an ffmpeg, or the folder
 holding both), `ffmpeg.path` in `sashimi.toml` (`sashimi config set ffmpeg.path
-/opt/ffmpeg/bin/ffmpeg`, or the folder), and the ffmpeg on `PATH` with the ffprobe beside it. When
+/opt/ffmpeg/bin/ffmpeg`, or the folder), and the ffmpeg on `PATH` with the ffprobe beside it. On
+Windows, `.exe` may be left off (`C:\ffmpeg\bin\ffmpeg` means `ffmpeg.exe`). When
 the one chosen is missing, isn't executable, or isn't FFmpeg's ffmpeg or ffprobe, every command,
 and `sashimi info --ffmpeg` (which then exits 1), says so once, naming the path, where it was
 chosen and how to fix that (`FFmpegPathError` in Python); `sashimi config set ffmpeg.path` warns

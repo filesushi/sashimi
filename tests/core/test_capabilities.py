@@ -11,6 +11,7 @@ No other warning is given for a version number.
 
 import json
 import logging
+import os
 import pathlib
 import stat
 
@@ -27,15 +28,23 @@ from sashimi.errors import BinaryNotFoundError, FFmpegTooOldError, MissingEncode
 runner = CliRunner()
 EVERYTHING = ["libx264", "libx265", "libvpx-vp9", "libopus", "libmp3lame", "libwebp_anim", "libwebp", "aac", "gif"]
 FILTERS = ["scale", "fps", "zscale", "tonemap", "sidedata", "palettegen", "paletteuse"]
+EXE = ".exe" if os.name == "nt" else ""
+runs_fakes = pytest.mark.skipif(
+    os.name == "nt", reason="the stand-in ffmpeg is a POSIX shell script, which Windows can't run"
+)
 
 
 def fake_ffmpeg(folder: pathlib.Path, version: str, encoders=EVERYTHING, filters=FILTERS) -> pathlib.Path:
-    """An ffmpeg (and ffprobe beside it) that answers -version, -encoders and -filters, and fails anything else."""
+    """
+    An ffmpeg (and ffprobe beside it) that answers -version, -encoders and -filters, and fails
+    anything else: a shell script, named as FFmpeg's executables are on this platform (``ffmpeg.exe``
+    on Windows, where it can be found and paired but not run).
+    """
     folder.mkdir(parents=True, exist_ok=True)
     encoder_lines = "".join(f" V....D {name:20} {name}\\n" for name in encoders)
     filter_lines = "".join(f" .. {name:16} V->V       {name}\\n" for name in filters)
     for name in ("ffmpeg", "ffprobe"):
-        path = folder / name
+        path = folder / (name + EXE)
         path.write_text(
             "#!/bin/sh\n"
             f'case "$2" in\n'
@@ -46,7 +55,17 @@ def fake_ffmpeg(folder: pathlib.Path, version: str, encoders=EVERYTHING, filters
             "esac\n"
         )
         path.chmod(path.stat().st_mode | stat.S_IEXEC)
-    return folder / "ffmpeg"
+    return folder / ("ffmpeg" + EXE)
+
+
+def ffprobe_beside(ffmpeg: pathlib.Path) -> str:
+    """The ffprobe :func:`fake_ffmpeg` made beside `ffmpeg`."""
+    return str(ffmpeg.with_name("ffprobe" + EXE))
+
+
+def same_path(found: str | None, expected: str) -> bool:
+    """True when `found` names `expected`, ignoring case where the file system does (Windows' PATH lookup says ``.EXE``)."""
+    return found is not None and os.path.normcase(found) == os.path.normcase(expected)
 
 
 @pytest.fixture(autouse=True)
@@ -58,6 +77,7 @@ def reset(monkeypatch):
     _ffmpeg.use_setting(None)
 
 
+@runs_fakes
 def test_a_command_needing_a_missing_encoder_is_refused_before_it_runs(tmp_path):
     ffmpeg = fake_ffmpeg(tmp_path / "bin", "n9.0.2", encoders=["aac", "gif"])
     sashimi.set_ffmpeg_paths(str(ffmpeg), origin="a test")
@@ -70,6 +90,7 @@ def test_a_command_needing_a_missing_encoder_is_refused_before_it_runs(tmp_path)
     assert isinstance(e.value, BinaryNotFoundError)
 
 
+@runs_fakes
 def test_a_command_needing_a_missing_filter_is_refused(tmp_path):
     ffmpeg = fake_ffmpeg(tmp_path / "bin", "n8.1.3", filters=["scale", "fps"])
     with pytest.raises(MissingFiltersError) as e:
@@ -93,6 +114,7 @@ def test_an_ffmpeg_that_cant_be_run_is_reported_as_missing_not_as_lacking(tmp_pa
     assert not isinstance(e.value, MissingEncodersError) and "Cannot run" in str(e.value)
 
 
+@runs_fakes
 @pytest.mark.parametrize("version, refused", [("8.0.1-3ubuntu2", True), ("n8.1.3", False), ("n9.0.2", False)])
 @pytest.mark.parametrize("task", ["lossless cuts", "start times"])
 def test_only_releases_known_to_get_a_task_wrong_refuse_it(tmp_path, version, refused, task):
@@ -105,6 +127,7 @@ def test_only_releases_known_to_get_a_task_wrong_refuse_it(tmp_path, version, re
         _capabilities.require_behaviour(task, str(ffmpeg))
 
 
+@runs_fakes
 @pytest.mark.parametrize("version, status", [("n10.0", "newer"), ("N-123456-gabcdef", "unknown"), ("n9.0.2", "tested")])
 def test_newer_and_unknown_releases_are_allowed_and_reported_once(tmp_path, caplog, version, status):
     ffmpeg = fake_ffmpeg(tmp_path / "bin", version)
@@ -118,6 +141,7 @@ def test_newer_and_unknown_releases_are_allowed_and_reported_once(tmp_path, capl
     assert all(r.levelno < logging.WARNING for r in caplog.records)
 
 
+@runs_fakes
 def test_each_listing_runs_once_per_executable(tmp_path, monkeypatch):
     ffmpeg = fake_ffmpeg(tmp_path / "bin", "n8.1.3")
     runs = []
@@ -138,18 +162,20 @@ def test_ffmpeg_and_ffprobe_are_chosen_as_a_pair(tmp_path, monkeypatch):
     first = fake_ffmpeg(tmp_path / "one", "n8.1.3")
     second = fake_ffmpeg(tmp_path / "two", "n9.0.2")
     monkeypatch.setenv("PATH", f"{first.parent}")
-    assert _ffmpeg.ffmpeg_paths() == _ffmpeg.FFmpegPaths(str(first), str(first.parent / "ffprobe"), "PATH")
+    found = _ffmpeg.ffmpeg_paths()
+    assert same_path(found.ffmpeg, str(first)) and same_path(found.ffprobe, ffprobe_beside(first))
+    assert (found.origin, found.fix, found.folder) == ("PATH", None, None)
     _ffmpeg.use_setting(lambda: (str(second), "ffmpeg.path in a test file"))
-    assert _ffmpeg.ffmpeg_paths().ffprobe == str(second.parent / "ffprobe")
+    assert _ffmpeg.ffmpeg_paths().ffprobe == ffprobe_beside(second)
     monkeypatch.setenv(_ffmpeg.ENVIRONMENT, str(second.parent))
     paths = _ffmpeg.ffmpeg_paths()
-    assert (paths.ffmpeg, paths.ffprobe) == (str(second), str(second.parent / "ffprobe"))
+    assert (paths.ffmpeg, paths.ffprobe) == (str(second), ffprobe_beside(second))
     assert paths.origin == "the SASHIMI_FFMPEG environment variable"
     sashimi.set_ffmpeg_paths(str(first))
     paths = _ffmpeg.ffmpeg_paths()
     assert (paths.ffmpeg, paths.ffprobe, paths.origin) == (
         str(first),
-        str(first.parent / "ffprobe"),
+        ffprobe_beside(first),
         "sashimi.set_ffmpeg_paths()",
     )
 
@@ -176,12 +202,13 @@ def isolated(tmp_path, monkeypatch):
     settings.load_raw_config.cache_clear()
 
 
+@runs_fakes
 def test_info_shows_the_ffmpeg_and_a_kept_path_is_used(isolated, monkeypatch):
     old = fake_ffmpeg(isolated / "old", "8.0.1-3ubuntu2", encoders=["aac", "gif", "libx264"])
     assert runner.invoke(app, ["config", "set", "ffmpeg.path", str(old)]).exit_code == 0
     shown = runner.invoke(app, ["info", "--ffmpeg", "--json"])
     report = json.loads(shown.output)
-    assert report["ffmpeg"] == str(old) and report["ffprobe"] == str(old.parent / "ffprobe")
+    assert report["ffmpeg"] == str(old) and report["ffprobe"] == ffprobe_beside(old)
     assert report["origin"].startswith("ffmpeg.path in ") and report["status"] == "older"
     assert set(report["refused"]) == {"lossless cuts", "start times"}
     assert "HEVC encoder (libx265)" in report["missing"]

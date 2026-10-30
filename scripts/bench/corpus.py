@@ -1021,6 +1021,18 @@ class TreeMemory:
         return round(self.peak_kb / 1024, 1) if self.available and self.peak_kb else None
 
 
+def _kill_tree(proc: subprocess.Popen[bytes]) -> None:
+    """Stops `proc` and everything it started: its process group on POSIX, ``taskkill /T`` on Windows."""
+    if hasattr(os, "killpg"):
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        return
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=30, check=False)
+    with contextlib.suppress(OSError):
+        proc.kill()
+
+
 def execute(
     case: CorpusCase,
     entry: CorpusEntry,
@@ -1060,8 +1072,7 @@ def execute(
                 timed_out = False
             except subprocess.TimeoutExpired:
                 timed_out = True
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(proc.pid, signal.SIGKILL)
+                _kill_tree(proc)
                 proc.wait()
     wall = time.perf_counter() - started
     record: dict[str, Any] = {

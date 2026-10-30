@@ -222,7 +222,11 @@ creation time, as MP4 and MOV do, and `edit` keeps an animation animated when sa
   `folder`, `not_executable`, `cannot_run`, `not_ffmpeg`); `ffmpeg.path`, like `SASHIMI_FFMPEG`
   and `set_ffmpeg_paths()`, takes the folder holding ffmpeg and ffprobe; `sashimi config set
   ffmpeg.path` warns about a path that can't be used, or one `SASHIMI_FFMPEG` overrides;
-  `sashimi info --ffmpeg --json` has `usable` and, when it isn't, `problem`.
+  `sashimi info --ffmpeg --json` has `usable` and, when it isn't, `problem`. On Windows, an
+  ffmpeg or ffprobe given without `.exe` (`SASHIMI_FFMPEG=C:\ffmpeg\bin\ffmpeg`, `ffmpeg.path`,
+  `set_ffmpeg_paths()`) means the `.exe` when the path itself doesn't exist, with `ffprobe.exe`
+  beside it, as at a command prompt; messages and `sashimi info --ffmpeg` name the `.exe`, and a
+  path that exists neither way is named as given.
 - `probe(path, limits=)`, and `Limits.max_scan_packets` (default 2,000,000, about 7 hours of
   30 fps video with AAC audio; `[limits] max_scan_packets` in `sashimi.toml`, `none` for no
   limit). Measuring a recording that doesn't state its length reads every packet, at about 20

@@ -13,7 +13,7 @@ from sashimi import config, image
 from sashimi.config import IMAGE_EDIT, IMAGE_FRAMES, FrameStripConfig, Limits
 from sashimi.errors import InvalidOptionsError, MediaTooLargeError, UnsupportedMediaError
 
-from tests.conftest import leftovers
+from tests.conftest import leftovers, noise
 
 RED, GREEN, BLUE, WHITE = (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255)
 
@@ -263,7 +263,7 @@ def test_gif_keeps_its_colours_exactly(tmp_path):
 def test_jpeg_is_resaved_at_high_quality(tmp_path):
     assert config.JpegEditConfig().quality == config.EDIT_QUALITY == 92
     assert config.WebpEditConfig().quality == 92
-    noisy = Image.effect_noise((128, 128), 60).convert("RGB")
+    noisy = noise((128, 128), 1)
     src = save(tmp_path, noisy, "JPEG", quality=95)
     image.edit(src, tmp_path / "high", config.JpegEditConfig())
     image.edit(src, tmp_path / "low", config.JpegEditConfig(quality=50))
@@ -295,12 +295,21 @@ def test_edit_respects_max_pixels_and_refuses_non_images(tmp_path):
     assert leftovers(tmp_path) == []
 
 
-def test_every_edit_option_changes_the_output(tmp_path):
-    img = Image.merge("RGB", [Image.effect_noise((40, 30), 50 + 10 * i) for i in range(3)]).convert("RGBA")
-    img.putpixel((0, 0), (0, 0, 0, 0))
+def _edit_source(tmp_path, img, name):
+    """`img` as a PNG carrying EXIF, an sRGB profile and a comment, so every metadata option has something to change."""
     exif = Image.Exif()
     exif[0x010F] = "TestCam"
     srgb = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    comment = PngInfo()
+    comment.add_text("Comment", "a comment")
+    return save(tmp_path, img, "PNG", name=name, exif=exif, icc_profile=srgb, pnginfo=comment)
+
+
+def test_every_edit_option_changes_the_output(tmp_path):
+    img = noise((40, 30), 2).convert("RGBA")
+    img.putpixel((0, 0), (0, 0, 0, 0))
+    two_colours = Image.new("RGB", (40, 30), (200, 30, 30))
+    two_colours.paste((20, 40, 220), (0, 0, 20, 30))
     alternatives = {
         "rotate": 90, "flip": "vertical", "crop_left": 2, "crop_top": 2, "crop_width": 10, "crop_height": 10,
         "brightness": 1.5, "contrast": 0.5, "saturation": 0.0, "metadata": "remove_all", "keep_icc": False, "quality": 20,
@@ -309,22 +318,21 @@ def test_every_edit_option_changes_the_output(tmp_path):
     }  # fmt: skip
     for model in IMAGE_EDIT.models:
         target = model.model_fields["target"].default
-        src = save(tmp_path, img if target not in ("jpeg", "bmp") else img.convert("RGB"), "PNG", name="src.png")
-        comment = PngInfo()
-        comment.add_text("Comment", "a comment")
-        src = save(tmp_path, Image.open(src), "PNG", name="src.png", exif=exif, icc_profile=srgb, pnginfo=comment)
-        image.edit(src, tmp_path / "ref", model())
+        src = _edit_source(tmp_path, img if target not in ("jpeg", "bmp") else img.convert("RGB"), "src.png")
+        few = _edit_source(tmp_path, two_colours, "few.png")
         for name in set(model.model_fields) - {"target", "animated"}:
-            fields = {name: alternatives[name]}
-            if target == "tiff" and name == "quality":
-                fields["tiff_compression"] = "jpeg"
+            base = {"tiff_compression": "jpeg"} if target == "tiff" and name == "quality" else {}
+            fields = {**base, name: alternatives[name]}
             if name == "optimize" and model.model_fields["optimize"].default:
                 fields["optimize"] = False
-            image.edit(src, tmp_path / "alt", model(**fields))
-            if target == "tiff" and name == "quality":
-                image.edit(src, tmp_path / "ref", model(tiff_compression="jpeg"))
+            source = few if target == "gif" and name == "optimize" else src
+            image.edit(source, tmp_path / "ref", model(**base))
+            image.edit(source, tmp_path / "alt", model(**fields))
             assert (tmp_path / "alt").read_bytes() != (tmp_path / "ref").read_bytes(), (model.__name__, name)
-            image.edit(src, tmp_path / "ref", model())
+            if source is few:
+                shrunk, full = (Image.open(tmp_path / out).palette for out in ("alt", "ref"))
+                assert shrunk is not None and full is not None
+                assert len(shrunk.palette) < len(full.palette), "optimize keeps only the GIF palette's used colours"
 
 
 def animation(tmp_path, fmt, frames=6, size=(24, 16), transparent=False, name="original.blob", **save_kwargs):

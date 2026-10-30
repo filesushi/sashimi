@@ -10,10 +10,12 @@ nothing depends on file names or extensions.
 import logging
 import os
 import pathlib
+import random
 import shutil
 import subprocess
 
 import pytest
+from PIL import Image
 
 os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 logging.getLogger("PIL").setLevel(logging.INFO)
@@ -142,3 +144,13 @@ def junk_blob(tmp_path) -> pathlib.Path:
 def leftovers(directory: pathlib.Path) -> list[str]:
     """Temporary files an atomic write may have left behind."""
     return sorted(p.name for p in directory.iterdir() if p.name.endswith(".partial"))
+
+
+def noise(size: tuple[int, int], seed: int, mode: str = "RGB") -> Image.Image:
+    """
+    Random pixels that are the same on every platform and in every run, unlike Pillow's
+    ``Image.effect_noise``, which follows C's ``rand()``: its own state, which differs between
+    C libraries and advances with every call in the process.
+    """
+    count = size[0] * size[1] * Image.getmodebands(mode)
+    return Image.frombytes(mode, size, random.Random(seed).randbytes(count))

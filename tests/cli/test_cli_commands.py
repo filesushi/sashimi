@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
 
 import pytest
 from PIL import Image
@@ -148,6 +149,7 @@ def test_extract_refuses_bad_times_before_running(tmp_path):
 
 
 @needs_ffmpeg
+@pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")
 def test_thumbs_command_with_symlinked_input(video_blob, tmp_path):
     (tmp_path / "holiday.mkv").symlink_to(video_blob)
     result = runner.invoke(app, ["thumbs", "holiday.mkv", "--width", "400", "--cols", "2", "--rows", "1", "--json"])

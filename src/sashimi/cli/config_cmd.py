@@ -130,7 +130,7 @@ def _check(section: str, option: str, value: Any) -> None:
         if not isinstance(value, str) or not value.strip() or "\0" in value:
             fail(
                 "ffmpeg.path must be an ffmpeg executable, e.g. /opt/ffmpeg/bin/ffmpeg (ffprobe is the one beside "
-                "it), or the folder holding ffmpeg and ffprobe."
+                "it; on Windows, .exe may be left off), or the folder holding ffmpeg and ffprobe."
             )
         return
     if option == "output_dir":

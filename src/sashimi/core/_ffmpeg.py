@@ -28,7 +28,7 @@ _settings: list[Callable[[], KeptSetting | None]] = []
 """A lookup of a kept setting (the CLI's ``ffmpeg.path``), consulted after the environment variable."""
 
 ENVIRONMENT = "SASHIMI_FFMPEG"
-"""The environment variable that points sashimi at an FFmpeg: its ffmpeg executable, or the folder holding ffmpeg and ffprobe."""
+"""The environment variable that points sashimi at an FFmpeg: its ffmpeg executable (on Windows, ``.exe`` may be left off), or the folder holding ffmpeg and ffprobe."""
 
 VIDEO_CONTAINERS = frozenset(
     {"matroska", "webm", "mov", "mp4", "m4a", "3gp", "3g2", "mj2", "avi", "asf", "mpeg", "mpegts", "flv", "gif"}
@@ -51,7 +51,8 @@ def set_ffmpeg_paths(ffmpeg: str | None = None, ffprobe: str | None = None, *, o
     """
     Sets the ffmpeg and ffprobe executables sashimi runs, as a pair: given only one, the other is
     the one beside it (``ffprobe`` next to ``/opt/ffmpeg/bin/ffmpeg``); `ffmpeg` may also be the
-    folder holding both. Nothing is checked until sashimi first needs FFmpeg, which raises
+    folder holding both. On Windows, ``C:\\ffmpeg\\bin\\ffmpeg`` means ``ffmpeg.exe`` when only that
+    exists, as at a command prompt. Nothing is checked until sashimi first needs FFmpeg, which raises
     :class:`~sashimi.errors.FFmpegPathError` when either is missing or isn't FFmpeg's. `origin` says where the
     choice came from, for messages (default ``sashimi.set_ffmpeg_paths()``). With neither, sashimi
     goes back to the :data:`ENVIRONMENT` variable, else PATH. Useful when an app bundles its own
@@ -76,10 +77,21 @@ class FFmpegPaths:
     """The folder that was given instead of an ffmpeg, when one was: both executables are looked for in it."""
 
 
+def _executable(path: str) -> str:
+    """
+    `path`, or on Windows ``<path>.exe`` when `path` doesn't exist and that does, as at a command
+    prompt (``C:\\ffmpeg\\bin\\ffmpeg`` runs ``ffmpeg.exe``); a path that exists, or ends in
+    ``.exe``, is kept as given.
+    """
+    if os.name != "nt" or path.lower().endswith(".exe") or os.path.lexists(path):
+        return path
+    return path + ".exe" if os.path.lexists(path + ".exe") else path
+
+
 def _beside(path: str, name: str) -> str:
-    """The executable `name` in `path`'s folder, with the same ``.exe`` ending."""
+    """The executable `name` in `path`'s folder, with the same ``.exe`` ending (on Windows, ``.exe`` when only that exists)."""
     suffix = ".exe" if path.lower().endswith(".exe") else ""
-    return os.path.join(os.path.dirname(path), name + suffix)
+    return _executable(os.path.join(os.path.dirname(path), name + suffix))
 
 
 def _pair(path: str, origin: str, fix: str | None = None) -> FFmpegPaths:
@@ -89,7 +101,8 @@ def _pair(path: str, origin: str, fix: str | None = None) -> FFmpegPaths:
         return FFmpegPaths(
             os.path.join(path, "ffmpeg" + suffix), os.path.join(path, "ffprobe" + suffix), origin, fix, path
         )
-    return FFmpegPaths(path, _beside(path, "ffprobe"), origin, fix)
+    ffmpeg = _executable(path)
+    return FFmpegPaths(ffmpeg, _beside(ffmpeg, "ffprobe"), origin, fix)
 
 
 def ffmpeg_paths() -> FFmpegPaths:
@@ -98,14 +111,16 @@ def ffmpeg_paths() -> FFmpegPaths:
     kept setting (:func:`use_setting`, the CLI's ``ffmpeg.path``); else the ffmpeg on PATH with
     the ffprobe beside it (the ffprobe on PATH when there is none there). Each of the first three
     may name an ffmpeg executable (ffprobe is the one beside it) or the folder holding both.
-    Missing executables stay named, so the error that follows says what was looked for.
+    On Windows, a path that doesn't exist means ``<path>.exe`` when that does (``C:\\ffmpeg\\bin\\ffmpeg``
+    is ``ffmpeg.exe``, with ``ffprobe.exe`` beside it). Missing executables stay named as given, so
+    the error that follows says what was looked for.
     """
     if _configured["ffmpeg"] or _configured["ffprobe"]:
         origin = _configured["origin"] or "sashimi.set_ffmpeg_paths()"
         if _configured["ffmpeg"] and not _configured["ffprobe"]:
             return _pair(str(_configured["ffmpeg"]), origin)
-        ffmpeg = _configured["ffmpeg"] or _beside(str(_configured["ffprobe"]), "ffmpeg")
-        ffprobe = _configured["ffprobe"] or _beside(ffmpeg, "ffprobe")
+        ffprobe = _executable(str(_configured["ffprobe"]))
+        ffmpeg = _executable(_configured["ffmpeg"]) if _configured["ffmpeg"] else _beside(ffprobe, "ffmpeg")
         return FFmpegPaths(ffmpeg, ffprobe, origin)
     chosen = os.environ.get(ENVIRONMENT, "").strip()
     if chosen:

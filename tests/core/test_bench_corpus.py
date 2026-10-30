@@ -247,7 +247,10 @@ def test_a_case_runs_in_its_own_process_and_records_cost_and_output(small_corpus
     case = corpus.CorpusCase("img-to-webp", "img/alpha.png")
     record = corpus.execute(case, entries[case.path], small_corpus.parent, tmp_path / "scratch", timeout=120)
     assert corpus.outcome(record) == "success", record
-    assert record["cpu_s"] is not None and record["cpu_s"] >= 0
+    if run.rusage() is None:
+        assert "cpu_s" not in record and "python_rss_mb" not in record
+    else:
+        assert record["cpu_s"] is not None and record["cpu_s"] >= 0
     [(name, output)] = record["outputs"].items()
     assert name == "alpha.png.webp"
     assert output["format"] == "WEBP" and output["display"] == [64, 48] and output["transparency"]
@@ -260,6 +263,20 @@ def test_a_case_runs_in_its_own_process_and_records_cost_and_output(small_corpus
     gif_src = corpus.describe_source(entries[drop.path], small_corpus.parent / drop.path)
     assert gif_src["duration_ms"] == 500
     assert corpus.assess(corpus.TASKS_BY_NAME["anim-frames-drop"], entries[drop.path], gif_src, record) == []
+
+
+@pytest.mark.parametrize("process_groups", [True, False], ids=["posix", "windows"])
+def test_a_case_past_its_timeout_is_stopped_on_every_platform(
+    small_corpus: Path, tmp_path: Path, monkeypatch, process_groups
+):
+    if not process_groups:
+        monkeypatch.delattr(corpus.os, "killpg", raising=False)
+    elif not hasattr(corpus.os, "killpg"):
+        pytest.skip("process groups are POSIX only")
+    entries = {e.path: e for e in corpus.load_corpus(small_corpus)}
+    case = corpus.CorpusCase("img-to-webp", "img/alpha.png")
+    record = corpus.execute(case, entries[case.path], small_corpus.parent, tmp_path / "scratch", timeout=0.01)
+    assert corpus.outcome(record) == "timeout" and record["timeout_s"] == 0.01
 
 
 def test_a_limit_refusal_is_run_again_with_every_limit_off(small_corpus: Path, tmp_path: Path):

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 The FileSushi Authors
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import pathlib
 import sys
 
@@ -40,6 +41,7 @@ def names(pattern, target="webp", command="convert"):
     return _naming.naming(command, lambda p: _naming.output_format(target, p), pattern)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")
 def test_discover_does_not_resolve_symlinks(tmp_path):
     blob = tmp_path / "store" / "original.blob"
     blob.parent.mkdir()
