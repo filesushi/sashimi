@@ -1,7 +1,7 @@
 <h1 align="center">sashimi</h1>
 
 <p align="center">
-  <strong>File conversion and video contact sheets for apps, servers and the command line, built on FFmpeg and Pillow.</strong>
+  <strong>File conversion and video contact sheets. Built with FFmpeg and Pillow.</strong>
 </p>
 
 <p align="center">
