@@ -402,13 +402,13 @@ Quality = Annotated[
     option(
         "--quality",
         "-q",
-        help="JPEG/WebP quality: 85, 85% or 0.85 [default: 85; animated WebP 75].",
+        help="JPEG/WebP/AVIF quality: 85, 85% or 0.85 [default: 85; AVIF 75; animated WebP 75].",
         panel=IMAGE,
     ),
 ]
 ImageQuality = Annotated[
     Optional[str],
-    option("--quality", "-q", help="JPEG/WebP/TIFF quality: 85, 85% or 0.85 [default: 85].", panel=IMAGE),
+    option("--quality", "-q", help="JPEG/WebP/TIFF/AVIF quality: 85, 85% or 0.85 [default: 85; AVIF 75].", panel=IMAGE),
 ]
 Lossless = Annotated[bool, option("--lossless", help="WebP: lossless compression.", panel=IMAGE)]
 Flatten = Annotated[
@@ -457,6 +457,15 @@ WebpMethod = Annotated[
         "--webp-method", callback=within(0, 6), help="WebP effort, 0 (fast) to 6 (small) [default: 4].", panel=IMAGE
     ),
 ]
+AvifSpeed = Annotated[
+    Optional[int],
+    option(
+        "--avif-speed",
+        callback=within(0, 10),
+        help="AVIF encoder speed, 0 (slow) to 10 (fast) [default: 9].",
+        panel=IMAGE,
+    ),
+]
 CompressLevel = Annotated[
     Optional[int],
     option("--compress-level", callback=within(0, 9), help="PNG zlib level 0-9 [default: 6].", panel=IMAGE),
@@ -491,6 +500,45 @@ MetadataOpt = Annotated[
         show_default=False,
     ),
 ]
+
+
+def animated_option(section: str) -> Any:
+    """``--animated/--no-animated``: keep animations animated, or give the first frame (kept with ``config set <section>.animated``)."""
+    return option(
+        "--animated/--no-animated",
+        help="GIF/WebP/APNG/AVIF: keep an animated GIF, WebP, APNG or AVIF animated, or with --no-animated "
+        f"give its first frame as a still image (keep that with sashimi config set {section}.animated false) "
+        "[default: on].",
+        show_default=False,
+        panel=IMAGE,
+    )
+
+
+def keep_hdr_option(section: str) -> Any:
+    """``--keep-hdr/--tone-map``: keep HDR video as HDR in a re-encode (kept with ``config set <section>.keep_hdr``)."""
+    return option(
+        "--keep-hdr/--tone-map",
+        help="MP4/WebM: keep HDR video (PQ or HLG) as HDR, as 10-bit HEVC in MP4 (copied when it already is) or "
+        "10-bit VP9 in WebM, instead of tone-mapping it to standard range; standard-range video is unaffected "
+        f"(keep it on with sashimi config set {section}.keep_hdr true) [default: tone-map].",
+        show_default=False,
+        panel=VIDEO,
+    )
+
+
+def reencode_option() -> Any:
+    """``--reencode``: turn a video's pixels by re-encoding it, not its display rotation (kept with ``config set rotate.reencode``)."""
+    return option(
+        "--reencode/--lossless",
+        help="Videos: re-encode, so the picture itself is turned, for players that ignore a video's display "
+        "rotation (slower, and lossy). Without it, a rotation of an H.264, HEVC, AV1 or VP9 video into MP4 (H.264, "
+        "HEVC or ProRes into MOV) is lossless: only the display rotation is set (keep re-encoding on with sashimi config set rotate.reencode "
+        "true) [default: lossless where it can be].",
+        show_default=False,
+        panel=VIDEO,
+    )
+
+
 StripIcc = Annotated[bool, option("--strip-icc", help="Drop the colour profile.", panel=IMAGE)]
 IcoSizes = Annotated[
     Optional[str],
@@ -565,7 +613,8 @@ MaxAnimationBytes = Annotated[
     option(
         "--max-animation-bytes",
         metavar="SIZE",
-        help="Memory for the frames of an animated GIF or WebP being edited, e.g. 4G, or none [default: 1G].",
+        help="Memory for the frames of an animated GIF or WebP being edited or converted, e.g. 4G, or none "
+        "[default: 1G].",
         panel=LIMITS,
     ),
 ]

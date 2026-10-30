@@ -15,7 +15,14 @@ from sashimi.config import (
     Limits,
     Mp3AudioConfig,
 )
-from sashimi.config._limits import duration_text, megabytes, megapixels, resolve_limits
+from sashimi.config._limits import (
+    duration_text,
+    megabytes,
+    megapixels,
+    over_limit_texts,
+    resolve_limits,
+    too_long_text,
+)
 from sashimi.core.sheets.static import check_sheet_size
 from sashimi.errors import InvalidOptionsError, MediaTooLargeError
 
@@ -98,7 +105,31 @@ def test_sheet_size_is_checked_against_the_format_and_the_limit():
         check_sheet_size(8000, 9000, "png", None)
     assert e.value.user_message == (
         "These settings would make the contact sheet too large: it would have 72 megapixels (8000x9000), and the "
-        "limit is 64. Use fewer rows or a smaller width."
+        "limit is 64 megapixels. Use fewer rows or a smaller width."
     )
     assert e.value.limit == "max_sheet_pixels"
     check_sheet_size(8000, 9000, "png", Limits(max_sheet_pixels=100_000_000))
+
+
+@pytest.mark.parametrize(
+    "kind, length, start, limit, said",
+    [
+        ("video", 600.4, 0, 600, "This video is 10 minutes 0.4 seconds long, and the limit is 10 minutes."),
+        ("video", 3599.6, 0, 3599, "This video is 1 hour long, and the limit is 59 minutes 59 seconds."),
+        ("audio", 30.3, 0, 30, "This audio is 30.3 seconds long, and the limit is 30 seconds."),
+        ("video", 600.04, 0, 600, "This video is 10 minutes 0.04 seconds long, and the limit is 10 minutes."),
+        ("video", 600.0004, 0, 600, "This video is just over 10 minutes long, and the limit is 10 minutes."),
+        ("video", 3661, 0, 3660, "This video is 1 hour 1 minute 1 second long, and the limit is 1 hour 1 minute."),
+        ("video", 10.5, 0, 10.25, "This video is 10.5 seconds long, and the limit is 10.25 seconds."),
+        ("video", 700, 200, 600, "From 200s, this video runs 11 minutes 40 seconds, and the limit is 10 minutes."),
+    ],
+)
+def test_a_refused_length_reads_as_more_than_the_limit(kind, length, start, limit, said):
+    assert too_long_text(kind, length, start, limit).startswith(said + " ")
+
+
+def test_a_refused_length_never_reads_as_the_limit_or_less():
+    for limit in (5, 30, 59.9, 60, 600, 3599, 3600, 3660, 7200):
+        for extra in (0.0004, 0.004, 0.04, 0.3, 0.4, 0.5, 0.6, 1, 59.5, 61):
+            length_words, limit_words = over_limit_texts(limit + extra, limit)
+            assert length_words != limit_words, (limit, extra)

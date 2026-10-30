@@ -6,6 +6,7 @@
 from sashimi.config import AnimatedGifSheetConfig, AnimatedWebpSheetConfig, Limits, SheetConfig
 from sashimi.core._atomic import PathLike
 from sashimi.core._ffmpeg import ProgressCallback
+from sashimi.core.fidelity import Outcome
 from sashimi.core.sheets.animated import render_animated
 from sashimi.core.sheets.static import render_still
 
@@ -25,7 +26,7 @@ def render(
     scratch_dir: PathLike | None = None,
     limits: Limits | None = None,
     on_progress: ProgressCallback | None = None,
-) -> None:
+) -> Outcome:
     """
     Renders a contact sheet: a header (name, size, duration, dimensions) above a grid of tiles
     with timestamps. Tiles are stills, or with an animated config, short looping clips. The
@@ -42,10 +43,11 @@ def render(
     than one clip); MediaTooLargeError for sheets over ``limits.max_sheet_pixels`` or wider or
     taller than their format allows, and for videos too wide for tiles of
     :data:`~sashimi.config.MIN_TILE_SIZE` pixels; and InvalidOptionsError for an animated sheet
-    whose clips need more than ``limits.max_frame_bytes`` of memory.
+    whose clips need more than ``limits.max_frame_bytes`` of memory. Returns what the sheet kept
+    of the video (``fidelity``: always lossy, since it is a new picture).
     """
     if isinstance(config, (AnimatedWebpSheetConfig, AnimatedGifSheetConfig)):
-        render_animated(
+        return render_animated(
             input_path,
             output_path,
             config,
@@ -59,7 +61,7 @@ def render(
             on_progress=on_progress,
         )
     else:
-        render_still(
+        return render_still(
             input_path,
             output_path,
             config,

@@ -51,7 +51,7 @@ def test_every_named_command_takes_a_pattern_and_answers_questions(command):
     assert not {"--keep-extension", "--no-keep-extension", "--format", "--include-outputs"} & flags
 
 
-def test_the_owners_sheets_count_as_existing(tmp_path):
+def test_sheets_in_a_folder_count_as_existing(tmp_path):
     touch(tmp_path, "video.mp4", "video.mp4.jpeg", "new.mkv")
     (tmp_path / "sashimi.toml").write_text('[thumbs]\noutput_name = "{input_name}.jpeg"\n')
     planned = runner.invoke(app, ["thumbs", ".", "-n", "--json"])
@@ -64,7 +64,7 @@ def test_the_owners_sheets_count_as_existing(tmp_path):
     assert [output for _, _, output, _ in animated] == ["new.mkv.animated-sheet.webp", "video.mp4.animated-sheet.webp"]
 
 
-def test_the_owners_sheets_are_converted_like_any_image(tmp_path):
+def test_sheets_in_a_folder_are_converted_like_any_image(tmp_path):
     touch(tmp_path, "video.mp4", "video.mp4.jpeg")
     (tmp_path / "sashimi.toml").write_text('[thumbs]\noutput_name = "{input_name}.jpeg"\n')
     report = json.loads(runner.invoke(app, ["convert", ".", "webp", "-n", "-y", "--json"]).stdout)

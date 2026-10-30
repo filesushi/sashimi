@@ -112,3 +112,13 @@ def test_runner_missing_binary():
 
     with pytest.raises(BinaryNotFoundError):
         run_ffmpeg([os.path.join(os.sep, "definitely", "not", "ffmpeg")])
+
+
+def test_ffmpeg_versions_are_read_from_the_banner():
+    from sashimi.core._ffmpeg import parse_ffmpeg_version
+
+    assert parse_ffmpeg_version("ffmpeg version n8.1.3-24-g92611900bb-20261026 Copyright (c)") == (8, 1)
+    assert parse_ffmpeg_version("ffmpeg version 8.0.1-3ubuntu1 Copyright (c) 2000-2025") == (8, 0)
+    assert parse_ffmpeg_version("ffmpeg version 6.1.2 Copyright") == (6, 1)
+    assert parse_ffmpeg_version("ffmpeg version N-121234-gabcdef Copyright") is None
+    assert parse_ffmpeg_version("") is None

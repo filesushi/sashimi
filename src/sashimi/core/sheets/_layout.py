@@ -3,6 +3,7 @@
 
 """Pure layout maths for contact sheets: grids, tile sizes and sample times. No I/O."""
 
+import math
 from dataclasses import dataclass
 
 from sashimi.config import MIN_TILE_SIZE, GridValue
@@ -98,6 +99,23 @@ def plan_layout(
     return SheetLayout(n_cols, n_rows, thumb_w, thumb_h, gap)
 
 
+def fit_grid(count: int, cols: int, rows: int) -> tuple[int, int]:
+    """
+    Columns x rows for `count` tiles, as close to a `cols` x `rows` grid's shape as fits: no empty
+    cells where a grid without them keeps a reasonable shape (15 tiles in place of 6x4 give 5x3).
+    Pure.
+    """
+    target = math.log(cols / rows)
+    best: tuple[float, int, int] | None = None
+    for c in range(1, count + 1):
+        r = -(-count // c)
+        score = (c * r - count) + abs(math.log(c / r) - target)
+        if best is None or score <= best[0] + 1e-9:
+            best = (score, c, r)
+    assert best is not None
+    return best[1], best[2]
+
+
 def check_tiles(layout: SheetLayout) -> None:
     """
     Refuses layouts whose tiles would be smaller than :data:`~sashimi.config.MIN_TILE_SIZE` on
@@ -145,3 +163,70 @@ def clip_starts(
         times = [start + i * step for i in range(count)]
     upper = max(0.0, duration - clip_length)
     return [min(max(t, 0.0), upper) for t in times]
+
+
+@dataclass(frozen=True)
+class ClipPlan:
+    """An animated sheet's clips: where each starts, how long each is, and the grid that holds them."""
+
+    starts: list[float]
+    clip_length: float
+    cols: int
+    rows: int
+    note: str | None
+
+
+def _seconds(value: float) -> str:
+    return f"{value:g} second{'' if value == 1 else 's'}"
+
+
+def plan_clips(
+    duration: float,
+    cols: int,
+    rows: int,
+    clip_length: float,
+    start_offset_percent: float,
+    end_offset_percent: float,
+) -> ClipPlan:
+    """
+    The clips of an animated sheet with a `cols` x `rows` grid: as many as fit in the sampled part
+    of the video without overlapping, evenly spaced, in a smaller grid with a
+    note when fewer than the grid's cells fit. A video shorter than one clip gets one clip of the
+    whole video. One computation gives the clips, the grid and the note, so they always agree. Pure.
+    """
+    if duration < clip_length:
+        return ClipPlan(
+            [0.0],
+            duration,
+            1,
+            1,
+            f"This video is {_rounded(duration, clip_length)} long, shorter than a clip of {_seconds(clip_length)}, "
+            "so the sheet shows one clip of the whole video",
+        )
+    cells = cols * rows
+    window_start, window_end = sample_window(duration, start_offset_percent, end_offset_percent, clip_length)
+    fitting = max(1, int((window_end - window_start) / clip_length + 1e-9))
+    note = None
+    if fitting < cells:
+        cols, rows = fit_grid(fitting, cols, rows)
+        if fitting == 1:
+            note = f"This video is {_rounded(duration)} long, so the sheet shows one clip of {_seconds(clip_length)}"
+        else:
+            note = (
+                f"This video is {_rounded(duration)} long, so the sheet shows {fitting} clips of "
+                f"{_seconds(clip_length)} in a {cols}x{rows} grid, so that no two clips overlap"
+            )
+    count = min(fitting, cells)
+    starts = clip_starts(duration, count, clip_length, start_offset_percent, end_offset_percent)
+    return ClipPlan(starts, clip_length, cols, rows, note)
+
+
+def _rounded(duration: float, below: float | None = None) -> str:
+    places = 1 if duration >= 1 else 2
+    shown = round(duration, places)
+    while below is not None and shown >= below and places < 3:
+        places += 1
+        shown = round(duration, places)
+    if below is not None and shown >= below:
+        shown = math.floor(duration * 1000) / 1000
+    return _seconds(shown)

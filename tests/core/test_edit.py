@@ -13,7 +13,7 @@ from sashimi import config, image
 from sashimi.config import IMAGE_EDIT, IMAGE_FRAMES, FrameStripConfig, Limits
 from sashimi.errors import InvalidOptionsError, MediaTooLargeError, UnsupportedMediaError
 
-from tests.conftest import leftovers
+from tests.conftest import leftovers, noise
 
 RED, GREEN, BLUE, WHITE = (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255)
 
@@ -263,7 +263,7 @@ def test_gif_keeps_its_colours_exactly(tmp_path):
 def test_jpeg_is_resaved_at_high_quality(tmp_path):
     assert config.JpegEditConfig().quality == config.EDIT_QUALITY == 92
     assert config.WebpEditConfig().quality == 92
-    noisy = Image.effect_noise((128, 128), 60).convert("RGB")
+    noisy = noise((128, 128), 1)
     src = save(tmp_path, noisy, "JPEG", quality=95)
     image.edit(src, tmp_path / "high", config.JpegEditConfig())
     image.edit(src, tmp_path / "low", config.JpegEditConfig(quality=50))
@@ -295,36 +295,44 @@ def test_edit_respects_max_pixels_and_refuses_non_images(tmp_path):
     assert leftovers(tmp_path) == []
 
 
-def test_every_edit_option_changes_the_output(tmp_path):
-    img = Image.merge("RGB", [Image.effect_noise((40, 30), 50 + 10 * i) for i in range(3)]).convert("RGBA")
-    img.putpixel((0, 0), (0, 0, 0, 0))
+def _edit_source(tmp_path, img, name):
+    """`img` as a PNG carrying EXIF, an sRGB profile and a comment, so every metadata option has something to change."""
     exif = Image.Exif()
     exif[0x010F] = "TestCam"
     srgb = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    comment = PngInfo()
+    comment.add_text("Comment", "a comment")
+    return save(tmp_path, img, "PNG", name=name, exif=exif, icc_profile=srgb, pnginfo=comment)
+
+
+def test_every_edit_option_changes_the_output(tmp_path):
+    img = noise((40, 30), 2).convert("RGBA")
+    img.putpixel((0, 0), (0, 0, 0, 0))
+    two_colours = Image.new("RGB", (40, 30), (200, 30, 30))
+    two_colours.paste((20, 40, 220), (0, 0, 20, 30))
     alternatives = {
         "rotate": 90, "flip": "vertical", "crop_left": 2, "crop_top": 2, "crop_width": 10, "crop_height": 10,
         "brightness": 1.5, "contrast": 0.5, "saturation": 0.0, "metadata": "remove_all", "keep_icc": False, "quality": 20,
         "optimize": True, "progressive": True, "jpeg_subsampling": "4:4:4", "png_compress_level": 1, "lossless": True,
-        "webp_method": 0, "tiff_compression": "none",
+        "webp_method": 0, "tiff_compression": "none", "avif_speed": 0,
     }  # fmt: skip
     for model in IMAGE_EDIT.models:
         target = model.model_fields["target"].default
-        src = save(tmp_path, img if target not in ("jpeg", "bmp") else img.convert("RGB"), "PNG", name="src.png")
-        comment = PngInfo()
-        comment.add_text("Comment", "a comment")
-        src = save(tmp_path, Image.open(src), "PNG", name="src.png", exif=exif, icc_profile=srgb, pnginfo=comment)
-        image.edit(src, tmp_path / "ref", model())
-        for name in set(model.model_fields) - {"target"}:
-            fields = {name: alternatives[name]}
-            if target == "tiff" and name == "quality":
-                fields["tiff_compression"] = "jpeg"
+        src = _edit_source(tmp_path, img if target not in ("jpeg", "bmp") else img.convert("RGB"), "src.png")
+        few = _edit_source(tmp_path, two_colours, "few.png")
+        for name in set(model.model_fields) - {"target", "animated"}:
+            base = {"tiff_compression": "jpeg"} if target == "tiff" and name == "quality" else {}
+            fields = {**base, name: alternatives[name]}
             if name == "optimize" and model.model_fields["optimize"].default:
                 fields["optimize"] = False
-            image.edit(src, tmp_path / "alt", model(**fields))
-            if target == "tiff" and name == "quality":
-                image.edit(src, tmp_path / "ref", model(tiff_compression="jpeg"))
+            source = few if target == "gif" and name == "optimize" else src
+            image.edit(source, tmp_path / "ref", model(**base))
+            image.edit(source, tmp_path / "alt", model(**fields))
             assert (tmp_path / "alt").read_bytes() != (tmp_path / "ref").read_bytes(), (model.__name__, name)
-            image.edit(src, tmp_path / "ref", model())
+            if source is few:
+                shrunk, full = (Image.open(tmp_path / out).palette for out in ("alt", "ref"))
+                assert shrunk is not None and full is not None
+                assert len(shrunk.palette) < len(full.palette), "optimize keeps only the GIF palette's used colours"
 
 
 def animation(tmp_path, fmt, frames=6, size=(24, 16), transparent=False, name="original.blob", **save_kwargs):
@@ -407,15 +415,25 @@ def test_animated_edits_change_every_frame(tmp_path, fmt, target, transparent):
 
 def test_animation_saved_as_a_still_format_gives_the_first_frame(tmp_path):
     path, originals, _ = animation(tmp_path, "GIF")
-    out = run_edit(path, tmp_path / "out", "png")
-    assert getattr(out, "n_frames", 1) == 1 and pixels(out.convert("RGBA")) == pixels(originals[0])
+    out = run_edit(path, tmp_path / "out", "bmp")
+    assert getattr(out, "n_frames", 1) == 1 and pixels(out.convert("RGB")) == pixels(originals[0].convert("RGB"))
+    asked = run_edit(path, tmp_path / "asked", "png", animated=False)
+    assert getattr(asked, "n_frames", 1) == 1 and pixels(asked.convert("RGBA")) == pixels(originals[0])
 
 
-def test_animated_png_is_refused(tmp_path):
+def test_an_animated_png_is_edited_frame_by_frame_as_apng_and_gives_its_first_frame_when_asked(tmp_path):
     path, _, _ = animation(tmp_path, "PNG")
-    with pytest.raises(UnsupportedMediaError) as e:
-        image.edit(path, tmp_path / "out", config.PngEditConfig())
-    assert e.value.user_message == "Animated PNGs can't be edited yet."
+    assert image.frames_info(path).edit_target == "apng"
+    kept = image.edit(path, tmp_path / "anim.apng", config.ApngEditConfig(rotate=90))
+    with Image.open(tmp_path / "anim.apng") as out, Image.open(path) as src:
+        assert out.n_frames == src.n_frames and out.size == (src.height, src.width)
+    assert kept.frames == kept.source_frames and kept.fidelity.level == "lossless"
+    png = image.edit(path, tmp_path / "anim.png", config.PngEditConfig(rotate=90))
+    assert (tmp_path / "anim.png").read_bytes() == (tmp_path / "anim.apng").read_bytes()
+    assert png.frames == png.source_frames and png.fidelity.level == "lossless"
+    still = image.edit(path, tmp_path / "still.png", config.PngEditConfig(animated=False))
+    assert still.frames == 1 and still.reason == "asked"
+    assert still.fidelity.removed == [f"animation ({still.source_frames} frames)"] and not still.fidelity.lost
 
 
 def test_animation_budget(tmp_path):
@@ -570,8 +588,8 @@ def test_progress_and_atomic_output(tmp_path):
 
 
 def test_edit_models_follow_the_family_rules():
-    assert IMAGE_EDIT.targets == ("jpeg", "png", "webp", "gif", "bmp", "tiff")
-    assert IMAGE_FRAMES.targets == ("gif", "webp")
+    assert IMAGE_EDIT.targets == ("jpeg", "png", "webp", "gif", "bmp", "tiff", "avif", "apng")
+    assert IMAGE_FRAMES.targets == ("gif", "webp", "avif", "apng", "png")
     assert IMAGE_EDIT.model_for(target="jpg") is config.JpegEditConfig
     edit_fields = ["rotate", "flip", "crop_left", "crop_top", "crop_width", "crop_height"]
     edit_fields += ["brightness", "contrast", "saturation"]
@@ -606,3 +624,65 @@ def test_cmyk_and_16_bit_sources(tmp_path):
     assert kept.mode.startswith("I") and kept.getpixel((0, 0)) == 40000
     adjusted = run_edit(path, tmp_path / "c", "png", brightness=0.5)
     assert adjusted.mode == "L" and adjusted.getpixel((0, 0)) == round(40000 / 257 * 0.5)
+
+
+ANIMATED_TARGETS = ["gif", "webp", "avif", "apng", "png"]
+
+
+def _animation_routes():
+    from sashimi.config import IMAGE_CONVERT, IMAGE_RESIZE
+
+    def convert(src, out, target, **params):
+        return image.convert(src, out, IMAGE_CONVERT.from_params(params, target=target))
+
+    def resize(src, out, target, **params):
+        return image.convert(src, out, IMAGE_RESIZE.from_params({"max_width": 12, **params}, target=target))
+
+    def edit(src, out, target, **params):
+        return image.edit(src, out, IMAGE_EDIT.from_params({"rotate": 90, **params}, target=target))
+
+    def frames(src, out, target, **params):
+        return image.select_frames(src, out, IMAGE_FRAMES.from_params({"speed": 2, **params}, target=target))
+
+    return {"convert": convert, "resize": resize, "edit": edit, "frames": frames}
+
+
+@pytest.mark.parametrize("source", ["GIF", "WEBP", "PNG"])
+@pytest.mark.parametrize("target", ANIMATED_TARGETS)
+@pytest.mark.parametrize("route", ["convert", "resize", "edit", "frames"])
+def test_every_route_keeps_an_animation_by_default_and_gives_one_frame_when_asked(tmp_path, route, target, source):
+    path, originals, _ = animation(tmp_path, source)
+    run = _animation_routes()[route]
+    out = tmp_path / f"out.{target}"
+    result = run(path, out, target)
+    with Image.open(out) as img:
+        assert getattr(img, "n_frames", 1) == len(originals), (route, target)
+    assert "timing changed" not in result.fidelity.changed
+    assert result.fidelity.level != "lossy" or target in ("gif", "webp", "avif") or route in ("resize", "frames")
+    if route == "frames":
+        return
+    still = run(path, tmp_path / f"still.{target}", target, animated=False)
+    with Image.open(tmp_path / f"still.{target}") as img:
+        assert getattr(img, "n_frames", 1) == 1
+    assert still.frames == 1 and still.reason == "asked"
+    assert f"animation ({len(originals)} frames)" in still.fidelity.removed
+    assert not any("animation" in item for item in still.fidelity.lost)
+
+
+def test_edit_saves_an_animated_gif_as_an_animated_png_with_its_timing(tmp_path):
+    path, originals, durations = animation(tmp_path, "GIF")
+    result = image.edit(path, tmp_path / "out.png", config.PngEditConfig(rotate=90))
+    assert result.frames == len(originals) and result.fidelity.level == "lossless"
+    found, loop = frames_of(tmp_path / "out.png")
+    assert [duration for _, duration in found] == durations and loop == 0
+    with Image.open(tmp_path / "out.png") as out:
+        assert out.size == (16, 24)
+    image.edit(path, tmp_path / "again.png", config.PngEditConfig(rotate=90))
+    assert (tmp_path / "again.png").read_bytes() == (tmp_path / "out.png").read_bytes()
+
+
+def test_an_animated_edit_to_png_is_bounded_by_the_animation_budget(tmp_path):
+    path, _, _ = animation(tmp_path, "GIF", frames=20, size=(64, 64))
+    with pytest.raises(MediaTooLargeError):
+        image.edit(path, tmp_path / "out.png", config.PngEditConfig(), limits=Limits(max_animation_bytes=64 * 64 * 4))
+    image.edit(path, tmp_path / "still.png", config.PngEditConfig(animated=False), limits=Limits(max_animation_bytes=1))

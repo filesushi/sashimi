@@ -27,6 +27,7 @@ KINDS = {
     "max_audio_seconds": "seconds",
     "max_gif_seconds": "seconds",
     "max_preview_clips": "count",
+    "max_scan_packets": "count",
 }
 """How each limit is written: pixels (200M), bytes (2G), seconds (10m, 600) or a count."""
 
@@ -80,6 +81,67 @@ def parse(field: str, value: Any) -> int | float | None:
     return int(number)
 
 
+_SECONDS_STEPS = (30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400)
+_resolved: dict[str, Any] = {"limits": None, "flags": {}}
+
+
+def _seconds_text(seconds: float) -> str:
+    if seconds >= 3600 and seconds % 3600 == 0:
+        return f"{int(seconds // 3600)}h"
+    if seconds >= 60 and seconds % 60 == 0:
+        return f"{int(seconds // 60)}m"
+    return f"{seconds:g}s"
+
+
+def _next_round(field: str, current: float) -> str:
+    """A round value above `current` for `field`, written as the CLI reads it: 64M -> 100M, 10m -> 15m."""
+    kind = KINDS[field]
+    if kind == "seconds":
+        step = next((s for s in _SECONDS_STEPS if s > current), None)
+        return f"{int(current // 3600) + 24}h" if step is None else _seconds_text(step)
+    if kind == "bytes":
+        size = 2**20
+        while size <= current:
+            size *= 2
+        return format_limit(field, size)
+    magnitude = 1
+    while True:
+        for mantissa in (1, 2, 5):
+            if mantissa * magnitude > current:
+                return format_limit(field, mantissa * magnitude) if kind == "pixels" else str(mantissa * magnitude)
+        magnitude *= 10
+
+
+def hint(field: str) -> str | None:
+    """
+    How to change the limit `field` from the CLI, for the end of its refusal; None for an unknown
+    field. A limit set by a flag names the flag; otherwise it gives the settings command with a
+    round value above the limit in force.
+    """
+    kind = KINDS.get(field)
+    if kind is None:
+        return None
+    flag_text = _resolved["flags"].get(field)
+    if flag_text is not None:
+        return f"It was set with {FLAGS[field]} {flag_text}: give a higher value, or {FLAGS[field]} none for no limit."
+    from sashimi.config import Limits
+
+    current = getattr(_resolved["limits"] or Limits(), field)
+    if current is None:
+        return f"To change the limit, run: sashimi config set limits.{field} <value> ({_HINTS[kind]}, or none)."
+    now = _seconds_text(current) if kind == "seconds" else format_limit(field, current)
+    return (
+        f"To raise the limit (now {now}), run: sashimi config set limits.{field} "
+        f"{_next_round(field, current)} (or any higher value, or none for no limit)."
+    )
+
+
+def with_hint(message: str, field: str | None) -> str:
+    """`message`, followed by how to change the limit `field` if it names one."""
+    extra = hint(field) if field else None
+    return f"{message} {extra}" if extra else message
+
+
 def accepted(field: str) -> str:
     """What one limit accepts, for ``sashimi config defaults limits``."""
     return f"{_HINTS[KINDS[field]]}, or none"
@@ -126,4 +188,7 @@ def resolve(**flags: str | None) -> Limits:
             values[field] = parse(field, value)
         except ValueError as e:
             fail(f"{FLAGS[field]}: {e}.")
-    return Limits.model_validate(values)
+    limits = Limits.model_validate(values)
+    _resolved["limits"] = limits
+    _resolved["flags"] = {field: value for field, value in flags.items() if value is not None}
+    return limits

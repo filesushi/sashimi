@@ -3,6 +3,498 @@
 sashimi follows [Semantic Versioning](https://semver.org/). Before 1.0, minor versions may break
 the Python API; every break is listed here. See [MIGRATION.md](MIGRATION.md) for upgrade steps.
 
+## 0.7.0 — 2026-10-30
+
+Recordings that were never finalized now work. A live-stream capture or a browser recording
+written to a pipe (Matroska or WebM with no stated length, such as an OvenMediaEngine dump with
+`Duration: N/A`) was refused by `thumbs`, `preview`, every video and audio conversion, `extract`,
+`remux` and `rotate` as "doesn't look like a video we can read", and `info` showed no length.
+Matroska audio (`.mka`) and a few more extensions ffmpeg reads are now picked up. This is a minor
+release because `MediaInfo.duration` changes for some files and `probe()` can refuse a file (see
+Breaking); [MIGRATION.md](MIGRATION.md) shows what to check.
+
+Every tile, preview clip and start time now shows the frame at its stated time on every container
+sashimi reads, whatever the keyframe spacing: MPEG-TS, DVD and MPEG program streams and Ogg showed
+the next keyframe instead (up to a whole keyframe interval late, or nothing). In video that holds
+a frame for a while (screen and browser recordings, which have a variable frame rate), tiles and
+clips now show the frame on screen at their time, as a player does, instead of the next new one. Contact sheets and
+previews of videos with keyframes far apart are decoded in one pass instead of once per tile, so
+they no longer cost tiles × keyframe interval. More audio and video formats are read: AIFF,
+AC-3, E-AC-3, DTS, AMR, CAF, Sun AU, WavPack, WMA, iPhone ringtones, Ogg video (Theora), DivX, F4V
+and Y4M. Wherever ffmpeg's own seek was right (MP4, MOV, Matroska, WebM, AVI, FLV and ASF, away
+from the cases in Fixed), outputs are byte-identical to 0.6.0.
+
+A benchmark over 200 real-world files found more: `convert` and `resize` turned animations into
+stills and called it success; they now keep them animated. HEIC (iPhone photos with GPS), AVIF,
+TS, VOB, 3GP, FLV, WMV and AVI can be stripped, HEIC and AVIF in place with the gain map and depth
+data untouched. Data tracks that kept GoPro, iPhone and ProRes files from being cut or remuxed
+losslessly are left out and named. Dolby Vision in Dolby's own colour space and ProRes RAW are
+refused honestly instead of failing or coming out colourless.
+
+HDR video (PQ or HLG, Dolby Vision 8.1 and 8.4 included) is tone-mapped to standard range in every
+output that can't hold it: sheets, previews, GIFs, animated WebPs and re-encodes, which came out
+flat and pale (and re-encodes were 8-bit video still tagged PQ or HLG). `keep_hdr` (`--keep-hdr`)
+keeps HDR in MP4 (10-bit HEVC, copied when the source already is) and WebM (10-bit VP9). Every
+result now says what the output kept of its source (`fidelity`): lossless, the picture or sound
+identical with something else dropped (named), or lossy (with what changed), plus what was removed
+as asked, worked out from what happened and checked against the output. AVIF and APNG are output
+formats. `strip` keeps Ultra HDR gain maps in every mode, and a motion photo's video whenever it
+can be made to hold what was asked.
+
+`rotate` turns MP4-ready video (H.264, HEVC, AV1, VP9) losslessly: every stream is copied and only
+the display rotation is set, composed with the one the video already has (an iPhone portrait clip
+turned 90° shows at 180°), so a 3.5-minute 1080p phone video takes about 2 CPU seconds instead of
+several minutes of re-encoding; `--reencode` turns the pixels instead. sashimi is tested with
+FFmpeg 8.1 and 9.0, and checks per task instead of warning about the version: a task is refused,
+before anything is written, only when the FFmpeg in use lacks an encoder or filter it needs or is
+a release known to get it wrong (lossless cuts and start times on FFmpeg 8.0 and older); `sashimi
+info --ffmpeg` shows which FFmpeg is used and what it can do, and `SASHIMI_FFMPEG` or `sashimi
+config set ffmpeg.path` choose one. `metadata=keep` now keeps QuickTime metadata (an iPhone's
+`com.apple.quicktime.*` keys, a GoPro's `firmware`) and the source's creation time in MP4, MOV and
+M4A outputs; conversions keep an image's resolution (DPI) where the format can hold it;
+`convert x.mp4 mp4` and `convert x.webm webm` tone-map an HDR file instead of saying "Already
+MP4"; `convert anim.gif png` keeps the animation (an animated PNG); and AVIF's defaults are chosen
+by measurement (quality 75, speed 9: photos around the size of WebP's default, smaller or larger
+depending on the photo, and at least as close to the source, at about WebP's CPU cost).
+
+`rotate` keeps a MOV a MOV: an iPhone clip with PCM sound now turns losslessly into
+`clip.MOV.rotated.MOV`, every stream copied, where it was written as MP4 with the sound re-encoded.
+A missing or misconfigured FFmpeg is reported as exactly that, with the path, where it was chosen
+and how to fix it, by every command and by `sashimi info --ffmpeg` (which exits 1), instead of
+"Version unknown" or "Cannot run '/nope/ffprobe'". Matroska and WebM outputs record the source's
+creation time, as MP4 and MOV do, and `edit` keeps an animation animated when saving to PNG, as
+`convert` does.
+
+### Breaking
+
+- **`rotate` writes MOV for MOV sources** (the batch functions `rotate_files`/`rotate_files_generator`
+  and the CLI, unless `output_format` is given; an MP4 `video_config` lends its options): a rotation
+  alone of H.264, HEVC or ProRes video in a MOV is lossless and copies every stream MOV holds, PCM
+  sound included, so the output is `clip.mov.rotated.mov` instead of `clip.mov.rotated.mp4`. A
+  Dolby Vision MOV whose sound MP4 holds (an iPhone HDR clip) still becomes MP4, because FFmpeg
+  writes the Dolby Vision configuration into MP4 but not MOV (`video.rotation_container` decides).
+  `VIDEO_TRANSFORM` has a `mov` target (`MovTransformConfig`, the MP4 options), and `rotate
+  --output-format mp4` gives the old MP4 (sound MP4 players don't all play re-encoded as AAC).
+- **Copies into MOV leave out data tracks whose codec FFmpeg doesn't know** (Apple's `mebx`
+  metadata tracks, a GoPro's file-description track), which FFmpeg wrote under a made-up sample
+  description no reader can use; the result names them ("FFmpeg can't copy 3 Apple metadata tracks
+  into MOV"). Timecode tracks and a GoPro's telemetry stay. So remuxes, cuts, rotations and `strip`
+  to MOV of such files change bytes.
+- **Matroska and WebM outputs record the source's creation time**, in the
+  file's own date field (`DateUTC`, read back as `creation_time` by FFmpeg and `probe()`), with
+  `metadata="keep"` or `"remove_location"`; `remove_all` removes it. Outputs of sources with a
+  creation time change bytes (reruns stay byte-identical); others don't.
+- **`image.edit` keeps an animation animated when saving to PNG** (an APNG in a `.png` file), as
+  `convert` does; the GIF, WebP, AVIF, APNG and PNG edit configs have
+  `animated` (default true), and `animated=False` (`sashimi edit --no-animated`, kept with `sashimi
+  config set edit.animated false`) gives the first frame, said to be removed as asked. `rotate` of
+  an animation to PNG keeps it animated too. Frames are held in memory, so `max_animation_bytes`
+  applies.
+- **A missing or wrong FFmpeg raises `FFmpegPathError`** (a `BinaryNotFoundError`, so existing
+  handlers still catch it) with a new message, and `info --ffmpeg` exits 1 for it. `ffmpeg_binary()`
+  and `ffprobe_binary()` check both executables once per process (one `-version` run each).
+
+- **`video.transform` with a rotation alone into MP4 no longer re-encodes** H.264, HEVC, AV1 or
+  VP9 video: the output keeps the source's codec, every stream, and HDR, with its display rotation
+  set; players that ignore display rotation show it unturned (`reencode=True` for the old result).
+  It returns a `TransformResult` (an `Outcome` with `route`: `display` or `encode`).
+- **MP4, MOV and M4A outputs of sources with QuickTime keys or other tags the plain writer drops
+  are written with QuickTime metadata keys**, so their bytes change, and outputs of sources with a
+  creation time record it.
+- **The "FFmpeg older than 8.1" warning is gone**, replaced by refusals of the tasks such a release
+  gets wrong (see Added). `core._ffmpeg.MIN_FFMPEG` and `OLD_FFMPEG` are gone.
+
+- **`MediaInfo.duration` of a Matroska or WebM file whose timestamps start late is now measured
+  from its last packets.** Muxers disagree about what such a file's stated length means:
+  libavformat (ffmpeg, OBS, HandBrake, OvenMediaEngine) writes the time its last frame ends, so a
+  capture that joined a broadcast 100 s in and ran for 5 s said 105 s, while mkvmerge writes the
+  span (5 s), and keeps an old `ENCODER=Lavf…` tag when it remuxes an ffmpeg file. sashimi took
+  105 s as the length, so contact sheets and previews sampled past the end ("We couldn't read any
+  frames from this video"), re-encodes were given a length past the end, and start times past the
+  real end weren't refused. ffprobe now seeks to the file's last keyframe and reads the packets
+  after it (more when the file has no Cues or its keyframes are far apart, up to
+  `Limits.max_scan_packets`), and the length runs from the first frame to the end of the last
+  packet, as `ffmpeg -ss` and every start time count it, and as MP4, MOV and MPEG-TS lengths
+  already did. When the end can't be reached within the limit, the stated length is kept: a length
+  that is too short would cut every re-encode short. Files that start at zero are unchanged.
+- **`MediaInfo` has a new field, `start_time`:** the timestamp the file starts at, the time
+  `ffmpeg -ss` counts from. **`StreamInfo` has one too:** each stream's start on the same clock.
+- **`probe()` can raise `MediaTooLargeError`** (`limit="max_scan_packets"`) for a recording that
+  doesn't state its length and has more packets than `Limits.max_scan_packets` (see Added). Every
+  function that probes a file passes its `limits` on. Files that state their length are never
+  refused this way by `probe()`.
+- **Contact sheets, previews and every start time can raise `MediaTooLargeError`**
+  (`limit="max_scan_packets"`) when finding the keyframe to start decoding from means reading more
+  video packets than `Limits.max_scan_packets` (2,000,000 by default: about 18 hours of 30 fps
+  video). See Fixed.
+- **The commands core functions run changed** where ffmpeg's own seek lands wrong (see Fixed):
+  every seek in MPEG-TS, MPEG-PS and Ogg (measured from where ffmpeg counts the command's
+  timestamps: on MPEG-TS and MPEG-PS, a command that maps only a video starting after the sound
+  counts from the video's start), times near an open-GOP keyframe in MP4 and MOV, times in
+  the first second, and lossless cuts of those; and sheets and previews of videos with keyframes
+  far apart now decode in one pass; a tile or clip inside a held frame (see Fixed) seeks to that
+  frame. Every other seek keeps its 0.6.0 command. The command builders keep their 0.6.0 output
+  unless given the new arguments (`decode_from=`, with `origin=` for where the command's
+  timestamps start, for `build_frame_command`, `build_clip_command`, `build_convert_command`,
+  `build_palette_command` and `build_trim_command`; `index=` for `build_preview_commands`), so
+  tests that pin the builders' defaults still pass. The one-pass
+  routes use `_seek.build_pass_command` (the frames inside given stretches of the video, with
+  their times), resample clips as ffmpeg's `fps` filter and raw output do (a clip starts at its
+  first frame), and pick frames in Python: `sheets.static.pick_tiles` and `tile_windows` for still
+  sheets, `_seek.clip_pass` for clips.
+- **Length-limit refusals are worded differently:** "This video is 12 minutes 5 seconds long, and
+  the limit is 10 minutes. Set a shorter duration to convert part of it." instead of "Videos longer
+  than 10 minutes aren't supported yet. …" (the same for audio), and the `max_pixels` and
+  `max_sheet_pixels` refusals say "megapixels" after the limit. The length and the limit are in
+  the same units (hours, minutes and seconds), and the length is given as precisely as it takes to
+  read as more than the limit: "10 minutes 0.4 seconds long, and the limit is 10 minutes", "1 hour
+  long, and the limit is 59 minutes 59 seconds".
+- **Folder searches pick up more files:** `.mka`, `.m4b`, `.mp2`, `.aiff`, `.aif`, `.aifc`, `.ac3`,
+  `.eac3`, `.dts`, `.amr`, `.caf`, `.au`, `.wv`, `.wma` and `.m4r` as audio, and `.mk3d`, `.m2ts`,
+  `.mts`, `.3g2`, `.vob`, `.ogv`, `.divx`, `.f4v` and `.y4m` as video, so a rerun over a folder
+  holding them now processes them (once; the next rerun reports them as existing).
+- **ffmpeg's input allowlist** (`-format_whitelist`, every command) adds the single-file demuxers
+  `aiff`, `ac3`, `eac3`, `dts`, `amr`, `amrnb`, `amrwb`, `caf`, `au`, `wv` and `yuv4mpegpipe`;
+  none of them opens another file or a URL. `ogg` files with video and `asf` files with only audio
+  (WMA), already allowed, now take the video and audio routes.
+
+- **`image.convert` keeps animations, and returns what it wrote.** An animated GIF, WebP, APNG or
+  AVIF converted or resized to GIF or WebP stays animated, keeping each frame's timing, the loop
+  count and transparency; in 0.6.0 it gave the first frame. The new `animated` field of the GIF,
+  WebP, AVIF and APNG configs (default true; `--no-animated` in the CLI) set to false asks for the
+  first frame only. Its frames are held in memory, so `Limits.max_animation_bytes` now applies to
+  these conversions. `image.convert` returns an `ImageConversion` (frames written, frames in the
+  source, why any were left out, and `fidelity`) instead of None; `image.edit` returns one too.
+- **Every processing function returns what the output kept** (a `fidelity`,
+  `sashimi.fidelity.Fidelity`): `video.convert` returns a `VideoConversion` (`route` and
+  `fidelity`) instead of the route string, `metadata.strip` a `StripResult` (`format` and
+  `fidelity`) instead of the extension, `video.trim` a `TrimResult` (a `CopyPlan` with `fidelity`),
+  and `video.transform`, `video.preview`, `audio.convert`, `sheets.render`, `image.to_ico`,
+  `image.favicon_pack` and `image.select_frames` an `Outcome` instead of None. Batch results end
+  their message with the statement ("Converted to a.png.webp (lossy: saved as WebP at quality
+  85)"), the success tuples carry it as `.fidelity` (`api.FileResult`, still a 4-tuple), and the
+  `--json` report has a `fidelity` key per result. The notes "(video and audio copied, not
+  re-encoded)", "(only the first frame of 20: JPEG holds one picture)" and "Dropped …, which MP4
+  can't carry" are now part of it.
+- **HDR outputs change** (see the top): sheets, previews, GIFs, animated WebPs and re-encodes of PQ
+  or HLG video are tone-mapped to BT.709, so their pixels and their colour tags change, and an
+  MP4 of HDR H.264 is re-encoded rather than copied. Without zscale (libzimg) in the FFmpeg,
+  these raise `MissingFiltersError` (a `BinaryNotFoundError`) instead of writing washed-out output.
+- **AVIF, APNG and animated PNG edits:** `frames_info(...).edit_target` is `avif` for AVIF (was
+  `jpeg`) and `apng` for an animated PNG; editing an animated PNG works (it was refused), and
+  `resize`, `rotate` and `edit` keep AVIF and animated PNG files in their format.
+- **Sheets of short clips** with fewer frames than tiles get a smaller grid with each frame once
+  (no repeated tiles), and animated sheets get as many clips as fit without overlapping; the
+  result says so in `fidelity.notes`.
+- **`strip` keeps more:** an Ultra HDR gain map stays in every mode (`remove_all` keeps it with
+  the XMP that says how to show it), and a motion photo's video stays when it holds nothing the
+  mode removes, or can be stripped of it and put back (Google's layout); otherwise it is removed
+  and `fidelity.notes` says why. `remove_all` used to drop both.
+- **`video.trim` returns a `CopyPlan`** (what a lossless copy left out) instead of None, and a
+  copy leaves out data tracks the container can't hold (a timecode, a GoPro's telemetry and GPS,
+  Apple's metadata tracks) instead of refusing the file. `check_copy_compatible` no longer raises
+  for those. `build_trim_command` takes `drop=` for them.
+- **`frames_info`, `metadata.read`, `metadata.strip` and `strip_format` no longer apply
+  `Limits.max_pixels`**: they decode no pixels. Conversions and edits still do. `sashimi strip`
+  loses its `--max-pixels` flag, which no longer did anything.
+- **Refusals that were errors or other messages:** Dolby Vision whose base layer is in Dolby's IPT
+  colour space (profiles 5 and 20) and ProRes RAW raise `UnsupportedMediaError` before any decoding
+  route (conversions, rotate, accurate cuts, sheets, previews), and Dolby Vision IPT can't be
+  remuxed or copied into MKV or WebM (`InvalidOptionsError`); a WebP wider or taller than 16,383
+  pixels raises `MediaTooLargeError` (it was Pillow's `ValueError` or an ffmpeg error); `convert`
+  refuses a file named like its target that isn't readable media (it said "Already MP4").
+- **Copy refusals are worded differently:** "This video can't be copied into MP4 without
+  re-encoding: MP4 can't hold its WMV2 video. Try MKV instead, or convert it (which re-encodes)."
+  (a cut says "trimmed into"); 0.6.0 said "can't be trimmed to MP4", also for a remux.
+- **A GIF's length counts frames stored as shorter than 20 ms as 100 ms**, as browsers play them:
+  `probe()`'s `duration`, `sashimi info`, and the MP4, WebM, GIF and WebP made from it.
+- **`MediaInfo` has `color_space`, `color_transfer` and `color_primaries`.**
+- **Sheets and previews of clips under a second are made** (0.6.0 refused sheets under 1 s and
+  previews under 0.5 s with `MediaTooShortError`). `MIN_PREVIEW_SECONDS` is 0.
+
+### Added
+
+- **`sashimi rotate --output-format mov`**, `MovTransformConfig`, `video.rotation_container(info,
+  mp4, mov)` (which container keeps more of a MOV on rotation), and `MediaInfo.dolby_vision`.
+- **`sashimi edit --animated/--no-animated`** and the `edit.animated` setting; **`sashimi frames
+  --output-format png`** (`PngFramesConfig`, an animated PNG in a `.png` file, as `apng`).
+- **`errors.FFmpegPathError`** (`.name`, `.path`, `.origin`, `.problem`: `not_found`, `missing`,
+  `folder`, `not_executable`, `cannot_run`, `not_ffmpeg`); `ffmpeg.path`, like `SASHIMI_FFMPEG`
+  and `set_ffmpeg_paths()`, takes the folder holding ffmpeg and ffprobe; `sashimi config set
+  ffmpeg.path` warns about a path that can't be used, or one `SASHIMI_FFMPEG` overrides;
+  `sashimi info --ffmpeg --json` has `usable` and, when it isn't, `problem`. On Windows, an
+  ffmpeg or ffprobe given without `.exe` (`SASHIMI_FFMPEG=C:\ffmpeg\bin\ffmpeg`, `ffmpeg.path`,
+  `set_ffmpeg_paths()`) means the `.exe` when the path itself doesn't exist, with `ffprobe.exe`
+  beside it, as at a command prompt; messages and `sashimi info --ffmpeg` name the `.exe`, and a
+  path that exists neither way is named as given.
+- `probe(path, limits=)`, and `Limits.max_scan_packets` (default 2,000,000, about 7 hours of
+  30 fps video with AAC audio; `[limits] max_scan_packets` in `sashimi.toml`, `none` for no
+  limit). Measuring a recording that doesn't state its length reads every packet, at about 20
+  microseconds of CPU time each, so the cost follows the packet count, not the file size; a file
+  with more packets than the limit is refused once the scan reaches it, with the limit in the
+  message. A measurement is remembered for the rest of the process while the file's size and
+  modification time stay the same (the last 64 files), so a command that probes a file more than
+  once, or a caller that probes it before converting it, reads it once.
+- Matroska audio (`.mka`), audiobooks (`.m4b`) and MPEG audio layer II (`.mp2`) convert to every
+  audio format, and `.mka` and `.m4b` (and `.weba`) can be stripped of metadata in their own format.
+  `.mk3d`, AVCHD and Blu-ray `.m2ts`/`.mts`, `.3g2` and DVD `.vob` take every video route; `strip`
+  doesn't take them (it keeps a file's format, and these formats can't be written that way), and
+  says which formats it takes.
+- AIFF, AC-3, E-AC-3, DTS, AMR, CAF, Sun AU, WavPack and WMA audio, and iPhone ringtones
+  (`.m4r`), convert to every audio format; Ogg video (`.ogv`, Theora), DivX, F4V and YUV4MPEG
+  (`.y4m`) take every video route. `strip` keeps the format of `.m4r` and `.f4v` (MP4 family) and
+  says which formats it takes for the rest. RealMedia (`.rm`, `.rmvb`) and Monkey's Audio
+  (`.ape`) are left out: RealVideo can't be copied into Matroska (`remux` and lossless `extract`
+  fail), and nothing here can write an `.ape` file to test with.
+- Refusals under a limit, on the command line, end with how to change it. A limit set in
+  `sashimi.toml` (or left at its default) gives the command, with a round value above the limit
+  in force: "To raise the limit (now 64M), run: sashimi config set limits.max_pixels 100M (or any
+  higher value, or none for no limit)." A limit set with a flag names the flag instead, since the
+  flag overrides the settings file: "It was set with --max-pixels 1M: give a higher value, or
+  --max-pixels none for no limit." The Python API's messages don't carry it.
+
+- **Animations in `convert` and `resize`** (see Breaking), with `animated` / `--animated` and
+  `--no-animated` (`--animated` overrides a kept `sashimi config set convert.animated false`, and
+  `resize.animated`); `--max-animation-bytes` on `convert` and `resize`. A still output from an
+  animation or a multi-page TIFF says so in its fidelity: "(lossy: saved as JPEG at quality 85;
+  animation (20 frames) dropped)", "(picture identical; 2 more pages dropped)", or "animation
+  (20 frames) removed as asked" with `--no-animated`.
+- **HDR:** tone mapping (`core/_hdr.py`: zscale to linear light, BT.709 primaries, FFmpeg's
+  `tonemap=mobius`, then BT.709; HLG with 203 nits as reference white), after scaling down; the
+  HDR frame metadata (mastering display, content light level, HDR10+, Dolby Vision) is removed
+  from tone-mapped output. `keep_hdr` on the MP4 and WebM configs (convert, rotate, accurate
+  extract): `--keep-hdr` / `--tone-map`, `convert.keep_hdr`, `rotate.keep_hdr` and
+  `extract.keep_hdr` in `sashimi.toml`; refused for formats that can't hold HDR. `MissingFiltersError`.
+- **What each output kept** (`sashimi.fidelity`: `Fidelity`, `Outcome`): images are compared pixel
+  for pixel with their source when the encoder is lossless, metadata and structure (EXIF, XMP,
+  IPTC, colour profile, resolution, gamma, animation, pages, gain maps, motion photo video, unknown
+  chunks and segments) are read from source and output, and video and audio from ffprobe's view
+  (tracks, tags, chapters, cover art, data tracks, location, rotation, Dolby Vision). HEIC, AVIF,
+  PSD, TGA, ICO, and video outside Matroska and WebM, can hold data no reader sees, so they never
+  claim "lossless".
+- **AVIF and APNG outputs** for `convert`, `resize`, `rotate`, `edit` and `frames` (stills and
+  animations; `--avif-speed`, `avif_speed`). AVIF is lossy and costs about 6–8 times the CPU of
+  WebP; Pillow writes no loop count to it (AVIF animations loop forever, and the result says so).
+- **AVIF, ICO (its largest picture), TGA, PSD (its flattened picture) and APNG are read** by
+  `convert`, `resize`, `rotate`, `edit`, `favicon`, `info` and `metadata`; `.jfif`, `.jpe`, `.jif`,
+  `.avif`, `.ico`, `.tga`, `.psd` and `.apng` are picked up in folders. A `.jfif` is JPEG: "Already
+  JPEG", and `comic.jfif.png`. Edits of AVIF are saved as AVIF, of an animated PNG as APNG, and of ICO, TGA and PSD as PNG.
+- **`strip` takes HEIC and AVIF** (in place, every picture item byte for byte; see the README),
+  **3GP, MPEG-TS and M2TS, VOB and MPG, FLV, WMV and AVI** (stream copies), and says why it leaves
+  BMP and ICO (no metadata) and TGA and PSD (can't be stripped without re-encoding).
+- **`video.plan_copy`** says what a lossless copy into a container leaves out, before it runs.
+- **Per-task FFmpeg checks** (`sashimi.ffmpeg_info()`, `sashimi info --ffmpeg`). A task is refused
+  with `UnsuitableFFmpegError` (a `BinaryNotFoundError`; `MissingEncodersError`,
+  `MissingFiltersError` and `FFmpegTooOldError` under it), before anything is written, when the
+  FFmpeg in use lacks an encoder it needs (libx264, libx265, libvpx-vp9, libopus, libmp3lame,
+  libwebp) or a filter (zscale, tonemap, sidedata, palettegen, paletteuse), or is a release known
+  to get the task wrong: FFmpeg 8.0 and older for lossless cuts with a start time or a length (a
+  2 s cut held 3 s; one starting after the last frame held the whole video) and start times (a
+  start after the last frame wrote a frame from before it). The message names what's missing, the
+  FFmpeg (version, path, where it was chosen) and what to do. Tested series are 8.1 and 9.0; a
+  newer or unreadable version is allowed and reported in the log (INFO) and `info --ffmpeg`.
+  `-version`, `-encoders` and `-filters` run at most once per executable per process. The CLI says
+  a refusal shared by several files once, after the results.
+- **ffmpeg and ffprobe are chosen as a pair:** `set_ffmpeg_paths(ffmpeg)` takes the ffprobe beside
+  it (and `origin=` names the choice in messages); then the `SASHIMI_FFMPEG` environment variable
+  (an ffmpeg, or a folder holding both); then `ffmpeg.path` in `sashimi.toml` (`sashimi config set
+  ffmpeg.path …`, CLI only); then the ffmpeg on PATH with the ffprobe beside it.
+- **Lossless video rotation** (`video.plan_rotation`, `video.build_rotation_command`,
+  `TransformResult.route`): `transform` with a rotation alone into MP4, of H.264, HEVC, AV1 or VP9
+  video, copies every stream and sets the display rotation; sound MP4 players don't all play (PCM)
+  is re-encoded as AAC; HDR stays HDR, as in any copy; no length limit applies. `reencode`
+  (`Mp4TransformConfig`; `--reencode/--lossless`, `rotate.reencode` in `sashimi.toml`) turns the
+  pixels instead. `Fidelity.adjusted` says what was set ("display rotation set to 90° clockwise").
+- **`MediaInfo.display_turn` and `display_mirrored`** (the clockwise turn players apply, and
+  whether the display matrix mirrors), and `MetadataInfo.display_rotation`; `sashimi info` and
+  `sashimi metadata` say "shown turned 90° clockwise".
+- **`sashimi info`** shows a video's display size when its pixels aren't square, and a GIF's
+  length as browsers play it.
+
+### Changed
+
+- **AVIF defaults are quality 75 and speed 9** (were 85 and 6), measured on 8 real photos (3–54 MP)
+  and 3 animations against WebP's defaults: photos come out around WebP's size, depending on the
+  photo (0.58–0.85 times it on five, 1.17–1.24 times it on three others), with an SSIM against the
+  source at least WebP's on all eight, at 0.4–2.4 CPU s (WebP 0.6–6.4) and about twice WebP's
+  memory; quality 85 at speed 6 was 0.9–1.3 times WebP's size at 3–16 times its CPU, and 5.4 GB
+  for a 54 MP photo. Animations come out about 0.6 times WebP's size but softer (SSIM 0.915 and
+  0.953 against WebP's 0.930 and 0.988 on two GIF-like sources; equal on a filmed one); raise
+  `quality` (85 gives about WebP's size) for those.
+
+- Where sashimi decodes from a keyframe it chose (see Fixed), a re-encode's audio decoder starts
+  before the cut and is primed, so the first audio samples differ slightly from what ffmpeg's own
+  seek gave, and an accurate cut ends exactly at its length (ffmpeg's input `-t` could keep one
+  frame more).
+
+- `scripts/sandbox_check.sh` is no longer part of the repository.
+
+### Fixed
+
+- **The CLI broke long paths with newlines (also in 0.6.0):** messages were hard-wrapped at the
+  terminal's width, or at 80 columns in a pipe or a log, so a long path or a suggested command
+  (`sashimi config set ffmpeg.path …`) came out in pieces, split mid-word, and the results table
+  and `info` cut a long file name short with "…". Every message is now one line, which a terminal
+  wraps on screen; the results table is shown only when every row fits the width on one line, and
+  otherwise the same rows are printed one per line (`Success: <file>: <details>`); `info`,
+  `info --ffmpeg` and `metadata` print their fields one per line, never cut; `-v` log lines are one
+  line each; and `flatten` names a missing folder or a file in a sashimi message rather than a
+  boxed one. Messages are no longer coloured by guesswork (numbers, quotes and `<…>`), and `info`
+  on a video and `metadata` show names and tags that look like Rich markup (`[red]clip.mkv`) as
+  they are. `--json` output is unchanged.
+- **Rotating a MOV wasn't lossless when it could be:** an iPhone clip (HEVC, PCM sound, three Apple
+  metadata tracks) became `clip.MOV.rotated.mp4`, "lossy: sound re-encoded as AAC at 128 kb/s",
+  though MOV holds both streams as they are. It's now `clip.MOV.rotated.MOV`, "picture and sound
+  identical; display rotation changed from 90° to 180° clockwise; 3 Apple metadata tracks
+  dropped". An MP4 holding PCM keeps it on rotation too.
+- **A missing or misconfigured FFmpeg gave misleading messages:** `SASHIMI_FFMPEG=/nonexistent/ffmpeg
+  sashimi info --ffmpeg` showed "Version unknown", listed every encoder and filter as lacking and
+  exited 0; commands said "Cannot run '/nope/ffprobe': [Errno 2] …" without naming the setting;
+  `config set ffmpeg.path /nope/ffmpeg` said nothing; and the no-FFmpeg message left out `sashimi
+  config set ffmpeg.path`. Now each says, once per run, e.g. "/nope/ffmpeg, from ffmpeg.path in
+  ~/.sashimi/sashimi.toml, doesn't exist. Run sashimi config set ffmpeg.path <an FFmpeg's ffmpeg>,
+  or sashimi config unset ffmpeg.path so sashimi uses the FFmpeg on PATH." A path to a folder
+  without ffmpeg, an ffprobe missing beside a present ffmpeg, a file that isn't executable, and a
+  program that isn't FFmpeg are each named as such.
+- **Tracks the output can't hold were called "removed as asked" under `remove_location`:**
+  `rotate clip.MOV 90 --metadata remove_location` said "3 Apple metadata tracks and location removed
+  as asked", though only the location was asked for; the same on remuxes and cuts into MP4 or MKV
+  and on `convert … mp4` copies. Such tracks are now "dropped", with the note saying why, and only
+  the location is removed as asked (under `remove_all` they are removed as asked, as everything else).
+- **Animated WebP converted to PNG, APNG or GIF said "timing changed"** when it hadn't: Pillow
+  states a WebP frame's duration only once the frame is loaded, and the comparison read it before.
+- **Animated sheets of short videos said one thing and drew another:** a 7.6 s video's sheet said
+  "3 clips … in a 2x2 grid, without repeating any part of it" and drew 4 overlapping clips; a
+  12 s one said "6 clips" and "5 clips". One computation (`sheets._layout.plan_clips`) now gives the
+  clips, the grid and the note; clips never overlap; a video shorter than one clip gets one clip of
+  the whole video and a note saying so.
+- **`metadata=keep` dropped QuickTime metadata from MP4, MOV and M4A outputs** (an iPhone's
+  location, make, model, software and creation date keys, a GoPro's `firmware`), and
+  `remove_location` dropped the non-location keys too. Matroska, WebM and audio outputs of MP4/MOV
+  sources no longer carry the source's file-type tags (`MAJOR_BRAND`, `MINOR_VERSION`,
+  `COMPATIBLE_BRANDS`), which FFmpeg copied as tags (FFmpeg 9.0 joins them, `isom;mp42`).
+  FFmpeg 9.0's ffprobe states a value it finds twice joined with `;` (an MP4's creation time);
+  `probe()` shows such a value once. When the source has a tag FFmpeg's plain
+  MP4/MOV writer can't hold, tags are written as QuickTime metadata keys (`use_metadata_tags`,
+  without the source's file-type tags); the source's creation time is carried in every mode but
+  `remove_all`, so reruns stay byte-identical. Untagged outputs are unchanged.
+- **Conversions dropped an image's resolution (DPI)** even where the target holds one: JPEG, PNG,
+  TIFF and BMP outputs now carry it (BMP → TIFF is "lossless"); `remove_all` removes it; WebP, GIF
+  and AVIF still say "resolution (DPI) dropped".
+- **`convert hdr.mp4 mp4` (and WebM to WebM) said "Already MP4"**, so an HDR file couldn't be
+  tone-mapped with `convert`. A named HDR file is now converted (tone-mapped, and the result says
+  so); with `--keep-hdr` it stays "Already MP4". Folder searches still leave files already in the
+  target format alone.
+- **`convert anim.gif png` dropped the animation** ("picture identical; animation (30 frames)
+  dropped"): PNG now keeps an animation as an animated PNG in a `.png` file, as every other target
+  that can hold one does (`animated` on `PngImageConfig`; `--no-animated` for a still). `edit` to
+  PNG still gives the first frame (`apng` keeps it animated).
+- **A lossless copy of a file whose edit list hides its first frames showed them** (Dolby Vision
+  profile 20's leading GOP, some phone recordings): `-avoid_negative_ts make_zero` moved the
+  hidden frames into view, so a 3.35 s file remuxed or cut to MP4 said 5.0 s. MP4 and MOV copies
+  of such files now keep an edit list hiding them; MKV can't, and the result says so. Frames an
+  edit list hides after the end (some iPhone recordings) can't be hidden in any copy; the result
+  says so ("shows 2 frames the source keeps hidden at its end").
+- **The data-track note blamed the container** ("which MP4 can't carry") for a GoPro MP4 that
+  holds those tracks; it now says what's true: "FFmpeg can't copy … into MP4".
+- **Copies of HEVC with Dolby Vision into MP4** keep the Dolby Vision configuration (`dvcC`).
+
+- `probe()` measures a video or audio file that states no length from its packets: ffprobe reads
+  it to the end once, streaming (memory doesn't grow with the file), and the length runs from the
+  first frame to the end of the last packet. A Matroska `DURATION` tag (or `DURATION-eng` and the
+  like) is used first when the file has one. Still images and GIFs are never read this way.
+- `sashimi convert a.mka mp3` said "Can't convert .mka to MP3", even for a finalized file, because
+  folder searches and routing didn't list Matroska audio.
+- `strip`'s message for a file it skips named "images, videos and audio files", which an MPEG-TS
+  video is; it now names the formats it takes.
+- **Seeking shows the frame at the time asked for, on every container.** ffmpeg's `-ss` asks the
+  demuxer to seek, and where it lands depends on the container: MPEG-TS (`.ts`, `.m2ts`, `.mts`),
+  MPEG program streams (`.mpg`, `.vob`) and Ogg land near the time and decoding then waits for the
+  next keyframe, so a contact sheet of a TS recording with 10-second keyframe intervals showed the
+  frames at 10 s and 20 s under labels from 00:02 to 00:19, left the tiles after the last keyframe
+  empty, and reported success; a TS shorter than one keyframe interval failed `thumbs` and
+  `preview` ("We couldn't read any frames"). MP4 and MOV picked the keyframe by decoding order, so
+  open-GOP video (x265's default) lost up to four frames before each keyframe; AVI and FLV whose
+  video starts a little after the file jumped to the second keyframe for a time before the first.
+  Every decoding route now reads the first video stream's packet list once per file (up to the
+  latest time it needs; the CPU cost follows the file's size, about 0.6 CPU s per 300 MB here).
+  Where ffmpeg's seek would land wrong, it seeks to just before the keyframe shown at or before
+  the time and drops the frames before the time after decoding (`trim`/`atrim`, which is what
+  ffmpeg's own accurate seek does); elsewhere it keeps ffmpeg's seek, which is cheaper (the
+  decoder skips the frames before the time that no other frame needs). Lossless
+  cuts of MPEG-TS, MPEG-PS and Ogg start at the keyframe at or before the time (MPEG-PS: at most
+  one keyframe earlier) instead of the one after it, and lossless cuts of MP4 and MOV no longer
+  start after the time on open-GOP video.
+- **Contact sheets and previews of videos with keyframes far apart are decoded once.** Each tile
+  was its own ffmpeg run decoding from the keyframe before it, so a sheet cost tiles × keyframe
+  interval. sashimi now counts the frames each way from the keyframe index and decodes in one
+  pass when that is cheaper. The pass streams the frames around each tile's time with their
+  times, and sashimi picks each tile's frame in Python as ffmpeg's seek would (rounding the time
+  to the stream's time base), so tiles closer together than frames share a frame, the output is
+  byte-identical either way, each tile is pasted as it arrives (memory as with a seek per tile)
+  and progress moves tile by tile. Clips are resampled exactly as the `fps` filter would.
+  Measured here with two workers: a 24-tile sheet of a 10-second 1080p50 clip with two keyframes
+  went from 131 to 19 CPU s, its animated sheet from 93 to 26, and a 2 GB, 30-second 1080p50 file
+  with a single keyframe from 581 to 45 (animated 245 to 56, preview 138 to 58). One pass still
+  decodes everything up to the last tile, so the cost follows the bytes decoded: about 0.1 CPU s
+  per MB of 1080p H.264 here.
+- **Tiles and clips inside a held frame show that frame.** Variable-frame-rate video (screen
+  recordings, browser `MediaRecorder` WebMs, phone recordings of a still scene) holds a frame on
+  screen until the picture changes. A tile at 00:15 in a recording that held one frame from 10 s
+  to 30 s showed the frame at 30 s under its 00:15 label, and a preview clip inside the hold was
+  silently dropped (4 clips instead of 5). The rule is now the frame on screen at the time, as a
+  player shows it: the first frame at or after the time when it starts within 1.5 frame intervals
+  (what ffmpeg's seek shows, kept so constant-frame-rate outputs stay byte-identical to 0.6.0),
+  else the frame still on screen. A clip shows the held frame until its own first frame. GIFs,
+  whose frames last as long as their delay says, follow the same rule (ffmpeg still seeks in them
+  by itself).
+- Tiles after the end of the picture (a file whose sound runs on after its video, so its stated
+  length is longer) were left empty, with "Success"; they now show the last frame, as a player
+  does.
+- `remux` and lossless `extract` of MPEG program streams (`.mpg`, `.vob`) failed with "Can't write
+  packet with unknown timestamp"; stream copies of them now generate the missing timestamps
+  (`-fflags +genpts`).
+
+- **Animations became stills, reported as success** (`convert` GIF to WebP, WebP to GIF, APNG to
+  GIF, and `resize` of every animation).
+- **16-bit greyscale PNGs (and 16-bit, 32-bit and floating-point greyscale TIFFs) came out nearly
+  white** in JPEG, WebP, GIF and BMP, and in icons: Pillow clipped instead of scaling. Every route
+  scales them to 8 bits; PNG and TIFF keep 16 bits.
+- **Video with non-square pixels made squashed GIFs and animated WebPs** (a 283:200 clip shown at
+  1415×588 gave 480×282); they now have the display shape (480×200), and the sheet header shows
+  the display size ("Dimensions: 1415x588 (stored 1000x588)").
+- **Motion photos and Ultra HDR JPEGs kept XMP pointing at a video and gain map that were gone**
+  (after `strip`, conversions and edits). `strip --remove remove_location` now keeps the gain map,
+  with its MPF entry pointed at its new place, and removes the video with what points at it;
+  `remove_all`, conversions and edits drop the pointers with the data. Extended XMP's
+  `HasExtendedXMP` pointer goes with the extended XMP.
+- **Dolby Vision profile 20 (and 5) failed every decoding task** with "Impossible to convert
+  between the formats", and sheets called it damaged; it is now refused up front, saying why, and
+  lossless routes still work. **ProRes RAW came out colourless and flat**; it is refused the same
+  way.
+- **5.1 (side) and other surround layouts failed to encode to Opus** (WebM, OGG) with a raw libopus
+  error; they are remapped to the nearest layout Opus takes (5.1, 7.1, quad, …).
+- **Remux to MP4 of H.263, FLV1, Theora, WMV and other codecs MP4 can't hold** failed with a raw
+  ffmpeg error; they are refused up front, naming the codec, with MKV or a conversion suggested.
+- **GoPro MP4s couldn't be cut losslessly to MP4, and iPhone and ProRes MOVs couldn't be remuxed to
+  MKV or MP4** ("Try MOV instead"), because of their data tracks; those are left out, and the result
+  names them ("Dropped the GoPro telemetry track (GPS), …, which MP4 can't carry"). A timecode
+  track isn't named when the copy keeps the timecode.
+- **A lossless cut that ffmpeg's own seek left without a video frame** (a WebM with one keyframe)
+  failed with "ffmpeg wrote no video frames"; it is retried from the keyframe before the start.
+- **WebP wider than 16,383 pixels** failed with Pillow's `ValueError`; every WebP route (convert,
+  resize, edit, frames, video to WebP, previews) refuses it with the size and the limit.
+- **`strip`, `metadata.read` and `frames_info` refused images over 64 MP** although they decode no
+  pixels (while `sashimi info` and `metadata` read them).
+- **Sheets refused clips under a second and previews under half a second**, though they hold
+  frames; a short clip's tiles share frames and are labelled in tenths of a second.
+- **`convert x.mp4 mp4` on an empty or broken `.mp4` said "Already MP4"** and exited 0.
+- **A GIF with 10 ms frames made a 0.3 s MP4** while `frames --speed` treated those frames as 100
+  ms; every route now plays them as browsers do.
+- **The favicon pack of a 20000×1000 panorama** padded it to a 20000×20000 square first (3.2 GB);
+  an image whose square would be over four times the largest icon is shrunk first (282 MB; images
+  up to that size give the same bytes as before).
+
 ## 0.6.0 — 2026-10-23
 
 The first release on PyPI, as **`sashimi-convert`**. Builds labelled 0.5.1 were shared privately
@@ -204,7 +696,7 @@ lengths have none by default.
     `photo.jpg.resized.jpg.resized.jpg`, and `thumbs . -r --output-dir sheets` run twice writes
     nothing new. A name that is only another file's stem with a new extension (`photo.webp`
     under `{input_stem}.{output_ext}`) counts only in that file's folder. **Everything else is
-    processed, other commands' outputs included** (owner, 2026-10-21): `convert . webp` after
+    processed, other commands' outputs included**: `convert . webp` after
     `thumbs .` converts the sheets too, and `convert . jpeg` after `convert . webp` writes
     `photo.png.webp.jpeg`. The same goes for files named together, as a shell glob names them:
     a second `resize *.jpg` leaves out the `*.resized.jpg` files the first made, where it made
@@ -503,7 +995,7 @@ lengths have none by default.
 - `scripts/sandbox_check.sh` runs the preview, favicon pack, ICO background and remux too, and
   takes its image tag from `SASHIMI_SANDBOX_IMAGE`.
 - `MP3_SAMPLE_RATES` and `AAC_SAMPLE_RATES` in `sashimi.config`, next to `OPUS_SAMPLE_RATES`.
-- Tests that pin what FileSushi relies on (`tests/core/test_filesushi_contract.py`): `ConfigFamily.key`,
+- Tests that pin what callers rely on (`tests/core/test_api_contract.py`): `ConfigFamily.key`,
   `model_for` ignoring non-discriminating options, an `annotated_types.Le` in `model_fields` for
   every number with an upper bound, the `KEYFRAME_NOTE` text, and the `UserInputError(user_message,
   detail=…)` constructor of every user error. A real-ffmpeg test encodes every accepted MP3, AAC and
@@ -524,7 +1016,7 @@ lengths have none by default.
 
 - **Folders in name patterns:** a pattern may start with folders, made inside each input's own
   folder: `sashimi config set thumbs.output_name 'sheets/{input_name}.jpeg'` writes
-  `New folder/sheets/Bluebeard-5.mkv.jpeg` for `New folder/Bluebeard-5.mkv`, from any folder,
+  `Home videos/sheets/hike-5.mkv.jpeg` for `Home videos/hike-5.mkv`, from any folder,
   and with `-r` each folder gets its own `sheets/`. Reruns find the outputs there ("Exists"),
   and a run never processes them. `\` separates folders as `/` does, on every system. Patterns
   that would leave the input's folder are refused (absolute paths, drive letters, `~`, `.` and
@@ -594,7 +1086,6 @@ lengths have none by default.
   an SPDX copyright and licence header, which `tests/test_licensing.py` enforces.
 - The package's author is "The FileSushi Authors <admin@filesushi.com>", and its project URLs
   (homepage, repository, changelog, issues) point at `github.com/filesushi/sashimi`.
-- The sdist leaves out `CLAUDE.md` and `docs/FILESUSHI_HANDBACK.md`; the wheel already did.
 - The MP3 and M4A `sample_rate` descriptions say what leaving it unset does: the source's rate if
   the encoder supports it, otherwise the nearest one it does.
 - `BinaryNotFoundError` is also raised when ffmpeg or ffprobe exists but can't be started (for
@@ -616,7 +1107,7 @@ lengths have none by default.
 
 - **Messages say where an output is:** an output beside its input is named by its file name, any
   other by its path as built from the paths you gave ("Output already exists:
-  sheets/Bluebeard-5.mkv.jpeg", "Would write sheets/S01/ep1.mkv.sheet.jpg", "Contact sheet
+  sheets/hike-5.mkv.jpeg", "Would write sheets/S01/ep1.mkv.sheet.jpg", "Contact sheet
   created: …"). The "left out" line under the results shows paths too.
 - **`output`/`-o` must end in an extension of the output's format:** `convert photo.jpg webp -o
   out.png` used to write WebP data into `out.png`; it's now that file's error ("out.png must end
@@ -914,7 +1405,7 @@ name is **`sashimi-convert`** (the name `sashimi` is taken on PyPI); the import 
 - `sashimi.set_ffmpeg_paths(ffmpeg=..., ffprobe=...)` to use bundled binaries.
 - Optional extras: `[cli]` (typer, rich, tomlkit), `[emoji]` (pilmoji, offline only), `[heif]`
   (pillow-heif, for HEIC/HEIF input).
-- Every config exposes the encoder's main settings, with defaults that keep FileSushi's exact
+- Every config exposes the encoder's main settings, with defaults that keep the earlier
   commands: video `crf`, `preset`, `speed`, `audio_bitrate_kbps`, `mute`, and GIF `loop`, `dither`,
   `palette_mode`; audio `sample_rate`, `wav_bit_depth`, `flac_compression_level`; image
   `optimize` (all formats), `background_color`, `resample`, `jpeg_subsampling`, `webp_method`,

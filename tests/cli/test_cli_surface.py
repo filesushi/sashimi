@@ -82,7 +82,7 @@ def test_unknown_settings_warn(tmp_path):
     (tmp_path / "home" / "sashimi.toml").write_text("[thumbs]\noutput_width = 2560\nquality = 80\n")
     (tmp_path / "sashimi.toml").write_text("[thumbs]\ncols = 4\n[animated_thumbs]\nspeed = 2\n")
     result = runner.invoke(app, ["config", "show"], env={"COLUMNS": "300"})
-    warnings = [line for line in result.stderr.splitlines() if "Warning" in line]
+    warnings = " ".join(result.stderr.split()).split("Warning:")[1:]
     assert len(warnings) == 2
     assert "thumbs.output_width; they're ignored" in warnings[0] and "unset thumbs.output_width" in warnings[0]
     assert "animated_thumbs.speed;" in warnings[1] and "unset --project animated_thumbs.speed" in warnings[1]

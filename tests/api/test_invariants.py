@@ -130,7 +130,7 @@ def stub_processing(monkeypatch):
     for module, name in stubbed:
         monkeypatch.setattr(module, name, made)
     extract = importlib.import_module("sashimi.api.extract")
-    monkeypatch.setattr(extract, "_clip_message", lambda config, source, output: "Extracted to {name}")
+    monkeypatch.setattr(extract, "_clip_message", lambda *args: "Extracted to {name}")
 
 
 def folder(path, names=FIXTURE):
@@ -432,15 +432,18 @@ def test_naming_a_path_inside_a_named_folder_moves_no_output(tmp_path, command):
 
 
 @pytest.mark.parametrize("target", sorted(EXTENSIONS.keys() - {"zip", "mkv", "mov"}))
-def test_converts_formats_agree_with_the_names_formats(tmp_path, target):
+def test_converts_formats_agree_with_the_names_formats(tmp_path, target, monkeypatch):
+    from sashimi.api import convert
     from sashimi.api.convert import TARGET_SUFFIX, own_extensions
+
+    monkeypatch.setattr(convert, "_read_own", lambda path, target: (None, False))
 
     assert TARGET_SUFFIX[target] == f".{EXTENSIONS[target][0]}"
     for extension in EXTENSIONS[target]:
         source = tmp_path / f"x.{extension}"
         source.write_bytes(b"x")
         plan = api.convert_files_generator(source, target).plan()
-        if extension == "m4v":
+        if (target, extension) in (("mp4", "m4v"), ("apng", "png")):
             assert [item.action for item in plan.files] == ["write"]
         else:
             assert plan.already_done == (source,) and f".{extension}" in own_extensions(target)

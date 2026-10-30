@@ -7,9 +7,16 @@ import pathlib
 
 VIDEO_EXTENSIONS = (
     ".mp4", ".avi", ".mpg", ".ogm", ".wmv", ".asf", ".mkv", ".mov", ".m4v", ".flv", ".ts", ".webm", ".mpeg", ".3gp",
+    ".mk3d", ".m2ts", ".mts", ".3g2", ".vob", ".ogv", ".divx", ".f4v", ".y4m",
 )  # fmt: skip
-IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".heif")
-AUDIO_EXTENSIONS = (".mp3", ".wav", ".ogg", ".opus", ".oga", ".flac", ".m4a", ".aac", ".weba")
+IMAGE_EXTENSIONS = (
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".heif",
+    ".jfif", ".jpe", ".jif", ".apng", ".avif", ".ico", ".tga", ".psd",
+)  # fmt: skip
+AUDIO_EXTENSIONS = (
+    ".mp3", ".wav", ".ogg", ".opus", ".oga", ".flac", ".m4a", ".aac", ".weba", ".mka", ".m4b", ".mp2",
+    ".aiff", ".aif", ".aifc", ".ac3", ".eac3", ".dts", ".amr", ".caf", ".au", ".wv", ".wma", ".m4r",
+)  # fmt: skip
 
 KINDS = {"image": ("image", "images"), "video": ("video", "videos"), "audio": ("audio file", "audio files")}
 """Each kind's name in the singular and plural, as plans and prompts count them."""

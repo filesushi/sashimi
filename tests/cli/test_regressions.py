@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-One test per bug found in real use, and per rule the owner settled from one, run the way it was
+One test per bug found in real use, and per rule settled from one, run the way it was
 found: CLI commands one after another in one folder. A command processes other commands'
 outputs, each exactly once, and never its own. Video processing is stubbed; images are real.
 """
@@ -113,39 +113,39 @@ def test_resize_edit_convert_converts_each_file_once(tmp_path):
     assert len(files(tmp_path)) == 8
 
 
-def owners_layout(tmp_path):
-    videos = tmp_path / "New folder"
+def videos_with_sheets(tmp_path):
+    videos = tmp_path / "Home videos"
     (videos / "sheets").mkdir(parents=True)
     for number in (5, 6, 7):
-        (videos / f"Bluebeard-{number}.mkv").write_bytes(b"video")
-        Image.new("RGB", (8, 8)).save(videos / "sheets" / f"Bluebeard-{number}.mkv.jpeg", format="JPEG")
+        (videos / f"hike-{number}.mkv").write_bytes(b"video")
+        Image.new("RGB", (8, 8)).save(videos / "sheets" / f"hike-{number}.mkv.jpeg", format="JPEG")
     return videos
 
 
-def test_the_owners_layout_converts_videos_and_sheets_after_asking(tmp_path):
-    videos = owners_layout(tmp_path)
-    asked = runner.invoke(app, ["convert", "New folder", "webp", "-r"])
+def test_videos_and_their_sheets_are_converted_after_asking(tmp_path):
+    videos = videos_with_sheets(tmp_path)
+    asked = runner.invoke(app, ["convert", "Home videos", "webp", "-r"])
     assert asked.exit_code == 2
     flat = " ".join(asked.stderr.split())
-    assert "New folder contains 3 images and 3 videos, which convert handles differently." in flat
+    assert "Home videos contains 3 images and 3 videos, which convert handles differently." in flat
     assert "Pass -y to convert all 6 to WEBP" in flat
     assert sorted(p.name for p in videos.rglob("*") if p.is_file()) == [
-        "Bluebeard-5.mkv", "Bluebeard-5.mkv.jpeg", "Bluebeard-6.mkv", "Bluebeard-6.mkv.jpeg",
-        "Bluebeard-7.mkv", "Bluebeard-7.mkv.jpeg",
+        "hike-5.mkv", "hike-5.mkv.jpeg", "hike-6.mkv", "hike-6.mkv.jpeg",
+        "hike-7.mkv", "hike-7.mkv.jpeg",
     ]  # fmt: skip
-    done = report("convert", "New folder", "webp", "-r", "-y")
+    done = report("convert", "Home videos", "webp", "-r", "-y")
     assert [pathlib.PurePath(output).name for _, output in written(done)] == [
-        "Bluebeard-5.mkv.webp", "Bluebeard-6.mkv.webp", "Bluebeard-7.mkv.webp",
-        "Bluebeard-5.mkv.jpeg.webp", "Bluebeard-6.mkv.jpeg.webp", "Bluebeard-7.mkv.jpeg.webp",
+        "hike-5.mkv.webp", "hike-6.mkv.webp", "hike-7.mkv.webp",
+        "hike-5.mkv.jpeg.webp", "hike-6.mkv.jpeg.webp", "hike-7.mkv.jpeg.webp",
     ]  # fmt: skip
-    assert written(report("convert", "New folder", "webp", "-r", "-y")) == []
+    assert written(report("convert", "Home videos", "webp", "-r", "-y")) == []
 
 
 def test_converting_the_sheets_folder_converts_only_the_sheets(tmp_path):
-    videos = owners_layout(tmp_path)
+    videos = videos_with_sheets(tmp_path)
     done = report("convert", str(videos / "sheets"), "webp")
     assert [pathlib.PurePath(output).name for _, output in written(done)] == [
-        "Bluebeard-5.mkv.jpeg.webp", "Bluebeard-6.mkv.jpeg.webp", "Bluebeard-7.mkv.jpeg.webp",
+        "hike-5.mkv.jpeg.webp", "hike-6.mkv.jpeg.webp", "hike-7.mkv.jpeg.webp",
     ]  # fmt: skip
 
 
@@ -256,16 +256,16 @@ def test_flatten_asks_before_removing_empty_folders(tmp_path):
 
 
 def test_messages_say_which_folder_an_output_is_in(tmp_path):
-    (tmp_path / "New folder").mkdir()
-    (tmp_path / "New folder" / "Bluebeard-5.mkv").write_bytes(b"video")
-    sashimi("thumbs", "New folder", "--output-dir", "sheets")
-    again = report("thumbs", "New folder", "--output-dir", "sheets")
-    shown = str(pathlib.Path("sheets") / "Bluebeard-5.mkv.sheet.jpg")
+    (tmp_path / "Home videos").mkdir()
+    (tmp_path / "Home videos" / "hike-5.mkv").write_bytes(b"video")
+    sashimi("thumbs", "Home videos", "--output-dir", "sheets")
+    again = report("thumbs", "Home videos", "--output-dir", "sheets")
+    shown = str(pathlib.Path("sheets") / "hike-5.mkv.sheet.jpg")
     assert again["results"][0]["message"] == f"Output already exists: {shown}"
-    dry = report("thumbs", "New folder", "--output-dir", "sheets", "-f", "-n")
+    dry = report("thumbs", "Home videos", "--output-dir", "sheets", "-f", "-n")
     assert dry["results"][0]["message"] == f"Would replace {shown} (the existing file)"
-    here = report("thumbs", "New folder")
-    assert here["results"][0]["message"] == "Contact sheet created: Bluebeard-5.mkv.sheet.jpg"
+    here = report("thumbs", "Home videos")
+    assert here["results"][0]["message"] == "Contact sheet created: hike-5.mkv.sheet.jpg"
 
 
 @pytest.mark.parametrize("command", ["info", "metadata"])
@@ -283,7 +283,7 @@ def test_a_folder_given_to_info_or_metadata_is_called_a_folder(tmp_path, command
 def test_rotate_says_what_it_did(tmp_path, angle, flip, said):
     Image.new("RGB", (16, 8), "red").save(tmp_path / "photo.jpg")
     row = report("rotate", "photo.jpg", angle, "--flip", flip)["results"][0]
-    assert row["message"] == f"{said} photo.jpg.rotated.jpg"
+    assert row["message"] == f"{said} photo.jpg.rotated.jpg (lossy: saved as JPEG at quality 92)"
 
 
 def test_an_empty_search_says_what_the_command_works_on(tmp_path):
@@ -303,29 +303,29 @@ def test_an_earlier_output_in_a_pattern_folder_is_reported_as_one(tmp_path):
     assert again["outputs_left_out"] == [{"file": shown, "made_from": "poster.jpg"}]
 
 
-def bluebeard(tmp_path):
-    folder = tmp_path / "Videos" / "New folder"
+def home_videos(tmp_path):
+    folder = tmp_path / "Videos" / "Home videos"
     folder.mkdir(parents=True)
     for n in (5, 6, 7):
-        (folder / f"Bluebeard-{n}.mkv").write_bytes(b"video")
+        (folder / f"hike-{n}.mkv").write_bytes(b"video")
     return folder
 
 
 def test_a_setting_saved_inside_a_folder_applies_from_anywhere(tmp_path):
-    folder = bluebeard(tmp_path)
+    folder = home_videos(tmp_path)
     os.chdir(folder)
     sashimi("config", "set", "thumbs.output_name", "sheets/{input_name}.jpeg")
-    sheets = [str(pathlib.Path("New folder", "sheets", f"Bluebeard-{n}.mkv.jpeg")) for n in (5, 6, 7)]
+    sheets = [str(pathlib.Path("Home videos", "sheets", f"hike-{n}.mkv.jpeg")) for n in (5, 6, 7)]
     os.chdir(folder.parent)
-    assert [r["output"] for r in report("thumbs", "New folder", "-n")["results"]] == sheets
-    assert [r["output"] for r in report("thumbs", "New folder", "-r", "-n")["results"]] == sheets
+    assert [r["output"] for r in report("thumbs", "Home videos", "-n")["results"]] == sheets
+    assert [r["output"] for r in report("thumbs", "Home videos", "-r", "-n")["results"]] == sheets
     os.chdir(tmp_path)
     planned = report("thumbs", str(folder), "-n")["results"]
-    assert [r["output"] for r in planned] == [str(folder / "sheets" / f"Bluebeard-{n}.mkv.jpeg") for n in (5, 6, 7)]
+    assert [r["output"] for r in planned] == [str(folder / "sheets" / f"hike-{n}.mkv.jpeg") for n in (5, 6, 7)]
     os.chdir(folder.parent)
-    assert report("thumbs", "New folder", "-r")["summary"]["success"] == 3
-    assert report("thumbs", "New folder", "-r")["summary"]["exists"] == 3
-    assert files(folder) == ["Bluebeard-5.mkv", "Bluebeard-6.mkv", "Bluebeard-7.mkv"]
+    assert report("thumbs", "Home videos", "-r")["summary"]["success"] == 3
+    assert report("thumbs", "Home videos", "-r")["summary"]["exists"] == 3
+    assert files(folder) == ["hike-5.mkv", "hike-6.mkv", "hike-7.mkv"]
 
 
 def test_config_set_and_unset_say_which_file_they_changed(tmp_path):
@@ -529,12 +529,14 @@ def test_every_processing_command_runs_with_the_limits_in_sashimi_toml(tmp_path,
     assert seen.get("limits") is not None and seen["limits"].max_pixels == 1234, command
 
 
-def test_strip_keeps_to_the_pixel_limit_in_sashimi_toml(tmp_path):
+def test_strip_decodes_no_pixels_so_the_pixel_limit_does_not_apply(tmp_path):
     Image.new("RGB", (20, 20), "red").save(tmp_path / "photo.png")
     sashimi("config", "set", "limits.max_pixels", "100")
     result = runner.invoke(app, ["strip", "photo.png", "--json"])
-    assert json.loads(result.stdout)["results"][0]["status"] == "error"
-    assert files(tmp_path) == ["photo.png"]
+    assert json.loads(result.stdout)["results"][0]["status"] == "success"
+    assert files(tmp_path) == ["photo.png", "photo.png.stripped.png"]
+    convert = runner.invoke(app, ["convert", "photo.png", "jpeg", "--json"])
+    assert json.loads(convert.stdout)["results"][0]["status"] == "error"
 
 
 @pytest.mark.parametrize("command", sorted(PROCESSING))

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
 
 import pytest
 from PIL import Image
@@ -74,7 +75,10 @@ def test_convert_command(tmp_path):
     result = runner.invoke(app, ["convert", "a.png", "webp", "--width", "50", "-q", "70%", "--json"])
     assert result.exit_code == 0, result.output
     report = json.loads(result.stdout)
-    assert (report["command"], report["results"][0]["message"]) == ("convert", "Converted to a.png.webp")
+    assert (report["command"], report["results"][0]["message"]) == (
+        "convert",
+        "Converted to a.png.webp (lossy: saved as WebP at quality 70, scaled to 50x25)",
+    )
     assert report["results"][0]["output"] == "a.png.webp"
     with Image.open(tmp_path / "a.png.webp") as img:
         assert img.size == (50, 25) and img.mode == "RGBA"
@@ -145,6 +149,7 @@ def test_extract_refuses_bad_times_before_running(tmp_path):
 
 
 @needs_ffmpeg
+@pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")
 def test_thumbs_command_with_symlinked_input(video_blob, tmp_path):
     (tmp_path / "holiday.mkv").symlink_to(video_blob)
     result = runner.invoke(app, ["thumbs", "holiday.mkv", "--width", "400", "--cols", "2", "--rows", "1", "--json"])

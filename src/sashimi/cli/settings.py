@@ -16,6 +16,7 @@ limits every command runs with; see :mod:`sashimi.cli._limits`), and one per pro
 
 import copy
 import logging
+import os
 import pathlib
 import tomllib
 import tomlkit
@@ -230,7 +231,15 @@ NAMED_SECTIONS = ("convert", "remux", "resize", "rotate", "extract", "edit", "fr
 """Sections that hold only where outputs go (``output_name``, ``output_dir``), one per command."""
 OUTPUT_KEYS = frozenset({"output_name", "output_dir"})
 """The keys every processing command's section takes: its name pattern and its output folder."""
-SECTIONS = ("thumbs", "animated_thumbs", "limits", *NAMED_SECTIONS)
+COMMAND_KEYS: dict[str, frozenset[str]] = {
+    "convert": frozenset({"animated", "keep_hdr"}),
+    "resize": frozenset({"animated"}),
+    "edit": frozenset({"animated"}),
+    "rotate": frozenset({"keep_hdr", "reencode"}),
+    "extract": frozenset({"keep_hdr"}),
+}
+"""Settings a command's section takes besides where its outputs go: true/false switches."""
+SECTIONS = ("thumbs", "animated_thumbs", "limits", *NAMED_SECTIONS, "ffmpeg")
 
 
 def known_keys(section: str) -> frozenset[str]:
@@ -241,8 +250,10 @@ def known_keys(section: str) -> frozenset[str]:
         from sashimi.cli._limits import KINDS
 
         return frozenset(KINDS)
+    if section == "ffmpeg":
+        return frozenset({"path"})
     if section in NAMED_SECTIONS:
-        return OUTPUT_KEYS
+        return OUTPUT_KEYS | COMMAND_KEYS.get(section, frozenset())
     from sashimi.config import CONTACT_SHEET
 
     animated = section == "animated_thumbs"
@@ -335,12 +346,43 @@ def output_dir_setting(section: str, raw: dict[str, Any] | None = None) -> Any:
     return _section(raw, section).get("output_dir")
 
 
+def command_setting(section: str, key: str, raw: dict[str, Any] | None = None) -> Any:
+    """A switch in `section` (see :data:`COMMAND_KEYS`), such as ``animated`` in ``[convert]``, or None."""
+    if raw is None:
+        raw, _ = load_raw_config()
+    return _section(raw, section).get(key)
+
+
 def output_name_origin(section: str, key: str = "output_name") -> str:
     """Where `key` in `section` is set, for messages: ``output_name in [thumbs] of /home/user/sashimi.toml``."""
     for path in (find_project_config_path(), get_user_config_path()):
         if path is not None and key in _section(_load_config_file(path), section):
             return f"{key} in [{section}] of {path}"
     return f"{key} in [{section}] of sashimi.toml"
+
+
+def ffmpeg_setting() -> tuple[str, str, str] | None:
+    """
+    The FFmpeg kept with ``sashimi config set ffmpeg.path`` (``~`` expanded), where it is set,
+    and the commands that change it there, or None.
+    """
+    raw, _ = load_raw_config()
+    value = _section(raw, "ffmpeg").get("path")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    project = find_project_config_path()
+    scope = ""
+    origin = "ffmpeg.path in sashimi.toml"
+    for path in (project, get_user_config_path()):
+        if path is not None and "path" in _section(_load_config_file(path), "ffmpeg"):
+            origin = f"ffmpeg.path in {path}"
+            scope = " --project" if path == project else ""
+            break
+    fix = (
+        f"Run sashimi config set{scope} ffmpeg.path <an FFmpeg's ffmpeg>, or sashimi config unset{scope} "
+        "ffmpeg.path so sashimi uses the FFmpeg on PATH."
+    )
+    return os.path.expanduser(value.strip()), origin, fix
 
 
 def video_extensions() -> list[str] | None:

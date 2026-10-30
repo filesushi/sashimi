@@ -4,6 +4,7 @@
 """Header and timestamp rendering for contact sheets. Local fonts only; never touches the network."""
 
 import datetime
+import math
 import functools
 import io
 import logging
@@ -39,9 +40,12 @@ def load_font(font_path: str | None, size: int) -> Font:
     return ImageFont.load_default(size=size)
 
 
-def format_duration(seconds: float | None) -> str:
+def format_duration(seconds: float | None, tenths: bool = False) -> str:
+    """``01:05`` (or ``1:01:05``); with `tenths`, ``00:00.4``, for videos shorter than a second."""
     if seconds is None:
         return "N/A"
+    if tenths and seconds < 60:
+        return f"00:{math.floor(seconds * 10) / 10:04.1f}"
     total = int(datetime.timedelta(seconds=int(seconds)).total_seconds())
     hours, remainder = divmod(total, 3600)
     minutes, secs = divmod(remainder, 60)

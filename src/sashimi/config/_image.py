@@ -29,6 +29,11 @@ class _Transparency(ParamsModel):
     """Keep alpha; when False, transparent areas are flattened onto ``background_color``."""
 
 
+class _Animated(ParamsModel):
+    animated: bool = True
+    """Keep an animated source (GIF, WebP, APNG, AVIF) animated. Off gives its first frame, as a still image."""
+
+
 class _Metadata(SourceMetadata):
     keep_icc: bool = True
     """Keep the colour profile, so wide-gamut photos keep their colours."""
@@ -77,6 +82,31 @@ class _GifSave(ParamsModel):
     """Drop unused palette entries."""
 
 
+class _AvifSave(ParamsModel):
+    target: Annotated[Literal["avif"], TargetName] = "avif"
+    """The output format."""
+    quality: _Quality = 75
+    """
+    1 (smallest) to 100 (best). AVIF is always lossy here. At the default, photos come out around
+    the size of WebP's default (smaller or larger, depending on the photo) and at least as close to
+    the source; animations smaller, but softer.
+    """
+    avif_speed: int = Field(default=9, ge=0, le=10)
+    """
+    Encoder speed, 0 (slowest) to 10 (fastest). The default costs about what WebP does; slower
+    speeds cost many times more CPU and memory for files about 10% smaller.
+    """
+
+
+class _ApngSave(ParamsModel):
+    target: Annotated[Literal["apng"], TargetName] = "apng"
+    """The output format."""
+    png_compress_level: int = Field(default=6, ge=0, le=9)
+    """zlib level, 0 (none) to 9 (smallest). Lossless either way."""
+    optimize: bool = False
+    """Search for the smallest encoding. Can take tens of seconds on large images."""
+
+
 class _BmpSave(ParamsModel):
     target: Annotated[Literal["bmp"], TargetName] = "bmp"
     """The output format."""
@@ -95,16 +125,33 @@ class JpegImageConfig(_JpegSave, _Metadata, _ImageBase):
     """A JPEG image. Transparency is always flattened onto ``background_color``."""
 
 
-class PngImageConfig(_PngSave, _Metadata, _Transparency, _ImageBase):
-    """A PNG image (always lossless)."""
+class PngImageConfig(_PngSave, _Animated, _Metadata, _Transparency, _ImageBase):
+    """
+    A PNG image (always lossless). An animated source stays animated, as an animated PNG (APNG)
+    in a ``.png`` file, unless ``animated`` is off.
+    """
 
 
-class WebpImageConfig(_WebpSave, _Metadata, _Transparency, _ImageBase):
-    """A WebP image."""
+class WebpImageConfig(_WebpSave, _Animated, _Metadata, _Transparency, _ImageBase):
+    """A WebP image. An animated source stays animated unless ``animated`` is off."""
 
 
-class GifImageConfig(_GifSave, SourceMetadata, _Transparency, _ImageBase):
-    """A static GIF (the first frame of an animated input). Of the source's metadata, GIFs hold only comments."""
+class GifImageConfig(_GifSave, _Animated, SourceMetadata, _Transparency, _ImageBase):
+    """
+    A GIF. An animated source stays animated unless ``animated`` is off. Of the source's
+    metadata, GIFs hold only comments.
+    """
+
+
+class AvifImageConfig(_AvifSave, _Animated, _Metadata, _Transparency, _ImageBase):
+    """An AVIF image (lossy). An animated source stays animated unless ``animated`` is off."""
+
+
+class ApngImageConfig(_ApngSave, _Animated, _Metadata, _Transparency, _ImageBase):
+    """
+    An animated PNG (lossless). An animated source stays animated unless ``animated`` is off; a
+    still source gives a plain PNG, which every APNG reader shows.
+    """
 
 
 class BmpImageConfig(_BmpSave, _ImageBase):
@@ -137,6 +184,14 @@ class WebpResizeConfig(_NeedsSize, WebpImageConfig):
 
 class GifResizeConfig(_NeedsSize, GifImageConfig):
     """Like :class:`GifImageConfig`, but `max_width` or `max_height` is required."""
+
+
+class AvifResizeConfig(_NeedsSize, AvifImageConfig):
+    """Like :class:`AvifImageConfig`, but `max_width` or `max_height` is required."""
+
+
+class ApngResizeConfig(_NeedsSize, ApngImageConfig):
+    """Like :class:`ApngImageConfig`, but `max_width` or `max_height` is required."""
 
 
 class BmpResizeConfig(_NeedsSize, BmpImageConfig):
@@ -216,11 +271,25 @@ class FaviconPackConfig(ParamsModel):
 
 
 ImageConvertConfig = (
-    JpegImageConfig | PngImageConfig | WebpImageConfig | GifImageConfig | BmpImageConfig | TiffImageConfig
+    JpegImageConfig
+    | PngImageConfig
+    | WebpImageConfig
+    | GifImageConfig
+    | BmpImageConfig
+    | TiffImageConfig
+    | AvifImageConfig
+    | ApngImageConfig
 )
 """Any image config: one model per output format."""
 ImageResizeConfig = (
-    JpegResizeConfig | PngResizeConfig | WebpResizeConfig | GifResizeConfig | BmpResizeConfig | TiffResizeConfig
+    JpegResizeConfig
+    | PngResizeConfig
+    | WebpResizeConfig
+    | GifResizeConfig
+    | BmpResizeConfig
+    | TiffResizeConfig
+    | AvifResizeConfig
+    | ApngResizeConfig
 )
 """Any image resize config."""
 
@@ -233,9 +302,11 @@ IMAGE_CONVERT: ConfigFamily[ImageConvertConfig] = ConfigFamily(
         "gif": GifImageConfig,
         "bmp": BmpImageConfig,
         "tiff": TiffImageConfig,
+        "avif": AvifImageConfig,
+        "apng": ApngImageConfig,
     },
 )
-"""Image conversion, by ``target``: jpeg, png, webp, gif, bmp, tiff (``jpg``/``tif`` accepted)."""
+"""Image conversion, by ``target``: jpeg, png, webp, gif, bmp, tiff, avif, apng (``jpg``/``tif`` accepted)."""
 
 IMAGE_RESIZE: ConfigFamily[ImageResizeConfig] = ConfigFamily(
     "image resize",
@@ -246,6 +317,8 @@ IMAGE_RESIZE: ConfigFamily[ImageResizeConfig] = ConfigFamily(
         "gif": GifResizeConfig,
         "bmp": BmpResizeConfig,
         "tiff": TiffResizeConfig,
+        "avif": AvifResizeConfig,
+        "apng": ApngResizeConfig,
     },
 )
 """Image resizing, by ``target``: the image configs with `max_width` or `max_height` required."""
@@ -297,19 +370,22 @@ class JpegEditConfig(_JpegSave, _Metadata, _Edit):
     """1 (smallest) to 100 (best). Edits are re-saved at high quality by default."""
 
 
-class PngEditConfig(_PngSave, _Metadata, _Edit):
-    """An edited PNG (lossless). Transparency is kept."""
+class PngEditConfig(_PngSave, _Animated, _Metadata, _Edit):
+    """
+    An edited PNG (lossless). Transparency is kept; an animation stays animated, as an animated
+    PNG (APNG) in a ``.png`` file, with every frame edited, unless ``animated`` is off.
+    """
 
 
-class WebpEditConfig(_WebpSave, _Metadata, _Edit):
-    """An edited WebP. Transparency and animation are kept; every frame of an animation is edited."""
+class WebpEditConfig(_WebpSave, _Animated, _Metadata, _Edit):
+    """An edited WebP. Transparency and animation are kept (every frame edited) unless ``animated`` is off."""
 
     quality: _Quality = EDIT_QUALITY
     """Lossy quality, or compression effort when ``lossless``. Edits are re-saved at high quality by default."""
 
 
-class GifEditConfig(_GifSave, SourceMetadata, _Edit):
-    """An edited GIF. Transparency and animation are kept; every frame of an animation is edited."""
+class GifEditConfig(_GifSave, _Animated, SourceMetadata, _Edit):
+    """An edited GIF. Transparency and animation are kept (every frame edited) unless ``animated`` is off."""
 
 
 class BmpEditConfig(_BmpSave, _Edit):
@@ -323,7 +399,27 @@ class TiffEditConfig(_TiffSave, _Metadata, _Edit):
     """Used only with JPEG compression, which also flattens transparency."""
 
 
-ImageEditConfig = JpegEditConfig | PngEditConfig | WebpEditConfig | GifEditConfig | BmpEditConfig | TiffEditConfig
+class AvifEditConfig(_AvifSave, _Animated, _Metadata, _Edit):
+    """An edited AVIF (lossy). Transparency and animation are kept (every frame edited) unless ``animated`` is off."""
+
+    quality: _Quality = EDIT_QUALITY
+    """1 (smallest) to 100 (best). Edits are re-saved at high quality by default."""
+
+
+class ApngEditConfig(_ApngSave, _Animated, _Metadata, _Edit):
+    """An edited animated PNG (lossless). Transparency and animation are kept (every frame edited) unless ``animated`` is off."""
+
+
+ImageEditConfig = (
+    JpegEditConfig
+    | PngEditConfig
+    | WebpEditConfig
+    | GifEditConfig
+    | BmpEditConfig
+    | TiffEditConfig
+    | AvifEditConfig
+    | ApngEditConfig
+)
 """Any image edit config: one model per output format."""
 
 IMAGE_EDIT: ConfigFamily[ImageEditConfig] = ConfigFamily(
@@ -335,10 +431,12 @@ IMAGE_EDIT: ConfigFamily[ImageEditConfig] = ConfigFamily(
         "gif": GifEditConfig,
         "bmp": BmpEditConfig,
         "tiff": TiffEditConfig,
+        "avif": AvifEditConfig,
+        "apng": ApngEditConfig,
     },
 )
 """
-Image editing, by ``target``: jpeg, png, webp, gif, bmp, tiff (``jpg``/``tif`` accepted). Pass the
+Image editing, by ``target``: jpeg, png, webp, gif, bmp, tiff, avif, apng (``jpg``/``tif`` accepted). Pass the
 source's own format to keep it (``sashimi.image.frames_info(path).edit_target``).
 """
 
@@ -393,13 +491,40 @@ class WebpFramesConfig(_WebpSave, _Metadata, _Frames):
     """Lossy quality, or compression effort when ``lossless``. Frames are re-saved at high quality by default."""
 
 
-FramesConfig = GifFramesConfig | WebpFramesConfig
+class AvifFramesConfig(_AvifSave, _Metadata, _Frames):
+    """An animated AVIF with some of its frames, at a new speed."""
+
+    quality: _Quality = EDIT_QUALITY
+    """1 (smallest) to 100 (best). Frames are re-saved at high quality by default."""
+
+
+class ApngFramesConfig(_ApngSave, _Metadata, _Frames):
+    """An animated PNG with some of its frames, at a new speed."""
+
+
+class PngFramesConfig(_PngSave, _Metadata, _Frames):
+    """An animated PNG (APNG) in a ``.png`` file with some of its frames, at a new speed: the same as ``apng``."""
+
+
+FramesConfig = GifFramesConfig | WebpFramesConfig | AvifFramesConfig | ApngFramesConfig | PngFramesConfig
 """Any frame selection config."""
 
 IMAGE_FRAMES: ConfigFamily[FramesConfig] = ConfigFamily(
-    "image frames", {"gif": GifFramesConfig, "webp": WebpFramesConfig}
+    "image frames",
+    {
+        "gif": GifFramesConfig,
+        "webp": WebpFramesConfig,
+        "avif": AvifFramesConfig,
+        "apng": ApngFramesConfig,
+        "png": PngFramesConfig,
+    },
 )
-"""Frame selection and speed for animated images, by ``target``: gif or webp. Pass the source's own format to keep it."""
+"""
+Frame selection and speed for animated images, by ``target``: gif, webp, avif, apng, or png (an
+animated PNG in a ``.png`` file). Pass the source's own format to keep it.
+"""
+ANIMATED_SAVES = (_GifSave, _WebpSave, _AvifSave, _ApngSave, _PngSave)
+"""The save options of the formats that hold animation."""
 
 
 class FrameStripConfig(ParamsModel):

@@ -11,7 +11,7 @@ from typing import Annotated, List, Optional
 import typer
 
 from sashimi.cli import _options as opt
-from sashimi.cli._output import BatchRunner, console, display_path, fail, refusals
+from sashimi.cli._output import BatchRunner, console, display_path, fail, print_fields, refusal, refusals
 
 _LABELS = (
     ("carriers", "Found in"),
@@ -27,6 +27,7 @@ _LABELS = (
     ("creation_time", "Created"),
     ("comment", "Comment"),
     ("has_color_profile", "Colour profile"),
+    ("display_rotation", "Shown turned"),
 )
 
 
@@ -48,36 +49,34 @@ def metadata_cmd(
     try:
         info = read(path, limits=Limits.unlimited())
     except UserInputError as e:
-        fail(e.user_message, code=1)
+        fail(refusal(e), code=1)
     except SashimiError as e:
         fail(str(e).splitlines()[0], code=1)
     if json_output:
         print(info.model_dump_json(indent=2))
         return
 
-    from rich.table import Table
-
-    table = Table(show_header=False, box=None, padding=(0, 2))
-    table.add_column(style="bold cyan", justify="right")
-    table.add_column()
-    table.add_row("File", display_path(path))
+    rows = [("File", display_path(path))]
     for field, label in _LABELS:
         value = getattr(info, field)
         if field == "carriers":
-            table.add_row(label, ", ".join(value) if value else "nothing sashimi knows of")
+            rows.append((label, ", ".join(value) if value else "nothing sashimi knows of"))
         elif field == "has_location":
             if value and info.latitude is not None and info.longitude is not None:
-                table.add_row(label, f"{info.latitude:.6f}, {info.longitude:.6f}")
+                rows.append((label, f"{info.latitude:.6f}, {info.longitude:.6f}"))
             elif value:
-                table.add_row(label, "yes")
+                rows.append((label, "yes"))
         elif field == "has_color_profile":
             if value:
-                table.add_row(label, "yes")
+                rows.append((label, "yes"))
+        elif field == "display_rotation":
+            if value:
+                rows.append((label, f"{value}° clockwise (display rotation; kept by every --remove mode)"))
         elif value:
-            table.add_row(label, str(value))
+            rows.append((label, str(value)))
     for key, value in info.tags.items():
-        table.add_row(key, value)
-    console.print(table)
+        rows.append((key, value))
+    print_fields(rows)
 
 
 def strip_cmd(
@@ -104,11 +103,11 @@ def strip_cmd(
     dry_run: opt.DryRun = False,
     json_output: opt.JsonOutput = False,
     limit_output: opt.LimitOutput = 50,
-    max_pixels: opt.MaxPixels = None,
 ):
     """
     Remove metadata (camera, dates, GPS, titles, comments) from images, videos and audio without
-    re-encoding: the pictures and sound are copied as they are. Writes
+    re-encoding: the pictures and sound are copied as they are (HEIC and AVIF too, gain maps
+    and depth included). Writes
     [cyan]clip.mov.stripped.mov[/cyan] for clip.mov, in the file's own format, next to each file,
     under --output-dir, or to -o for a single file; [cyan]--output-name '{input_name}' -f[/cyan]
     strips files in place. Removal is best effort: it covers the places sashimi knows metadata
@@ -118,7 +117,7 @@ def strip_cmd(
     from sashimi.cli import _limits
 
     opt.single_file_or_fail(paths, output)
-    limits = _limits.resolve(max_pixels=max_pixels)
+    limits = _limits.resolve()
     chosen = opt.enum_value(mode) or "remove_all"
     runner = BatchRunner(
         "strip",

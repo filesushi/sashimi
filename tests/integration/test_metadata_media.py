@@ -156,7 +156,7 @@ def framemd5(path):
 @pytest.mark.parametrize("source", ["mov", "mkv", "mp3", "flac"])
 def test_strip_copies_every_stream_without_its_metadata(tagged, tmp_path, source, mode):
     out = tmp_path / "out"
-    extension = metadata.strip(tagged[source], out, mode)
+    extension = metadata.strip(tagged[source], out, mode).format
     assert extension == source
     assert framemd5(out) == framemd5(tagged[source])
     video_source = source in ("mov", "mkv")
@@ -179,3 +179,121 @@ def test_build_strip_command_is_pure_and_copies(tagged):
     info = probe(tagged["mov"])
     cmd = metadata.build_strip_command("in", "out", "remove_all", source=info, muxer="mov", ffmpeg="ffmpeg")
     assert cmd[cmd.index("-c") + 1] == "copy" and "-map_metadata" in cmd and "-map_chapters" in cmd
+
+
+QUICKTIME_JOBS = ["mp4 copy", "mp4 copy_video", "mp4 encode", "remux mov", "remux mp4", "accurate cut", "rotate"]
+NOT_CONTENT = {"major_brand", "minor_version", "compatible_brands", "encoder"}
+
+
+def _format_tags(path):
+    """The file's tags as sashimi reads them (FFmpeg 9.0's ffprobe states a repeated creation time twice)."""
+    from sashimi import probe
+
+    return {key.lower(): value for key, value in probe(path).tags.items()}
+
+
+@pytest.mark.parametrize("mode", ["keep", "remove_location"])
+@pytest.mark.parametrize("job", QUICKTIME_JOBS + ["m4a"])
+def test_mp4_mov_and_m4a_keep_every_tag_the_mode_keeps(tagged, tmp_path, job, mode):
+    if job == "m4a":
+        source = tagged["mov"]
+        out = tmp_path / "out"
+        audio.convert(source, out, AUDIO_CONVERT.from_params({"metadata": mode}, target="m4a"))
+    else:
+        name, run = VIDEO_JOBS[job]
+        source, out = tagged[name], tmp_path / "out"
+        run(source, out, mode)
+    before, after = _format_tags(source), _format_tags(out)
+    expected = {
+        key: value
+        for key, value in before.items()
+        if key not in NOT_CONTENT and not (mode == "remove_location" and ("location" in key or "6709" in key))
+    }
+    assert {key: after.get(key) for key in expected} == expected, after
+    assert after.get("major_brand") != "qt  " or out.read_bytes()[8:12] == b"qt  "
+    if name_is_mov(source):
+        assert after["creation_time"] == samples.CREATED
+        assert after["firmware"] == "HD8.01" and after["com.apple.quicktime.make"] == "SASHIMI-PRIVACY-MARKER-make"
+
+
+def name_is_mov(path):
+    return "mov" in ffprobe(path)["format"]["format_name"]
+
+
+@pytest.mark.parametrize("job", QUICKTIME_JOBS)
+def test_tagged_mp4_and_mov_outputs_are_byte_identical_on_a_rerun(tagged, tmp_path, job):
+    name, run = VIDEO_JOBS[job]
+    run(tagged[name], tmp_path / "a", "keep")
+    run(tagged[name], tmp_path / "b", "keep")
+    assert (tmp_path / "a").read_bytes() == (tmp_path / "b").read_bytes()
+
+
+@pytest.mark.parametrize("container", ["mkv", "webm"])
+def test_matroska_and_webm_outputs_hold_no_file_type_tags_and_mp4_creation_times_read_once(tagged, tmp_path, container):
+    out = tmp_path / "out"
+    if container == "mkv":
+        video.trim(tagged["mov"], out, VIDEO_TRIM.from_params({"container": "mkv"}))
+    else:
+        video.convert(tagged["mov"], out, VIDEO_CONVERT.from_params({"crf": 50}, target="webm"))
+    tags = {key.lower() for key in ffprobe(out)["format"].get("tags", {})}
+    assert not tags & {"major_brand", "minor_version", "compatible_brands"}, tags
+    assert "firmware" in tags
+    mp4 = tmp_path / "out.mp4"
+    video.trim(tagged["mov"], mp4, VIDEO_TRIM.from_params({"container": "mp4"}))
+    from sashimi import probe
+
+    assert probe(mp4).tags["creation_time"] == samples.CREATED
+
+
+MATROSKA_JOBS = {
+    "remux mkv": lambda s, o, m: video.trim(s, o, VIDEO_TRIM.from_params({"metadata": m, "container": "mkv"})),
+    "lossless cut mkv": lambda s, o, m: video.trim(
+        s, o, VIDEO_TRIM.from_params({"metadata": m, "container": "mkv", "end_seconds": 1.5})
+    ),
+    "accurate cut webm": lambda s, o, m: video.trim(
+        s, o, VIDEO_TRIM.from_params({"metadata": m, "container": "webm", "accurate": True, "end_seconds": 1})
+    ),
+    "webm": lambda s, o, m: video.convert(s, o, VIDEO_CONVERT.from_params({"metadata": m, "crf": 50}, target="webm")),
+    "rotate webm": lambda s, o, m: video.transform(
+        s, o, VIDEO_TRANSFORM.from_params({"metadata": m, "rotate": 90, "crf": 50}, target="webm")
+    ),
+}
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("job", list(MATROSKA_JOBS))
+def test_matroska_and_webm_outputs_carry_the_creation_time_unless_everything_is_removed(tagged, tmp_path, job, mode):
+    out = tmp_path / "out"
+    MATROSKA_JOBS[job](tagged["mov"], out, mode)
+    tags = _format_tags(out)
+    if mode == "remove_all":
+        assert "creation_time" not in tags
+    else:
+        assert tags["creation_time"] == samples.CREATED
+        assert ffprobe(out)["format"]["tags"]["creation_time"] == samples.CREATED
+        MATROSKA_JOBS[job](tagged["mov"], tmp_path / "again", mode)
+        assert (tmp_path / "again").read_bytes() == out.read_bytes()
+
+
+@pytest.mark.parametrize("job", list(MATROSKA_JOBS))
+def test_matroska_and_webm_outputs_of_an_undated_source_record_no_creation_time(tagged, tmp_path, job):
+    undated = tmp_path / "undated.mov"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-i", str(tagged["mov"]), "-map", "0:v", "-map", "0:a", "-c", "copy",
+         "-map_metadata", "-1", "-f", "mov", str(undated)],
+        check=True,
+    )  # fmt: skip
+    out = tmp_path / "out"
+    MATROSKA_JOBS[job](undated, out, "keep")
+    assert "creation_time" not in _format_tags(out)
+    assert b"\x44\x61\x88" not in out.read_bytes()[:4096]
+
+
+def test_stripping_a_dated_matroska_file_keeps_its_creation_time(tagged, tmp_path):
+    dated = tmp_path / "dated.mkv"
+    video.trim(tagged["mov"], dated, VIDEO_TRIM.from_params({"container": "mkv"}))
+    out = tmp_path / "out.mkv"
+    metadata.strip(dated, out, "remove_location")
+    assert _format_tags(out)["creation_time"] == samples.CREATED
+    metadata.strip(dated, tmp_path / "all.mkv", "remove_all")
+    assert "creation_time" not in _format_tags(tmp_path / "all.mkv")

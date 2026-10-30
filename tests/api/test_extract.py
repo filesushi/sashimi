@@ -9,7 +9,7 @@ from sashimi import probe
 from sashimi.api.extract import extract, extract_generator
 from sashimi.errors import InvalidOptionsError
 
-from tests.conftest import needs_ffmpeg
+from tests.conftest import needs_trusted_cuts, needs_ffmpeg
 
 
 @pytest.mark.parametrize(
@@ -38,6 +38,7 @@ def test_missing_and_unsupported_paths_are_results(tmp_path):
 
 
 @needs_ffmpeg
+@needs_trusted_cuts
 def test_cut_to_the_end_and_by_length(video_blob, tmp_path):
     (tmp_path / "clip.mkv").write_bytes(video_blob.read_bytes())
     tail = extract(tmp_path / "clip.mkv", 4, show_progress=False)["results"][0]
@@ -46,7 +47,9 @@ def test_cut_to_the_end_and_by_length(video_blob, tmp_path):
     exact = extract(
         tmp_path / "clip.mkv", duration="1.5s", accurate=True, output=tmp_path / "exact.mp4", show_progress=False
     )
-    assert exact["results"][0]["message"] == "Extracted 1.5s to exact.mp4"
+    assert exact["results"][0]["message"] == (
+        "Extracted 1.5s to exact.mp4 (lossy: re-encoded as H.264 (CRF 23), sound re-encoded as AAC at 128 kb/s)"
+    )
     assert "mp4" in probe(tmp_path / "exact.mp4").container_names
 
 

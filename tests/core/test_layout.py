@@ -8,6 +8,7 @@ from sashimi.core.sheets._layout import (
     clip_starts,
     frame_times,
     grid_for_aspect,
+    plan_clips,
     plan_layout,
     sample_window,
 )
@@ -85,3 +86,43 @@ def test_clip_starts_fall_back_and_fit():
     assert starts[0] == pytest.approx(0.0) and starts[-1] == pytest.approx(98.0)
     assert len(set(starts)) == 5
     assert all(s + 2.0 <= 100.0 for s in clip_starts(10.0, 30, 2.0, 0, 0))
+
+
+@pytest.mark.parametrize("grid", [(3, 3), (4, 2), (2, 2), (1, 1), (6, 1), (5, 4)])
+@pytest.mark.parametrize("clip_length", [0.5, 1.0, 2.0, 3.0])
+@pytest.mark.parametrize("offsets", [(7.0, 7.0), (0.0, 0.0), (30.0, 10.0), (60.0, 60.0)])
+def test_planned_clips_never_overlap_and_agree_with_their_note(grid, clip_length, offsets):
+    durations = [0.04, 0.5, 1.27, 1.5, 1.96, 2.0, 2.04, 3.3, 6.0, 7.6, 12.0, 21.0, 23.5, 60.0, 3600.0]
+    for duration in durations:
+        plan = plan_clips(duration, *grid, clip_length, *offsets)
+        count = len(plan.starts)
+        assert 1 <= count <= grid[0] * grid[1]
+        assert plan.cols * plan.rows >= count
+        assert (plan.cols - 1) * plan.rows < count and plan.cols * (plan.rows - 1) < count
+        assert plan.clip_length == min(clip_length, duration)
+        assert plan.starts == sorted(plan.starts)
+        for first, second in zip(plan.starts, plan.starts[1:], strict=False):
+            assert second - first >= plan.clip_length - 1e-9, (duration, plan)
+        for start in plan.starts:
+            assert 0.0 <= start and start + plan.clip_length <= duration + 1e-9
+        if duration < clip_length:
+            assert count == 1 and plan.starts == [0.0]
+            assert plan.note is not None and "one clip of the whole video" in plan.note
+            shown = float(plan.note.split("This video is ")[1].split(" second")[0])
+            assert shown < clip_length
+        elif count < grid[0] * grid[1]:
+            assert plan.note is not None
+            assert (count == 1 and "shows one clip of" in plan.note) or (
+                f"shows {count} clips" in plan.note and f"in a {plan.cols}x{plan.rows} grid" in plan.note
+            )
+        else:
+            assert plan.note is None and (plan.cols, plan.rows) == grid
+
+
+@pytest.mark.parametrize(
+    "duration, count, grid",
+    [(7.6, 3, (2, 2)), (12.0, 5, (3, 2)), (21.0, 9, (3, 3)), (1.27, 1, (1, 1)), (1.5, 1, (1, 1))],
+)
+def test_short_videos_get_fewer_clips_in_a_smaller_grid(duration, count, grid):
+    plan = plan_clips(duration, 3, 3, 2.0, 7.0, 7.0)
+    assert len(plan.starts) == count and (plan.cols, plan.rows) == grid

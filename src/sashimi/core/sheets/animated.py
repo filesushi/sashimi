@@ -21,6 +21,7 @@ from sashimi.core._ffmpeg import (
     file_arg,
     fmt_seconds,
     run_ffmpeg,
+    stream_timed_frames,
 )
 from sashimi.core._palette import (
     PALETTE_SHARE,
@@ -32,7 +33,10 @@ from sashimi.core._palette import (
     scaled,
 )
 from sashimi.core._resources import resolve_max_workers
-from sashimi.core.sheets._layout import SheetLayout, check_tiles, clip_starts, plan_layout
+from sashimi.core._hdr import hdr_name, require_tone_mapping, with_tone_map
+from sashimi.core.fidelity import Outcome, derived
+from sashimi.core._seek import VideoIndex, clip_pass, clip_route, decoding_args, video_index, with_filter
+from sashimi.core.sheets._layout import SheetLayout, check_tiles, choose_grid, plan_clips, plan_layout
 from sashimi.core.sheets._render import HeaderStyle, format_duration, load_font, padded_label, render_header, stamp
 from sashimi.core.sheets.static import NO_FRAMES, check_sheet_size, header_lines, optional_path, probe_sheet_source
 from sashimi.errors import BinaryNotFoundError, InvalidOptionsError, ProcessingError, UnsupportedMediaError
@@ -42,33 +46,50 @@ __all__ = ["render_animated", "build_clip_command", "build_encode_command", "bui
 logger = logging.getLogger("sashimi")
 
 TOO_SHORT_FOR_ANIMATED = "This video is too short for an animated contact sheet."
-MIN_ANIMATED_SECONDS = 1.0
+MIN_ANIMATED_SECONDS = 0.0
+"""Videos longer than this get an animated sheet: any video with a frame (one shorter than a clip is a single tile)."""
 LABEL_PADDING = 4
 TOO_BIG_TO_RENDER = "These settings would make the animated sheet too large to render"
 _PALETTEUSE = "dither=bayer:bayer_scale=4"
 
 
 def build_clip_command(
-    input_path: PathLike, start: float, length: float, fps: int, width: int, height: int, ffmpeg: str = "ffmpeg"
+    input_path: PathLike,
+    start: float,
+    length: float,
+    fps: int,
+    width: int,
+    height: int,
+    ffmpeg: str = "ffmpeg",
+    *,
+    decode_from: float | None = None,
+    origin: float | None = None,
+    tone_map: str | None = None,
 ) -> list[str]:
-    """One tile's clip as raw RGB frames on stdout, already at the sheet's fps and tile size. Pure."""
+    """
+    One tile's clip as raw RGB frames on stdout, already at the sheet's fps and tile size. Pure.
+    `decode_from`, `origin` and `tone_map` are as in :func:`~sashimi.core.sheets.static.build_frame_command`.
+    """
     frames = max(1, round(length * fps))
+    vf = with_tone_map(f"fps={fps},scale={width}:{height},setsar=1", tone_map)
+    if decode_from is None:
+        seek = ["-ss", fmt_seconds(start), "-t", fmt_seconds(length)]
+    else:
+        decoding = decoding_args(decode_from, start, length, origin)
+        seek, vf = decoding.inputs, with_filter(decoding.video, vf)
     return [
         ffmpeg,
         *base_args(1),
         *INPUT_PROTOCOLS,
         "-threads",
         "1",
-        "-ss",
-        fmt_seconds(start),
-        "-t",
-        fmt_seconds(length),
+        *seek,
         "-i",
         file_arg(input_path),
         "-map",
         "0:V:0",
         "-vf",
-        f"fps={fps},scale={width}:{height},setsar=1",
+        vf,
         "-frames:v",
         str(frames),
         "-f",
@@ -77,6 +98,54 @@ def build_clip_command(
         "rgb24",
         "pipe:1",
     ]
+
+
+def _clips_in_one_pass(
+    input_path: PathLike,
+    index: VideoIndex,
+    starts: list[float],
+    length: float,
+    fps: int,
+    width: int,
+    height: int,
+    threads: int,
+    ffmpeg: str,
+    on_progress: ProgressCallback | None = None,
+    tone_map: str | None = None,
+) -> dict[int, list[bytes]]:
+    clips = [(start, length) for start in starts]
+    vf = with_tone_map(f"scale={width}:{height},setsar=1", tone_map)
+    frames = clip_pass(input_path, index, clips, vf, fps, width * height * 3, threads, ffmpeg)
+    gathered: dict[int, list[bytes]] = {}
+    try:
+        for slot, frame in frames:
+            if slot not in gathered and on_progress:
+                on_progress(0.5 * len(gathered) / len(starts), "extracting")
+            gathered.setdefault(slot, []).append(frame)
+    except BinaryNotFoundError:
+        raise
+    except ProcessingError as e:
+        logger.debug(f"Clip extraction failed: {e}")
+    finally:
+        frames.close()
+    return gathered
+
+
+def _held_clip(
+    input_path: PathLike,
+    index: VideoIndex,
+    start: float,
+    length: float,
+    fps: int,
+    width: int,
+    height: int,
+    ffmpeg: str,
+    tone_map: str | None = None,
+) -> list[bytes] | None:
+    frames = _clips_in_one_pass(
+        input_path, index, [start], length, fps, width, height, 1, ffmpeg, tone_map=tone_map
+    ).get(0)
+    return frames or None
 
 
 def _raw_input(width: int, height: int, fps: int) -> list[str]:
@@ -156,7 +225,7 @@ def render_animated(
     scratch_dir: PathLike | None = None,
     limits: Limits | None = None,
     on_progress: ProgressCallback | None = None,
-) -> None:
+) -> Outcome:
     """
     Renders an animated contact sheet; see :func:`sashimi.sheets.render`.
 
@@ -167,57 +236,102 @@ def render_animated(
     written to disk. A GIF is encoded in two passes over the same frames, the first building the
     palette, so the encoder never holds every frame as well.
 
-    A video shorter than one clip (but at least a second long) gets a single tile of the whole video.
+    A video shorter than one clip gets a single tile of the whole video.
     """
     workers = resolve_max_workers(max_workers)
-    info = probe_sheet_source(input_path, min(config.sample_duration, MIN_ANIMATED_SECONDS), TOO_SHORT_FOR_ANIMATED)
+    info = probe_sheet_source(
+        input_path, min(config.sample_duration, MIN_ANIMATED_SECONDS), TOO_SHORT_FOR_ANIMATED, limits
+    )
     assert info.duration is not None and info.display_aspect_ratio
-    single = info.duration < config.sample_duration
-    clip_length = info.duration if single else config.sample_duration
-    cols, rows = (1, 1) if single else (config.cols, config.rows)
+    plan = plan_clips(
+        info.duration,
+        *choose_grid(config.cols, config.rows, info.display_aspect_ratio, animated=True),
+        config.sample_duration,
+        config.start_offset_percent,
+        config.end_offset_percent,
+    )
+    clip_length = plan.clip_length
     layout: SheetLayout = plan_layout(
-        config.width, cols, rows, config.gap, info.display_aspect_ratio, even=True, animated=True
+        config.width, plan.cols, plan.rows, config.gap, info.display_aspect_ratio, even=True, animated=True
     )
     check_tiles(layout)
+    notes = [plan.note] if plan.note else []
     frames_per_clip = max(1, round(clip_length * config.fps))
     frame_bytes = layout.thumb_w * layout.thumb_h * 3
-    needed = layout.cells * frames_per_clip * frame_bytes
+    needed = len(plan.starts) * frames_per_clip * frame_bytes
     budget = resolve_limits(limits).max_frame_bytes
     if budget is not None and needed > budget:
         raise InvalidOptionsError(
             f"{TOO_BIG_TO_RENDER}: its frames would take {megabytes(needed)} of memory, and the limit is "
             f"{megabytes(budget)}. Use a smaller width, a lower frame rate or shorter clips.",
-            detail=f"{layout.cells} clips of {frames_per_clip} frames of {layout.thumb_w}x{layout.thumb_h}",
+            detail=f"{len(plan.starts)} clips of {frames_per_clip} frames of {layout.thumb_w}x{layout.thumb_h}",
             limit="max_frame_bytes",
         )
     header_style = HeaderStyle(load_font(optional_path(header_font), config.header_font_size), config.header_font_size)
     header_h = header_style.height if config.show_header else 0
     sheet_w, sheet_h = layout.grid_width, header_h + layout.grid_height
     check_sheet_size(sheet_w, sheet_h, config.target, limits, TOO_BIG_TO_RENDER)
-    starts = (
-        [0.0]
-        if single
-        else clip_starts(
-            info.duration, layout.cells, clip_length, config.start_offset_percent, config.end_offset_percent
-        )
-    )
+    starts = plan.starts
 
     ffmpeg = ffmpeg_binary()
+    tone_map = require_tone_mapping(info, ffmpeg)
+    index = video_index(input_path, info, starts[-1] + clip_length, limits)
     clips: dict[int, list[bytes]] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(
-                _grab_clip,
-                build_clip_command(input_path, start, clip_length, config.fps, layout.thumb_w, layout.thumb_h, ffmpeg),
-                frame_bytes,
-            ): slot
-            for slot, start in enumerate(starts)
-        }
-        for done, future in enumerate(concurrent.futures.as_completed(futures), start=1):
-            if (clip_frames := future.result()) is not None:
-                clips[futures[future]] = clip_frames
-            if on_progress:
-                on_progress(0.5 * done / len(futures), "extracting")
+    if clip_route(index, [(start, clip_length) for start in starts]) == "pass":
+        assert index is not None
+        clips = _clips_in_one_pass(
+            input_path,
+            index,
+            starts,
+            clip_length,
+            config.fps,
+            layout.thumb_w,
+            layout.thumb_h,
+            workers,
+            ffmpeg,
+            on_progress,
+            tone_map,
+        )
+        if on_progress:
+            on_progress(0.5, "extracting")
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {}
+            for slot, start in enumerate(starts):
+                if index is not None and index.held_from(start) is not None:
+                    future = pool.submit(
+                        _held_clip,
+                        input_path,
+                        index,
+                        start,
+                        clip_length,
+                        config.fps,
+                        layout.thumb_w,
+                        layout.thumb_h,
+                        ffmpeg,
+                        tone_map,
+                    )
+                else:
+                    begin = index.start_for(start) if index is not None else None
+                    cmd = build_clip_command(
+                        input_path,
+                        start,
+                        clip_length,
+                        config.fps,
+                        layout.thumb_w,
+                        layout.thumb_h,
+                        ffmpeg,
+                        decode_from=begin,
+                        origin=index.origin(begin) if index is not None and begin is not None else None,
+                        tone_map=tone_map,
+                    )
+                    future = pool.submit(_grab_clip, cmd, frame_bytes)
+                futures[future] = slot
+            for done, future in enumerate(concurrent.futures.as_completed(futures), start=1):
+                if (grabbed := future.result()) is not None:
+                    clips[futures[future]] = grabbed
+                if on_progress:
+                    on_progress(0.5 * done / len(futures), "extracting")
     if not clips:
         raise UnsupportedMediaError(NO_FRAMES)
 
@@ -236,6 +350,7 @@ def render_animated(
             (0, 0),
         )
     size = (layout.thumb_w, layout.thumb_h)
+    short = info.duration < 1
 
     def composited_frames() -> Iterator[bytes]:
         for k in range(frames_per_clip):
@@ -245,7 +360,7 @@ def render_animated(
                 if config.show_timestamps:
                     seconds = starts[slot] + k / config.fps
                     label = padded_label(
-                        format_duration(math.floor(seconds)),
+                        format_duration(seconds, tenths=True) if short else format_duration(math.floor(seconds)),
                         ts_font,
                         config.timestamp_bg_color,
                         config.timestamp_text_color,
@@ -279,5 +394,9 @@ def render_animated(
             on_progress=scaled(on_progress, encode_start, 1.0 - encode_start),
             stage="encoding",
         )
+    changes = [f"{len(starts)} {'clip' if len(starts) == 1 else 'clips'} at {config.fps} fps on an animated sheet"]
+    if tone_map:
+        changes.append(f"tone-mapped from {hdr_name(info)}")
     if on_progress:
         on_progress(1.0, "done")
+    return Outcome(fidelity=derived(input_path, "picture", changes, media=True, notes=notes))

@@ -81,9 +81,9 @@ def test_preview_user_errors(junk_blob, tmp_path):
         ],
         check=True,
     )
-    with pytest.raises(MediaTooShortError):
-        video.preview(tiny, tmp_path / "p", GifPreviewConfig())
-    assert not (tmp_path / "p").exists() and leftovers(tmp_path) == []
+    video.preview(tiny, tmp_path / "p", GifPreviewConfig())
+    assert Image.open(tmp_path / "p").n_frames >= 3
+    assert leftovers(tmp_path) == []
 
 
 @pytest.fixture(scope="module")
@@ -137,8 +137,19 @@ def test_remux_batch_never_touches_sources(mp4_with_subtitles, video_blob, tmp_p
     before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
     items = list(remux_files_generator([tmp_path / "phone.mp4", tmp_path / "already.mkv"], "mkv"))
     finals = [(p.name, status, message) for p, status, message, _ in items[1:] if status != "starting"]
-    assert finals == [("already.mkv", "skipped", "Already MKV"), ("phone.mp4", "success", "Remuxed to phone.mp4.mkv")]
+    assert finals == [
+        ("already.mkv", "skipped", "Already MKV"),
+        (
+            "phone.mp4",
+            "success",
+            "Remuxed to phone.mp4.mkv (picture and sound identical; the subtitles' MP4 text format (converted to SubRip) dropped)",
+        ),
+    ]
     assert {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.name in before} == before
     again = list(remux_files_generator(tmp_path / "phone.mp4", "mkv", force=True))
-    assert again[-1][1:3] == ("success", "Remuxed to phone.mp4.mkv (replaced the existing file)")
+    assert again[-1][1:3] == (
+        "success",
+        "Remuxed to phone.mp4.mkv (replaced the existing file; picture and sound identical; "
+        "the subtitles' MP4 text format (converted to SubRip) dropped)",
+    )
     assert (tmp_path / "phone.mp4").read_bytes() == before["phone.mp4"]

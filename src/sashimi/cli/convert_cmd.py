@@ -25,6 +25,7 @@ FLAGS = {
     "progressive": "--progressive",
     "jpeg_subsampling": "--subsampling",
     "webp_method": "--webp-method",
+    "avif_speed": "--avif-speed",
     "png_compress_level": "--compress-level",
     "tiff_compression": "--tiff-compression",
     "resample": "--resample",
@@ -57,6 +58,9 @@ FLAGS = {
     "theme_color": "--theme-color",
     "manifest_background_color": "--manifest-background",
     "target": "--output-format",
+    "animated": "--no-animated",
+    "keep_hdr": "--keep-hdr",
+    "reencode": "--reencode",
     "rotate": "angle",
     "flip": "--flip",
 }
@@ -71,6 +75,8 @@ class Target(str, Enum):
     bmp = "bmp"
     tiff = "tiff"
     tif = "tif"
+    avif = "avif"
+    apng = "apng"
     ico = "ico"
     webm = "webm"
     mp4 = "mp4"
@@ -90,6 +96,8 @@ class ImageFormat(str, Enum):
     bmp = "bmp"
     tiff = "tiff"
     tif = "tif"
+    avif = "avif"
+    apng = "apng"
 
 
 class RotateFormat(str, Enum):
@@ -101,8 +109,11 @@ class RotateFormat(str, Enum):
     bmp = "bmp"
     tiff = "tiff"
     tif = "tif"
+    avif = "avif"
+    apng = "apng"
     mp4 = "mp4"
     webm = "webm"
+    mov = "mov"
 
 
 class Angle(str, Enum):
@@ -116,6 +127,24 @@ class Flip(str, Enum):
     none = "none"
     horizontal = "horizontal"
     vertical = "vertical"
+
+
+def _no_hdr(target: str) -> str:
+    """The refusal of ``--keep-hdr`` for a format that can't hold HDR video."""
+    return (
+        f"{target.upper()} can't hold HDR video, so --keep-hdr can't be used: HDR video is always tone-mapped "
+        f"to standard range for {target.upper()}. Choose mp4 or webm to keep HDR."
+    )
+
+
+def _kept_switch(section: str, key: str) -> bool | None:
+    """A true/false setting kept in `section` of sashimi.toml, or None; a value that isn't one is refused."""
+    from sashimi.cli import settings
+
+    value = settings.command_setting(section, key)
+    if value is not None and not isinstance(value, bool):
+        fail(f"{settings.output_name_origin(section, key)} must be true or false.")
+    return value
 
 
 def _validate(model: Any, data: dict[str, Any]) -> Any:
@@ -162,7 +191,7 @@ def convert_cmd(
         typer.Argument(
             metavar="PATH... FORMAT",
             help="Files or folders to convert, then the output format, written with the extension as typed: "
-            "jpeg (or jpg), png, webp, gif, bmp, tiff (or tif), ico, webm, mp4, mp3, m4a, wav, ogg or flac.",
+            "jpeg (or jpg), png, webp, gif, bmp, tiff (or tif), avif, apng, ico, webm, mp4, mp3, m4a, wav, ogg or flac.",
             show_default=False,
         ),
     ],
@@ -197,6 +226,7 @@ def convert_cmd(
     progressive: opt.Progressive = False,
     subsampling: opt.SubsamplingOpt = None,
     webp_method: opt.WebpMethod = None,
+    avif_speed: opt.AvifSpeed = None,
     compress_level: opt.CompressLevel = None,
     tiff_compression: opt.TiffCompressionOpt = None,
     resample: opt.ResampleOpt = None,
@@ -219,12 +249,16 @@ def convert_cmd(
     sample_rate: opt.SampleRate = None,
     bit_depth: opt.BitDepth = None,
     flac_level: opt.FlacLevel = None,
+    animated: Annotated[Optional[bool], opt.animated_option("convert")] = None,
+    keep_hdr: Annotated[Optional[bool], opt.keep_hdr_option("convert")] = None,
     max_pixels: opt.MaxPixels = None,
+    max_animation_bytes: opt.MaxAnimationBytes = None,
 ):
     """
     Convert images, videos and audio. Each file is handled by its type:
 
-    [bold]Images[/bold] → jpeg, png, webp, gif, bmp, tiff, ico
+    [bold]Images[/bold] → jpeg, png, webp, gif, bmp, tiff, avif, apng, ico
+    [bold]Animations[/bold] (GIF, WebP, APNG, AVIF) → gif, webp, avif, apng, animated (--no-animated: a still)
     [bold]Videos[/bold] → gif, webp (animated), webm, mp4; [bold]animated GIFs[/bold] → webm, mp4
     [bold]Videos and audio[/bold] → mp3, m4a, wav, ogg, flac
 
@@ -251,7 +285,7 @@ def convert_cmd(
     opt.single_file_or_fail(paths, output)
     from sashimi.cli import _limits
 
-    limits = _limits.resolve(max_pixels=max_pixels)
+    limits = _limits.resolve(max_pixels=max_pixels, max_animation_bytes=max_animation_bytes)
 
     from sashimi.api._batch import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
     from sashimi.api.convert import convert_files_generator, own_extensions
@@ -268,7 +302,7 @@ def convert_cmd(
         "preset": opt.enum_value(preset), "speed": speed, "audio_bitrate_kbps": audio_bitrate, "mute": mute or None,
         "loop": False if no_loop else None, "dither": opt.enum_value(dither), "palette_mode": opt.enum_value(palette),
         "bitrate_kbps": bitrate, "mono": mono or None, "sample_rate": sample_rate, "wav_bit_depth": bit_depth,
-        "flac_compression_level": flac_level,
+        "flac_compression_level": flac_level, "animated": animated, "keep_hdr": keep_hdr, "avif_speed": avif_speed,
     }  # fmt: skip
 
     models: dict[str, Any] = {}
@@ -281,7 +315,13 @@ def convert_cmd(
     if t in AUDIO_CONVERT.targets:
         models["audio"] = AUDIO_CONVERT.model_for(target=t)
     used = {field for model in models.values() for field in model.model_fields}
+    if keep_hdr and "keep_hdr" not in used:
+        fail(_no_hdr(t))
     warn_unused(_flags([field for field in opt.given(options) if field not in used]), f"{t.upper()} output")
+    if animated is None and "animated" in used:
+        options["animated"] = _kept_switch("convert", "animated")
+    if keep_hdr is None and "keep_hdr" in used:
+        options["keep_hdr"] = _kept_switch("convert", "keep_hdr")
 
     configs: dict[str, Any] = {}
     extensions = None
@@ -365,13 +405,16 @@ def resize_cmd(
     progressive: opt.Progressive = False,
     subsampling: opt.SubsamplingOpt = None,
     webp_method: opt.WebpMethod = None,
+    avif_speed: opt.AvifSpeed = None,
     compress_level: opt.CompressLevel = None,
     tiff_compression: opt.TiffCompressionOpt = None,
     resample: opt.ResampleOpt = None,
     no_orient: opt.NoOrient = False,
     metadata: opt.MetadataOpt = None,
     strip_icc: opt.StripIcc = False,
+    animated: Annotated[Optional[bool], opt.animated_option("resize")] = None,
     max_pixels: opt.MaxPixels = None,
+    max_animation_bytes: opt.MaxAnimationBytes = None,
 ):
     """
     Shrink images to fit --width and/or --height (never upscaling), keeping their format unless
@@ -379,7 +422,8 @@ def resize_cmd(
     [cyan]photo.jpg.resized.jpg[/cyan] for photo.jpg
     ([cyan]photo.jpg.resized.webp[/cyan] with --output-format webp) next to each image, under
     --output-dir, or to -o for a single image (whose extension sets the format if
-    --output-format doesn't). Videos aren't supported yet.
+    --output-format doesn't). Animated GIFs and WebPs stay animated (--no-animated for a still);
+    other animations, and multi-page TIFFs, give their first frame. Videos aren't supported yet.
     """
     from sashimi.api.resize import resize_images_generator
     from sashimi.cli import _limits
@@ -389,13 +433,15 @@ def resize_cmd(
     if width is None and height is None:
         fail("Give --width and/or --height to resize to.")
     opt.single_file_or_fail(paths, output)
-    limits = _limits.resolve(max_pixels=max_pixels)
+    limits = _limits.resolve(max_pixels=max_pixels, max_animation_bytes=max_animation_bytes)
     image_suffixes = {f".{name}": normalize_target(name) for name in ImageFormat.__members__} | {".tif": "tiff"}
     fmt = normalize_target(opt.format_from_output(opt.enum_value(output_format), output, image_suffixes))
     options = _image_options(
         quality, lossless, flatten, background, optimize, progressive, subsampling, webp_method,
         compress_level, tiff_compression, resample, no_orient, metadata, strip_icc, width, height,
     )  # fmt: skip
+    options["animated"] = animated
+    options["avif_speed"] = avif_speed
     targets = [fmt] if fmt else list(IMAGE_RESIZE.targets)
     configs = {}
     for name in targets:
@@ -405,12 +451,16 @@ def resize_cmd(
     unused = [
         f for f in opt.given(options) if all(f not in IMAGE_RESIZE.model_for(target=n).model_fields for n in targets)
     ]
+    if animated is None and (kept := _kept_switch("resize", "animated")) is not None:
+        for name in targets:
+            if "animated" in IMAGE_RESIZE.model_for(target=name).model_fields:
+                configs[name] = configs[name].model_copy(update={"animated": kept})
     warn_unused(_flags(unused), f"{targets[0].upper()} output" if fmt else "any image format")
     warned: set[str] = set()
 
     def config_for(source_format: str) -> Any:
         model = IMAGE_RESIZE.model_for(target=source_format)
-        skipped = [f for f in opt.given(options) if f not in model.model_fields and f not in unused]
+        skipped = [f for f in opt.given(options) if f not in model.model_fields and f not in unused and f != "animated"]
         if skipped and source_format not in warned:
             warned.add(source_format)
             warn_unused(_flags(skipped), f"{source_format.upper()} images")
@@ -465,8 +515,8 @@ def rotate_cmd(
         Optional[RotateFormat],
         opt.output_format_option(
             "Output format, written with the extension as typed: an image format (jpeg or jpg, png, webp, "
-            "gif, bmp, tiff or tif) rotates only images (png is lossless), mp4 or webm only videos "
-            "[default: images keep theirs, videos mp4]."
+            "gif, bmp, tiff or tif) rotates only images (png is lossless), mp4, webm or mov only videos "
+            "[default: images keep theirs, MOV videos mov (mp4 for Dolby Vision), other videos mp4]."
         ),
     ] = None,
     output: Annotated[Optional[pathlib.Path], opt.output_option()] = None,
@@ -494,6 +544,8 @@ def rotate_cmd(
     speed: opt.Speed = None,
     audio_bitrate: opt.AudioBitrate = None,
     mute: opt.Mute = False,
+    keep_hdr: Annotated[Optional[bool], opt.keep_hdr_option("rotate")] = None,
+    reencode: Annotated[Optional[bool], opt.reencode_option()] = None,
     metadata: opt.MetadataOpt = None,
     max_pixels: opt.MaxPixels = None,
     max_animation_bytes: opt.MaxAnimationBytes = None,
@@ -502,11 +554,15 @@ def rotate_cmd(
     Rotate (clockwise) and/or flip photos, animated GIFs and WebPs (every frame) and videos:
     give the files or folders, then the angle ([cyan]sashimi rotate *.jpg 180[/cyan]; 90 when
     left out). Images go through the same code as [bold]sashimi edit --rotate[/bold] and keep their format
-    (JPEGs are re-saved at high quality; --output-format png keeps every pixel); videos are
-    re-encoded as MP4. Writes [cyan]photo.jpg.rotated.jpg[/cyan] for photo.jpg
+    (JPEGs are re-saved at high quality; --output-format png keeps every pixel); MOV videos stay
+    MOV (Dolby Vision ones become MP4, the only format FFmpeg writes their settings into) and
+    other videos become MP4: a rotation of H.264, HEVC, AV1 or VP9 video (in a MOV: H.264,
+    HEVC or ProRes) is lossless (only its display rotation is set, so players turn it, and every
+    stream the output holds is copied; --reencode turns the picture itself), anything else is
+    re-encoded. Writes [cyan]photo.jpg.rotated.jpg[/cyan] for photo.jpg
     ([cyan]photo.jpg.rotated.png[/cyan] with --output-format png, [cyan]clip.mkv.rotated.mp4[/cyan]
-    for clip.mkv) next to each file, under --output-dir, or to -o for a single file. A folder of
-    both images and videos asks first unless -y.
+    for clip.mkv, [cyan]clip.mov.rotated.mov[/cyan] for clip.mov) next to each file, under
+    --output-dir, or to -o for a single file. A folder of both images and videos asks first unless -y.
     """
     from sashimi.api.transform import rotate_files_generator
     from sashimi.cli import _limits
@@ -535,14 +591,25 @@ def rotate_cmd(
     video_options = {
         "rotate": turn, "flip": flip.value, "crf": crf, "preset": opt.enum_value(preset), "speed": speed,
         "audio_bitrate_kbps": audio_bitrate, "mute": mute or None, "metadata": opt.enum_value(metadata),
+        "keep_hdr": keep_hdr, "reencode": reencode,
     }  # fmt: skip
     if turn == 0 and flip is Flip.none:
         fail("Choose a rotation or a flip.")
+    if keep_hdr and not videos:
+        fail(_no_hdr(str(fmt)))
+    if keep_hdr is None and videos:
+        video_options["keep_hdr"] = _kept_switch("rotate", "keep_hdr")
+    if reencode is None and videos:
+        video_options["reencode"] = _kept_switch("rotate", "reencode")
     unused = []
     if not images:
         unused += [field for field in ("quality",) if image_options[field] is not None]
     if not videos:
-        unused += [f for f in ("crf", "preset", "speed", "audio_bitrate_kbps", "mute") if video_options[f] is not None]
+        unused += [
+            f
+            for f in ("crf", "preset", "speed", "audio_bitrate_kbps", "mute", "reencode")
+            if video_options[f] is not None
+        ]
     warn_unused(_flags(unused), f"{str(fmt).upper()} output")
     video_config = None
     if videos:

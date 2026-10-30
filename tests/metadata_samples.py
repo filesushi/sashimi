@@ -207,6 +207,10 @@ def _ffmpeg(*args: str) -> None:
     subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", *args], check=True)
 
 
+CREATED = "2024-05-01T12:34:56.000000Z"
+"""The creation time :func:`tagged_mov` records."""
+
+
 def tagged_mov(directory: pathlib.Path) -> pathlib.Path:
     """H.264 + AAC MOV with QuickTime location, global and stream tags, a chapter and a 90° display rotation."""
     meta = directory / "meta.txt"
@@ -221,13 +225,15 @@ def tagged_mov(directory: pathlib.Path) -> pathlib.Path:
         *("-metadata", "title=SASHIMI-PRIVACY-MARKER-title", "-metadata", "artist=SASHIMI-PRIVACY-MARKER-artist"),
         *("-metadata", "comment=SASHIMI-PRIVACY-MARKER-comment", "-metadata", f"location={ISO6709}"),
         *("-metadata", f"com.apple.quicktime.location.ISO6709={ISO6709}"),
+        *("-metadata", "com.apple.quicktime.make=SASHIMI-PRIVACY-MARKER-make", "-metadata", "firmware=HD8.01"),
+        *("-metadata", f"creation_time={CREATED}"),
         *("-metadata:s:v:0", "handler_name=SASHIMI-PRIVACY-MARKER-vh", "-metadata:s:a:0", "language=fra"),
         *("-movflags", "use_metadata_tags", "-f", "mov", str(plain)),
     )
     path = directory / "original.blob"
     _ffmpeg(
         *("-display_rotation", "90", "-i", str(plain), "-map", "0:v", "-map", "0:a", "-c", "copy"),
-        *("-movflags", "use_metadata_tags", "-f", "mov", str(path)),
+        *("-metadata", f"creation_time={CREATED}", "-movflags", "use_metadata_tags", "-f", "mov", str(path)),
     )
     return path
 

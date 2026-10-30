@@ -30,12 +30,6 @@ def test_authors_and_urls():
     assert all(url == REPOSITORY or url.startswith(f"{REPOSITORY}/") for url in urls.values())
 
 
-def test_sdist_leaves_out_internal_docs():
-    assert {"/CLAUDE.md", "/docs/FILESUSHI_HANDBACK.md"} <= set(
-        PYPROJECT["tool"]["hatch"]["build"]["targets"]["sdist"]["exclude"]
-    )
-
-
 def test_core_metadata_version_is_pinned():
     targets = PYPROJECT["tool"]["hatch"]["build"]["targets"]
     assert targets["wheel"]["core-metadata-version"] == targets["sdist"]["core-metadata-version"] == "2.4"

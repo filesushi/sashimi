@@ -47,7 +47,13 @@ def test_non_video_file_is_reported(tmp_path):
     payload = json.loads(result.stdout)
     assert result.exit_code == 1
     assert payload["results"] == [
-        {"file": "notes.txt", "status": "skipped", "message": "thumbs works on videos, not .txt files.", "output": None}
+        {
+            "file": "notes.txt",
+            "status": "skipped",
+            "message": "thumbs works on videos, not .txt files.",
+            "output": None,
+            "fidelity": None,
+        }
     ]
     scanned = runner.invoke(app, ["thumbs", ".", "--json"])
     assert scanned.exit_code == 0 and json.loads(scanned.stdout)["results"] == []

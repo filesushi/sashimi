@@ -68,7 +68,7 @@ def isolated(tmp_path, monkeypatch):
     ):
         monkeypatch.setattr(importlib.import_module(module), name, made)
     extract = importlib.import_module("sashimi.api.extract")
-    monkeypatch.setattr(extract, "_clip_message", lambda config, source, output: "Extracted to {name}")
+    monkeypatch.setattr(extract, "_clip_message", lambda *args: "Extracted to {name}")
     yield
     settings.load_raw_config.cache_clear()
 
@@ -207,19 +207,19 @@ def test_a_kept_folder_with_a_home_folder_tilde(tmp_path, monkeypatch):
     assert outputs(run("thumbs", "videos")) == [tmp_path / "user" / "Sheets" / "clip.mp4.sheet.jpg"]
 
 
-def test_the_owners_layout_with_sheets_in_the_pattern(tmp_path):
-    videos = media(tmp_path / "New folder", ("Bluebeard-5.mkv", "Bluebeard-6.mkv", "Bluebeard-7.mkv"))
+def test_a_layout_with_sheets_in_the_pattern(tmp_path):
+    videos = media(tmp_path / "Home videos", ("hike-5.mkv", "hike-6.mkv", "hike-7.mkv"))
     assert runner.invoke(app, ["config", "set", "thumbs.output_name", "sheets/{input_name}.jpeg"]).exit_code == 0
-    first = run("thumbs", "New folder", "-r")
-    assert outputs(first) == [pathlib.Path(f"New folder/sheets/Bluebeard-{n}.mkv.jpeg") for n in (5, 6, 7)]
-    assert run("thumbs", "New folder", "-r")["summary"]["exists"] == 3
+    first = run("thumbs", "Home videos", "-r")
+    assert outputs(first) == [pathlib.Path(f"Home videos/sheets/hike-{n}.mkv.jpeg") for n in (5, 6, 7)]
+    assert run("thumbs", "Home videos", "-r")["summary"]["exists"] == 3
     os.chdir(videos)
     assert run("thumbs", ".")["summary"]["exists"] == 3
-    report = run("thumbs", "Bluebeard-5.mkv")
-    shown = pathlib.Path("sheets/Bluebeard-5.mkv.jpeg")
+    report = run("thumbs", "hike-5.mkv")
+    shown = pathlib.Path("sheets/hike-5.mkv.jpeg")
     assert report["results"][0]["message"] == f"Output already exists: {shown}"
     combined = run("thumbs", ".", "-r", "--output-dir", "../collected")
-    assert outputs(combined) == [pathlib.Path(f"../collected/sheets/Bluebeard-{n}.mkv.jpeg") for n in (5, 6, 7)]
+    assert outputs(combined) == [pathlib.Path(f"../collected/sheets/hike-{n}.mkv.jpeg") for n in (5, 6, 7)]
 
 
 def test_config_keeps_shows_and_removes_an_output_dir(tmp_path):

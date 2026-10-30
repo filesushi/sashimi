@@ -12,7 +12,7 @@ from typing import Annotated, Any, List, Optional
 import typer
 
 from sashimi.cli import _options as opt
-from sashimi.cli._output import BatchRunner, exit_on_invalid_options, fail, refusals, warn_ignored, warn_unused
+from sashimi.cli._output import BatchRunner, exit_on_invalid_options, fail, refusal, refusals, warn_ignored, warn_unused
 
 FLAGS = {
     "width": "--width",
@@ -229,7 +229,7 @@ def thumbs_cmd(
     try:
         config, resources, unused = settings.resolve_sheet(animated, overrides)
     except InvalidOptionsError as e:
-        fail(e.user_message)
+        fail(refusal(e))
     except ValidationError as e:
         exit_on_invalid_options(e, FLAGS)
     warn_unused([FLAGS.get(field, field) for field in unused], f"{config.target.upper()} sheets")

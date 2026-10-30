@@ -144,7 +144,11 @@ def test_accurate_trim_is_exact(video_blob, tmp_path, container):
 @pytest.mark.parametrize(
     "container, message",
     [
-        ("webm", "This video can't be trimmed to WEBM without re-encoding. Try MKV instead."),
+        (
+            "webm",
+            "This video can't be trimmed into WEBM without re-encoding: WEBM can't hold its H264 video and its AAC "
+            "audio. Try MKV instead, or convert it (which re-encodes).",
+        ),
     ],
 )
 def test_trim_refuses_containers_that_cannot_hold_the_streams(video_blob, tmp_path, container, message):
@@ -163,10 +167,11 @@ def test_trim_container_check_reads_every_stream(tmp_path):
     )  # fmt: skip
     info = probe(src)
     assert [s.type for s in info.streams] == ["video", "data"]
-    with pytest.raises(InvalidOptionsError) as e:
-        video.trim(src, tmp_path / "r", CopyTrimConfig(container="mkv"))
-    assert e.value.user_message == "This video can't be trimmed to MKV without re-encoding. Try MOV instead."
-    video.trim(src, tmp_path / "r", CopyTrimConfig(container="mov"))
+    plan = video.trim(src, tmp_path / "r", CopyTrimConfig(container="mkv"))
+    assert plan.dropped == [1] and plan.note("mkv") is None
+    assert [s.type for s in probe(tmp_path / "r").streams] == ["video"]
+    video.trim(src, tmp_path / "m", CopyTrimConfig(container="mov"))
+    assert [s.type for s in probe(tmp_path / "m").streams] == ["video", "data"]
 
 
 def test_transform_rotates(video_blob, tmp_path):
@@ -247,7 +252,7 @@ def _moov_before_mdat(path):
 
 def test_mp4_copies_h264_and_aac(video_blob, tmp_path):
     out = tmp_path / "result.bin"
-    assert video.convert(video_blob, out, Mp4VideoConfig(), max_workers=2) == "copy"
+    assert video.convert(video_blob, out, Mp4VideoConfig(), max_workers=2).route == "copy"
     info = probe(out)
     assert (info.video_codec, info.audio_codec, info.width, info.height) == ("h264", "aac", 320, 180)
     assert info.duration == pytest.approx(6.0, abs=0.1)
@@ -260,7 +265,7 @@ def test_mp4_copies_h264_and_aac(video_blob, tmp_path):
 
 def test_mp4_copy_keeps_the_display_rotation(rotated_video_blob, tmp_path):
     out = tmp_path / "result.bin"
-    assert video.convert(rotated_video_blob, out, Mp4VideoConfig(), max_workers=2) == "copy"
+    assert video.convert(rotated_video_blob, out, Mp4VideoConfig(), max_workers=2).route == "copy"
     info = probe(out)
     assert (info.width, info.height, info.rotation) == (180, 320, 90)
 
@@ -277,19 +282,19 @@ def test_mp4_reencodes_only_the_audio_when_it_isnt_aac(tmp_path):
         check=True,
     )
     out = tmp_path / "result.bin"
-    assert video.convert(src, out, Mp4VideoConfig(), max_workers=2) == "copy_video"
+    assert video.convert(src, out, Mp4VideoConfig(), max_workers=2).route == "copy_video"
     assert (probe(out).video_codec, probe(out).audio_codec) == ("h264", "aac")
-    assert video.convert(src, out, Mp4VideoConfig(mute=True), max_workers=2) == "copy"
+    assert video.convert(src, out, Mp4VideoConfig(mute=True), max_workers=2).route == "copy"
     assert not probe(out).has_audio
 
 
 def test_mp4_options_that_need_a_reencode(video_blob, silent_video_blob, tmp_path):
     out = tmp_path / "result.bin"
-    assert video.convert(silent_video_blob, out, Mp4VideoConfig(), max_workers=2) == "copy"
-    assert video.convert(video_blob, out, Mp4VideoConfig(crf=30), max_workers=2) == "encode"
-    assert video.convert(video_blob, out, Mp4VideoConfig(max_width=160), max_workers=2) == "encode"
+    assert video.convert(silent_video_blob, out, Mp4VideoConfig(), max_workers=2).route == "copy"
+    assert video.convert(video_blob, out, Mp4VideoConfig(crf=30), max_workers=2).route == "encode"
+    assert video.convert(video_blob, out, Mp4VideoConfig(max_width=160), max_workers=2).route == "encode"
     assert probe(out).width == 160
-    assert video.convert(video_blob, out, VIDEO_CONVERT.from_params({}, target="webm"), max_workers=2) == "encode"
+    assert video.convert(video_blob, out, VIDEO_CONVERT.from_params({}, target="webm"), max_workers=2).route == "encode"
 
 
 def test_mp4_falls_back_to_a_reencode_when_the_copy_fails(video_blob, tmp_path, monkeypatch):
@@ -303,5 +308,5 @@ def test_mp4_falls_back_to_a_reencode_when_the_copy_fails(video_blob, tmp_path, 
 
     monkeypatch.setattr(core_video, "_copy_command", broken)
     out = tmp_path / "result.bin"
-    assert video.convert(video_blob, out, Mp4VideoConfig(), max_workers=2) == "encode"
+    assert video.convert(video_blob, out, Mp4VideoConfig(), max_workers=2).route == "encode"
     assert probe(out).video_codec == "h264" and leftovers(tmp_path) == []

@@ -7,7 +7,7 @@ from sashimi.audio import build_convert_command
 from sashimi.config import AUDIO_CONVERT, Limits, Mp3AudioConfig
 from sashimi.errors import InvalidOptionsError, MediaTooLongError
 
-FILESUSHI = Limits(max_audio_seconds=3600)
+CAPPED = Limits(max_audio_seconds=3600)
 
 
 def build(target, duration=100.0, limits=None, **params):
@@ -63,7 +63,7 @@ def test_options():
 def test_whole_file_stops_just_past_the_probed_length():
     cmd = build("mp3")
     assert cmd[cmd.index("-i") - 2 : cmd.index("-i")] == ["-t", "101"]
-    cmd = build("mp3", duration=3599.5, limits=FILESUSHI)
+    cmd = build("mp3", duration=3599.5, limits=CAPPED)
     assert cmd[cmd.index("-i") - 2 : cmd.index("-i")] == ["-t", "3600"]
     unlimited = build("mp3", duration=3599.5)
     assert unlimited[unlimited.index("-i") - 2 : unlimited.index("-i")] == ["-t", "3600.5"]
@@ -73,7 +73,7 @@ def test_whole_file_stops_just_past_the_probed_length():
         "-protocol_whitelist",
         "file",
         "-format_whitelist",
-        "3g2,3gp,aac,asf,avi,flac,flv,gif,m4a,matroska,mj2,mov,mp3,mp4,mpeg,mpegts,ogg,wav,webm",
+        "3g2,3gp,aac,ac3,aiff,amr,amrnb,amrwb,asf,au,avi,caf,dts,eac3,flac,flv,gif,m4a,matroska,mj2,mov,mp3,mp4,mpeg,mpegts,ogg,wav,webm,wv,yuv4mpegpipe",
     ]
 
 
@@ -100,15 +100,15 @@ def test_aac_and_opus_take_their_encoders_bitrates(target):
 
 def test_audio_length_limit():
     with pytest.raises(MediaTooLongError) as e:
-        build("mp3", duration=3601.0, limits=FILESUSHI)
+        build("mp3", duration=3601.0, limits=CAPPED)
     assert e.value.user_message == (
-        "Audio longer than 60 minutes isn't supported yet. Set a shorter duration to convert part of it."
+        "This audio is 1 hour 1 second long, and the limit is 1 hour. Set a shorter duration to convert part of it."
     )
     assert e.value.limit == "max_audio_seconds"
-    build("mp3", duration=7200.0, duration_seconds=3600, limits=FILESUSHI)
+    build("mp3", duration=7200.0, duration_seconds=3600, limits=CAPPED)
     config = AUDIO_CONVERT.from_params({"duration_seconds": 3601}, target="m4a")
     with pytest.raises(InvalidOptionsError) as e:
-        build_convert_command("in", "out", config, duration=7200.0, limits=FILESUSHI)
+        build_convert_command("in", "out", config, duration=7200.0, limits=CAPPED)
     assert e.value.user_message == "Audio clips can be at most 60 minutes long."
     with pytest.raises(InvalidOptionsError) as e:
         build("mp3", duration=700.0, duration_seconds=600.5, limits=Limits(max_audio_seconds=600))

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 The FileSushi Authors
 # SPDX-License-Identifier: Apache-2.0
 
+import math
 from typing import Annotated, Any, Self
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError
@@ -20,6 +21,8 @@ cutting exactly at the probed length would clip the end.
 
 DEFAULT_MAX_PIXELS = 64_000_000
 """The default of :attr:`Limits.max_pixels` (64 MP covers 48 MP phone photos)."""
+DEFAULT_MAX_SCAN_PACKETS = 2_000_000
+"""The default of :attr:`Limits.max_scan_packets`: about 7 hours of 30 fps video with AAC audio, or 18 hours of 30 fps video packets."""
 
 WEBP_MAX_SIDE = 16383
 """The widest and tallest WebP image, in pixels: the format's limit (contact sheets, frame strips)."""
@@ -76,6 +79,68 @@ def duration_text(seconds: float) -> str:
     return "1 second" if seconds == 1 else f"{seconds:g} seconds"
 
 
+def length_text(seconds: float) -> str:
+    """A media length as words, to the second: "45 seconds", "12 minutes 5 seconds", "1 hour 2 minutes"."""
+    total = max(0, round(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    parts = [(hours, "hour"), (minutes, "minute"), (secs, "second")]
+    words = [f"{n} {unit}{'' if n == 1 else 's'}" for n, unit in parts if n]
+    return " ".join(words[:2]) if words else "under a second"
+
+
+def rough_length_text(seconds: float) -> str:
+    """A rough media length: to the minute from a minute up ("43 minutes"), else to the second."""
+    return length_text(round(seconds / 60) * 60 if seconds >= 60 else max(seconds, 1))
+
+
+def _length_words(seconds: float, decimals: int) -> str:
+    total = max(0.0, seconds)
+    hours, rest = divmod(int(total), 3600)
+    minutes = rest // 60
+    secs = round(total - hours * 3600 - minutes * 60, decimals)
+    if secs >= 60:
+        minutes, secs = minutes + 1, secs - 60
+        if minutes == 60:
+            hours, minutes = hours + 1, 0
+    words = [f"{n} {unit}{'' if n == 1 else 's'}" for n, unit in ((hours, "hour"), (minutes, "minute")) if n]
+    if secs:
+        text = f"{secs:.{decimals}f}".rstrip("0").rstrip(".") if decimals else str(int(secs))
+        words.append(f"{text} second{'' if text == '1' else 's'}")
+    return " ".join(words) if words else "0 seconds"
+
+
+def _exact_length(seconds: float) -> tuple[str, float]:
+    for decimals in range(4):
+        if abs(round(seconds, decimals) - seconds) < 1e-9:
+            return _length_words(seconds, decimals), round(seconds, decimals)
+    return _length_words(seconds, 3), round(seconds, 3)
+
+
+def over_limit_texts(length: float, limit: float) -> tuple[str, str]:
+    """
+    A length refused under `limit` and the limit, as words in the same units ("10 minutes 0.4
+    seconds" and "10 minutes"), with the length given as precisely as it takes to read as more
+    than the limit: to the second when that is enough, else to the tenth, hundredth or
+    thousandth of a second, rounded down, or as "just over" the limit.
+    """
+    limit_words, shown_limit = _exact_length(limit)
+    if round(length) > shown_limit:
+        return _length_words(round(length), 0), limit_words
+    for decimals in (1, 2, 3):
+        cut = math.floor(length * 10**decimals) / 10**decimals
+        if cut > shown_limit:
+            return _length_words(cut, decimals), limit_words
+    return f"just over {limit_words}", limit_words
+
+
+def too_long_text(kind: str, length: float, start: float, limit: float) -> str:
+    """Why a whole `kind` (from `start`) is refused under a length limit, and what to do."""
+    length_words, limit_words = over_limit_texts(length, limit)
+    what = f"This {kind} is {length_words} long" if start <= 0 else f"From {start:g}s, this {kind} runs {length_words}"
+    return f"{what}, and the limit is {limit_words}. Set a shorter duration to convert part of it."
+
+
 def megabytes(size: int) -> str:
     """A size in bytes as whole megabytes (MiB), as people read them: "256 MB"."""
     return f"{round(size / MIB):,} MB"
@@ -104,8 +169,9 @@ class Limits(BaseModel):
     ``limits=``; ``None`` means ``Limits()``, these defaults.
 
     Each field is a number, or ``None`` for no limit. The defaults protect the machine (decoded
-    pixels and frames held in memory, contact sheet size) and leave lengths unlimited, since a
-    longer video takes longer but needs no more memory. ``Limits.unlimited()`` turns every limit off.
+    pixels and frames held in memory, contact sheet size, the packets read to measure a recording
+    that doesn't state its length) and leave lengths unlimited, since a longer video takes longer
+    but needs no more memory. ``Limits.unlimited()`` turns every limit off.
 
     A refusal states the limit in force in its ``user_message`` and names the field in its
     ``limit`` attribute. Format limits (WebP's 16383 pixels, the encoders' sample rates) and
@@ -119,7 +185,7 @@ class Limits(BaseModel):
     max_frame_bytes: _Count = 1024 * MIB
     """Video frames held in memory at once, at width x height x 3 bytes each: an animated contact sheet's clips, which are composited from memory. GIFs made from a video and GIF previews build their palette in a first pass, hold a few frames at a time, and don't count against it."""
     max_animation_bytes: _Count = 1024 * MIB
-    """The frames of an animated GIF or WebP being edited, at width x height x 4 bytes each (edits, frame selection, frame strips)."""
+    """The frames of an animation held in memory, at width x height x 4 bytes each: edits, frame selection and frame strips of animated GIFs and WebPs, and converting or resizing an animation to an animated GIF or WebP (at the output size)."""
     max_sheet_pixels: _Count = 64_000_000
     """The largest contact sheet, in pixels."""
     max_video_seconds: _Seconds = None
@@ -130,6 +196,8 @@ class Limits(BaseModel):
     """The longest GIF or animated WebP made from a video, and the longest preview (all its clips together)."""
     max_preview_clips: _Count = None
     """The most clips a preview takes."""
+    max_scan_packets: _Count = DEFAULT_MAX_SCAN_PACKETS
+    """Packets read to measure a file: a recording that doesn't state its length (a live capture that was never finalized) or a Matroska file that starts late is read to its end, and a video is read up to the time a contact sheet, preview or start time needs, to find the keyframe to decode from (about 20 microseconds of CPU time a packet). A file that needs more is refused. The default covers about 7 hours of 30 fps video with AAC audio, or 18 hours of video packets."""
 
     @classmethod
     def unlimited(cls) -> Self:
@@ -164,3 +232,16 @@ DEFAULT_LIMITS = Limits()
 def resolve_limits(limits: Limits | None) -> Limits:
     """`limits`, or the defaults when it is ``None``."""
     return DEFAULT_LIMITS if limits is None else limits
+
+
+def check_webp_size(width: int, height: int) -> None:
+    """Refuses a WebP output wider or taller than WebP can store (:data:`WEBP_MAX_SIDE`) with MediaTooLargeError."""
+    from sashimi.errors import MediaTooLargeError
+
+    if max(width, height) > WEBP_MAX_SIDE:
+        raise MediaTooLargeError(
+            f"This picture would be {width}x{height} pixels, and WebP can't be wider or taller than "
+            f"{WEBP_MAX_SIDE:,} pixels. Set a maximum width and height of {WEBP_MAX_SIDE:,} or less, or choose "
+            "another format.",
+            detail=f"{width}x{height} > {WEBP_MAX_SIDE}",
+        )
