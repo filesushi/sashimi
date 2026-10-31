@@ -24,7 +24,13 @@ from sashimi.core._ffmpeg import (
     stream_ffmpeg,
 )
 from sashimi.config._limits import Limits, resolve_limits, rough_length_text
-from sashimi.errors import BinaryNotFoundError, MediaTooLargeError, ProcessingError, UnsupportedMediaError
+from sashimi.errors import (
+    BinaryNotFoundError,
+    MediaTooLargeError,
+    ProcessingError,
+    UndecodableVideoError,
+    UnsupportedMediaError,
+)
 
 __all__ = ["MediaInfo", "StreamInfo", "anamorphic", "check_decodable", "probe", "VIDEO_CONTAINERS", "AUDIO_CONTAINERS"]
 
@@ -98,6 +104,16 @@ class MediaInfo(BaseModel):
     display_aspect_ratio: float | None = None
     fps: float | None = None
     video_codec: str | None = None
+    """ffprobe's codec name for the video, e.g. ``h264``; None when ffprobe names none (a codec FFmpeg can't decode)."""
+    video_codec_tag: str | None = None
+    """The codec tag the file stores for the video (``avc1``, ``hvc1``, ``brvm`` for Blackmagic RAW), if any."""
+    video_decodable: bool = True
+    """
+    False when sashimi can't make pictures from the video (see :func:`check_decodable`): FFmpeg
+    names no codec for it, the FFmpeg sashimi runs has no decoder for its codec (:func:`probe`
+    asks it), or it decodes it without its real colours (Dolby Vision in IPT, ProRes RAW). Routes that decode the picture then raise UndecodableVideoError; copies, ``strip`` and
+    audio extraction still work where the container allows. True for files without video.
+    """
     pixel_format: str | None = None
     """The video's pixel format as ffprobe names it, e.g. ``yuv420p`` (8-bit 4:2:0) or ``yuv420p10le``."""
     color_space: str | None = None
@@ -298,12 +314,23 @@ def parse_ffprobe_json(data: dict[str, Any]) -> MediaInfo:
             display_aspect_ratio=round(dar, 6) if dar else None,
             fps=_ratio(video.get("avg_frame_rate")) or _ratio(video.get("r_frame_rate")),
             video_codec=video.get("codec_name"),
+            video_codec_tag=_codec_tag(video),
+            video_decodable=_decodable(video.get("codec_name"), _known(video.get("color_space"))),
             pixel_format=video.get("pix_fmt"),
             color_space=_known(video.get("color_space")),
             color_transfer=_known(video.get("color_transfer")),
             color_primaries=_known(video.get("color_primaries")),
         )
     return MediaInfo(**info)
+
+
+def _codec_tag(stream: dict[str, Any]) -> str | None:
+    tag = stream.get("codec_tag_string")
+    return tag if isinstance(tag, str) and tag and not tag.startswith("[") else None
+
+
+def _decodable(codec: Any, color_space: str | None) -> bool:
+    return bool(codec) and codec not in ("none", "unknown", "prores_raw") and color_space != "ipt-c2"
 
 
 def anamorphic(source: MediaInfo | None) -> bool:
@@ -322,20 +349,58 @@ PRORES_RAW = (
     "This is ProRes RAW video, which has to be developed like a camera's raw photos; FFmpeg reads it without its "
     "colours, so sashimi can't make pictures from it."
 )
-LOSSLESS_STILL_WORK = "Lossless copies (remux, a cut that isn't accurate, removing metadata) still work."
+LOSSLESS_STILL_WORK = (
+    "Lossless copies (remux, a cut that isn't accurate, removing metadata) and extracting the sound still work."
+)
+
+
+CODEC_NAMES = {"brvm": "Blackmagic RAW"}
+"""Names for codec tags of video FFmpeg can't decode, for messages."""
+
+
+def undecodable_text(tag: str | None, codec: str | None = None) -> str:
+    """
+    Why sashimi can't make pictures from a video: FFmpeg doesn't know its codec (named by its codec
+    tag), or knows `codec` but the FFmpeg sashimi runs has no decoder for it. Pure.
+    """
+    if codec and codec not in ("none", "unknown"):
+        named = f"{codec} ({tag})" if tag and tag != codec else codec
+        return f"sashimi can't decode this video's picture: the FFmpeg it runs has no decoder for its codec, {named}."
+    known = f"{CODEC_NAMES[tag]} ({tag})" if tag in CODEC_NAMES else tag
+    what = f"its codec, {known}" if known else "its codec"
+    return f"sashimi can't decode this video's picture: FFmpeg has no decoder for {what}."
 
 
 def check_decodable(info: MediaInfo) -> None:
     """
-    Refuses, with UnsupportedMediaError, video whose pictures FFmpeg can't decode faithfully: Dolby
-    Vision whose base layer is in Dolby's IPT colour space (``ipt-c2``: profiles 5 and 20), which
-    only Dolby's reshaping turns into viewable colours, and ProRes RAW, which FFmpeg reads as
-    undeveloped sensor data. Routes that copy streams without decoding still work on them.
+    Refuses, with UndecodableVideoError (an UnsupportedMediaError), video whose pictures FFmpeg
+    can't decode faithfully: video whose codec ffprobe can't name (Blackmagic RAW and other codecs
+    FFmpeg has no decoder for), Dolby Vision whose base layer is in Dolby's IPT colour space
+    (``ipt-c2``: profiles 5 and 20), which only Dolby's reshaping turns into viewable colours, and
+    ProRes RAW, which FFmpeg reads as undeveloped sensor data. Routes that copy streams without
+    decoding still work on them. ``info.video_decodable`` says the same up front.
     """
+    if not info.has_video:
+        return
+    tag = info.video_codec_tag
     if info.color_space == "ipt-c2":
-        raise UnsupportedMediaError(f"{DOLBY_VISION_COLOURS} {LOSSLESS_STILL_WORK}", detail="color_space=ipt-c2")
+        raise UndecodableVideoError(
+            f"{DOLBY_VISION_COLOURS} {LOSSLESS_STILL_WORK}",
+            detail="color_space=ipt-c2",
+            codec=info.video_codec,
+            codec_tag=tag,
+        )
     if info.video_codec == "prores_raw":
-        raise UnsupportedMediaError(f"{PRORES_RAW} {LOSSLESS_STILL_WORK}", detail="codec=prores_raw")
+        raise UndecodableVideoError(
+            f"{PRORES_RAW} {LOSSLESS_STILL_WORK}", detail="codec=prores_raw", codec="prores_raw", codec_tag=tag
+        )
+    if not info.video_decodable:
+        raise UndecodableVideoError(
+            f"{undecodable_text(tag, info.video_codec)} {LOSSLESS_STILL_WORK}",
+            detail=f"codec={info.video_codec} tag={tag}",
+            codec=info.video_codec,
+            codec_tag=tag,
+        )
 
 
 def probe(input_path: str | os.PathLike[str], *, limits: Limits | None = None) -> MediaInfo:
@@ -376,7 +441,7 @@ def probe(input_path: str | os.PathLike[str], *, limits: Limits | None = None) -
         raise ProcessingError(f"ffprobe returned invalid JSON for {os.fspath(input_path)}: {e}") from e
     if not data.get("format"):
         raise UnsupportedMediaError("This file doesn't look like media we can read.")
-    info = parse_ffprobe_json(data)
+    info = _with_decoder(parse_ffprobe_json(data))
     if "gif" in info.container_names and info.duration and short_gif_frames(input_path):
         from sashimi.core._animation import gif_shown_seconds
 
@@ -389,6 +454,22 @@ def probe(input_path: str | os.PathLike[str], *, limits: Limits | None = None) -
         if (span := _late_span(input_path, data, cap)) is not None:
             info = info.model_copy(update={"duration": span})
     return info
+
+
+def _with_decoder(info: MediaInfo) -> MediaInfo:
+    """`info` with ``video_decodable`` False when the FFmpeg sashimi runs can't decode the video's codec."""
+    if not (info.has_video and info.video_decodable and info.video_codec):
+        return info
+    from sashimi.core._capabilities import decodable_codecs
+    from sashimi.core._ffmpeg import ffmpeg_binary
+
+    try:
+        codecs = decodable_codecs(ffmpeg_binary())
+    except BinaryNotFoundError:
+        return info
+    if codecs is None or info.video_codec in codecs:
+        return info
+    return info.model_copy(update={"video_decodable": False})
 
 
 def short_gif_frames(input_path: str | os.PathLike[str]) -> bool:

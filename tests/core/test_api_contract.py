@@ -273,3 +273,41 @@ def test_metadata_tools():
         metadata.MetadataInfo.model_fields
     )
     assert config.OPUS_MAX_KBPS_PER_CHANNEL == 256
+
+
+def test_new_in_0_8_0_for_reading_metadata():
+    from sashimi import errors, metadata, probe
+    from sashimi.core._metaread import MAX_FIELDS, MAX_SECTIONS, MAX_VALUE_CHARS
+    from sashimi.core.probe import MediaInfo
+    from sashimi.fidelity import Fidelity
+
+    assert {
+        "looked_for",
+        "not_counted",
+        "sections",
+        "sections_omitted",
+        "lens_make",
+        "lens_model",
+        "exposure_time",
+        "f_number",
+        "iso",
+        "focal_length",
+        "focal_length_35mm",
+        "image_direction",
+        "image_direction_ref",
+        "date_taken_offset",
+        "date_taken_subseconds",
+        "color_profile",
+        "thumbnail_size",
+        "maker_note",
+    } <= set(metadata.MetadataInfo.model_fields)
+    assert list(metadata.MetadataSection.model_fields) == ["carrier", "name", "stream", "counted", "fields", "omitted"]
+    assert list(metadata.MetadataField.model_fields) == ["name", "value"]
+    assert list(metadata.UncountedDetail.model_fields) == ["name", "value", "stream"]
+    assert (MAX_FIELDS, MAX_VALUE_CHARS, MAX_SECTIONS) == (200, 300, 100)
+    assert {"video_decodable", "video_codec_tag"} <= set(MediaInfo.model_fields)
+    assert issubclass(errors.UndecodableVideoError, errors.UnsupportedMediaError)
+    error = errors.UndecodableVideoError("No.", codec_tag="brvm")
+    assert error.codec_tag == "brvm" and error.codec is None
+    assert "kept" in Fidelity.model_fields
+    assert callable(probe)

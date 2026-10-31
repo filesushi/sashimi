@@ -74,6 +74,11 @@ class Fidelity(BaseModel):
     """What was left out as asked (``metadata``, ``keep_icc``, ``animated``, ``mute``): ``location``, ``sound``."""
     adjusted: list[str] = []
     """What was set as asked without changing the picture or sound, for people: ``display rotation set to 90° clockwise``."""
+    kept: list[str] = []
+    """
+    What a metadata removal left in place because showing the file needs it, for people:
+    ``orientation (turned 90° clockwise)``, ``colour profile (Display P3)``, ``resolution (72 dpi)``.
+    """
     notes: list[str] = []
     """Sentences explaining ``lost``, such as why a copy dropped a track and which format keeps it."""
     checked: bool = True
@@ -99,6 +104,8 @@ class Fidelity(BaseModel):
             parts.append(f"{and_list(self.lost)} dropped")
         if self.removed:
             parts.append(f"{and_list(self.removed)} removed as asked")
+        if self.kept:
+            parts.append(f"kept: {and_list(self.kept)}")
         text = "; ".join(parts)
         if self.notes:
             text += ". " + " ".join(self.notes).rstrip(".")
@@ -131,6 +138,7 @@ def fidelity(
     notes: Iterable[str] = (),
     checked: bool = True,
     adjusted: Iterable[str] = (),
+    kept: Iterable[str] = (),
 ) -> Fidelity:
     """A :class:`Fidelity`, its level worked out from what changed, what was lost and what was checked. Pure."""
     changed, lost, removed = _unique(changed), _unique(lost), _unique(removed)
@@ -147,6 +155,7 @@ def fidelity(
         lost=lost,
         removed=removed,
         adjusted=_unique(adjusted),
+        kept=_unique(kept),
         notes=_unique(notes),
         checked=checked,
     )
@@ -303,7 +312,7 @@ def image_inventory(path: str | os.PathLike[str], *, limits: Any = None) -> Inve
             inventory.add("pages", label=f"{frames - 1} more {'page' if frames == 2 else 'pages'}")
         elif frames > 1:
             inventory.add("animation", label=f"animation ({frames} frames)")
-    for name in carriers.found:
+    for name in info.carriers:
         label = _CARRIER_NAMES.get(name, name)
         if label:
             inventory.add(label, metadata=True)

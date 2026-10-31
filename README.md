@@ -95,8 +95,7 @@ about such a path when you set it.
 
 sashimi is tested on Linux, macOS and Windows with Python 3.11 to 3.14. Before 1.0, minor
 versions may change the Python API; the [changelog](https://github.com/filesushi/sashimi/blob/main/CHANGELOG.md)
-lists every change and [MIGRATION.md](https://github.com/filesushi/sashimi/blob/main/MIGRATION.md)
-how to upgrade.
+lists every change.
 
 ## Quick start
 
@@ -275,8 +274,26 @@ from sashimi import metadata
 info = metadata.read("upload.blob")          # decodes nothing; works on outputs too
 if info.has_location:
     print(info.latitude, info.longitude, info.carriers)   # 48.8584 2.2945 ['EXIF', 'GPS', 'XMP']
+for section in info.sections:                # every field read, by where it was found
+    print(section.name, [(f.name, f.value) for f in section.fields][:2])  # EXIF Exif IFD [('ExposureTime', '1/33'), …]
 metadata.strip("upload.blob", "clean.bin", "remove_all")  # same format, nothing re-encoded
 ```
+
+`read` returns highlights (location and the direction the camera faced, camera, lens, exposure,
+focal length, the capture date with its offset and fraction of a second, software, the colour
+profile's name, an EXIF thumbnail's size, whose maker note it holds; for video and audio the
+title, artist, album and creation time) and `sections`: every field it read, grouped by where it
+was found (EXIF IFD0, Exif, GPS, interoperability and thumbnail directories, the maker note, XMP,
+IPTC, Photoshop resources, the ICC profile, PNG text, comments; the file's tags, each stream's
+tags, chapters, cover art and timed metadata tracks of video and audio), with names as their
+standard spells them and values as readable text (at most 200 fields a section and 300 characters
+a value; what's left out is counted). `date_taken` is only a capture date (EXIF
+`DateTimeOriginal`, XMP and IPTC creation dates, QuickTime's `com.apple.quicktime.creationdate`, a
+recorded date), never when the file was written: that is `creation_time`. `carriers` lists only
+what sashimi counts as metadata to remove; `looked_for` says what it reads in that kind of file,
+and `not_counted` what is still there because showing or playing the file needs it (orientation,
+colour profile, resolution, the writing application, encoder, handler and language tags), so an
+empty `carriers` can be shown honestly.
 
 `strip` copies the compressed pixels byte for byte (JPEG, PNG, WebP, GIF, TIFF, HEIC, AVIF) and
 stream-copies video and audio (MKV, WebM, MP4, MOV, M4A, 3GP, MPEG-TS and M2TS, VOB and MPG, FLV,
@@ -395,6 +412,7 @@ sashimi preview clip.mp4 --output-format gif --crop 9:16  # vertical GIF preview
 sashimi info clip.mkv                                # container, duration, codecs
 sashimi info clip.gif                                # an image's size, frames and their durations
 sashimi metadata photo.jpg                           # camera, dates, location: what the file holds
+sashimi metadata photo.jpg --all                     # every field, by where it was found (EXIF, XMP, …)
 sashimi strip photos/ -r                             # remove metadata without re-encoding
 sashimi strip clip.mov --remove remove_location      # remove only GPS and place names
 sashimi convert photo.heic jpeg --metadata remove_all  # convert without the photo's metadata

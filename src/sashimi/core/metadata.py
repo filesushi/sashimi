@@ -4,9 +4,9 @@
 """Reading what metadata a file holds, for display, and removing it without re-encoding."""
 
 import json
+import math
 import os
 import re
-import struct
 import tempfile
 from typing import Any, Literal
 
@@ -36,14 +36,39 @@ from sashimi.core._imagemeta import (
     strip_image,
     xmp_has_location,
 )
+from sashimi.core._metaread import (
+    MAX_SECTIONS,
+    ORIENTATIONS,
+    ExifRead,
+    IccRead,
+    MetadataField,
+    MetadataSection,
+    UncountedDetail,
+    display_xmp_parts,
+    iptc_section,
+    maker_of,
+    photoshop_section,
+    readable,
+    xmp_section,
+)
+from sashimi.core._metaread import section as _section
 from sashimi.core._mediameta import dropped_streams, is_location_key, merged_movflags, metadata_args, quicktime_tag_args
-from sashimi.core._tiffmeta import GPS_IFD
 from sashimi.core.fidelity import Fidelity, Outcome
 from sashimi.core.image import _open_image
 from sashimi.core.probe import MediaInfo, parse_ffprobe_json, probe
 from sashimi.errors import BinaryNotFoundError, InvalidOptionsError, ProcessingError, UnsupportedMediaError
 
-__all__ = ["MetadataInfo", "StripResult", "build_strip_command", "read", "strip", "strip_format"]
+__all__ = [
+    "MetadataField",
+    "MetadataInfo",
+    "MetadataSection",
+    "UncountedDetail",
+    "StripResult",
+    "build_strip_command",
+    "read",
+    "strip",
+    "strip_format",
+]
 
 NOT_SUPPORTED = "Removing metadata from this kind of file isn't supported."
 NOT_MEDIA = "This file doesn't look like an image, video or audio file we can read."
@@ -67,7 +92,11 @@ class MetadataInfo(BaseModel):
     """
     The metadata sashimi found in a file, for showing to people: what it found, not a promise
     that nothing else is there. A camera or app may store data where no tool looks, so treat an
-    empty result as "nothing sashimi knows of".
+    empty result as "nothing sashimi knows of", and say what was looked for (``looked_for``) and
+    what is still in the file (``not_counted``).
+
+    The named fields are highlights; ``sections`` lists every field read, grouped by where it was
+    found (an EXIF directory, an XMP packet, a track's tags).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -79,8 +108,22 @@ class MetadataInfo(BaseModel):
     Where metadata was found, e.g. ``EXIF``, ``GPS``, ``XMP``, ``IPTC``, ``Photoshop``, ``comment``,
     ``PNG text``, ``QuickTime/MP4 tags``, ``Matroska tags``, ``ID3``, ``Vorbis comments``, ``RIFF
     INFO``, ``stream tags``, ``chapters``, ``cover art``, ``timed metadata track``. Empty when
-    nothing was found. The colour profile isn't listed (see ``has_color_profile``).
+    nothing sashimi counts as metadata was found: what showing or playing the file needs (an
+    orientation, a colour profile, encoder tags) isn't counted, and is listed in ``not_counted``.
     """
+    looked_for: list[str] = []
+    """The carriers sashimi reads in this kind of file, in the names ``carriers`` uses."""
+    not_counted: list[UncountedDetail] = []
+    """
+    What sashimi saw in the file but doesn't count as metadata to remove, because showing or
+    playing the file needs it or the format always records it: the orientation, colour profile
+    and resolution of an image; the writing application, each track's encoder, handler name and
+    language, the file type and display rotation of video and audio.
+    """
+    sections: list[MetadataSection] = []
+    """Every field read, grouped by where it was found, at most ``MAX_SECTIONS`` sections."""
+    sections_omitted: int = 0
+    """How many more sections the file holds than are listed."""
     has_location: bool = False
     """True if the file holds location data: coordinates, or place names such as a city."""
     latitude: float | None = None
@@ -89,21 +132,59 @@ class MetadataInfo(BaseModel):
     """Degrees east (negative is west), when the coordinates can be read."""
     altitude: float | None = None
     """Metres above sea level, when recorded."""
+    image_direction: float | None = None
+    """The direction the camera faced, in degrees clockwise from north (``image_direction_ref`` says which north)."""
+    image_direction_ref: Literal["true", "magnetic"] | None = None
+    """Whether ``image_direction`` is from true or magnetic north."""
     place: str | None = None
     """A place name recorded with the file (city, region, country), if any."""
     camera_make: str | None = None
     camera_model: str | None = None
+    lens_make: str | None = None
+    lens_model: str | None = None
+    """The lens as the camera names it, e.g. ``iPhone 16 Pro front TrueDepth camera 2.69mm f/1.9``."""
+    exposure_time: float | None = None
+    """The exposure time, in seconds (1/33 s is 0.0303)."""
+    f_number: float | None = None
+    """The aperture's f-number (1.9 for f/1.9)."""
+    iso: int | None = None
+    """The ISO speed."""
+    focal_length: float | None = None
+    """The lens's focal length, in millimetres."""
+    focal_length_35mm: float | None = None
+    """The focal length a 35 mm camera would need for the same view, in millimetres."""
     date_taken: str | None = None
-    """When the photo or video was taken (or, failing that, the file's recorded date), as stored."""
+    """
+    When the photo or video was taken, as stored: EXIF ``DateTimeOriginal`` (``2026:05:18
+    04:04:36``), XMP or IPTC creation dates, QuickTime ``com.apple.quicktime.creationdate``, a
+    recorded date. Never a file's or container's own date (when it was written or remuxed; see
+    ``creation_time``).
+    """
+    date_taken_offset: str | None = None
+    """The time zone of ``date_taken`` as an offset from UTC (``+03:00``), when stored."""
+    date_taken_subseconds: str | None = None
+    """The fraction of a second of ``date_taken`` as stored digits (``586`` for .586), when stored."""
     software: str | None = None
     title: str | None = None
     artist: str | None = None
     album: str | None = None
     creation_time: str | None = None
-    """A video's or song's creation time, as stored."""
+    """
+    When a video or audio file says it was made, as stored: its container's ``creation_time``
+    (usually when it was written, so a remux records the remux), else its ``date`` tag.
+    """
     comment: str | None = None
     has_color_profile: bool = False
     """True if the file has a colour profile (``keep_icc`` decides whether outputs keep it)."""
+    color_profile: str | None = None
+    """The colour profile's description, e.g. ``Display P3`` or ``sRGB IEC61966-2.1``."""
+    thumbnail_size: tuple[int, int] | None = None
+    """The width and height of a thumbnail the EXIF holds (it can show the picture before an edit)."""
+    maker_note: str | None = None
+    """
+    Who wrote the maker note the EXIF holds (``Apple``, ``Canon``, ``unknown``): a camera
+    maker's private data, which sashimi doesn't decode; None when there is none.
+    """
     display_rotation: int = 0
     """
     A video's display rotation: the clockwise turn players apply to show it (0, 90, 180 or 270).
@@ -129,9 +210,15 @@ def _text(value: Any) -> str | None:
 
 def _ratio(value: Any) -> float | None:
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError, ZeroDivisionError):
         return None
+    return number if math.isfinite(number) else None
+
+
+def _positive(value: Any) -> float | None:
+    number = _ratio(value[0] if isinstance(value, tuple) and value else value)
+    return number if number is not None and number > 0 else None
 
 
 def _dms(value: Any, ref: Any, negative: str) -> float | None:
@@ -163,35 +250,123 @@ def _xmp_coordinate(text: str | None) -> float | None:
     return -value if hemisphere in "SW" else value
 
 
+_OFFSET = re.compile(r"(?:(?<=\d)(Z)|([+-])(\d{2}):?(\d{2}))$")
+
+
+def offset_of(text: str | None) -> str | None:
+    """
+    The UTC offset a date or time ends with (``+0200``, ``+02:00``, ``Z``), or that a stored
+    offset is (EXIF ``OffsetTimeOriginal``), as ``+02:00``; None without one. Pure.
+    """
+    if not text:
+        return None
+    match = _OFFSET.search(text.strip())
+    if not match:
+        return None
+    if match.group(1):
+        return "+00:00"
+    return f"{match.group(2)}{match.group(3)}:{match.group(4)}"
+
+
+def _iptc_date(iptc: bytes) -> tuple[str | None, str | None]:
+    date, time = iptc_value(iptc, 55), iptc_value(iptc, 60)
+    if not date or not re.fullmatch(r"\d{8}", date):
+        return None, None
+    text = f"{date[:4]}:{date[4:6]}:{date[6:]}"
+    if time and re.match(r"\d{6}", time):
+        text += f" {time[:2]}:{time[2:4]}:{time[4:6]}"
+        return text, offset_of(time[6:]) if len(time) > 6 else None
+    return text, None
+
+
+def _resolution(img: Image.Image, exif: ExifRead | None) -> str | None:
+    from sashimi.core._imagemeta import stated_dpi
+
+    dpi = stated_dpi(img)
+    if dpi is None and exif is not None and exif.ifd0.get(0x0128, 2) in (2, 3):
+        x, y = _ratio(exif.ifd0.get(0x011A)), _ratio(exif.ifd0.get(0x011B))
+        if x and y and x > 0 and y > 0:
+            dpi = (x * 2.54, y * 2.54) if exif.ifd0.get(0x0128) == 3 else (x, y)
+    if dpi is None:
+        return None
+    x, y = (round(value, 2) for value in dpi)
+    return f"{x:g} dpi" if x == y else f"{x:g}x{y:g} dpi"
+
+
+def _orientation(exif: ExifRead | None, xmp: bytes | None) -> int | None:
+    value = exif.ifd0.get(0x0112) if exif is not None else None
+    if not isinstance(value, int) and xmp is not None:
+        stored = _xmp_value(xmp, "Orientation")
+        value = int(stored) if stored and stored.isdigit() else None
+    return value if isinstance(value, int) else None
+
+
+def _image_looked_for(fmt: str) -> list[str]:
+    if fmt in ("JPEG", "MPO"):
+        return ["EXIF", "GPS", "XMP", "extended XMP", "IPTC", "Photoshop", "comment"]
+    if fmt == "PNG":
+        return ["EXIF", "GPS", "XMP", "PNG text", "comment"]
+    if fmt == "GIF":
+        return ["XMP", "comment"]
+    if fmt == "TIFF":
+        return ["EXIF", "GPS", "XMP", "IPTC", "Photoshop"]
+    return ["EXIF", "GPS", "XMP"]
+
+
 def _image_info(path: PathLike, img: Image.Image, carriers: Carriers) -> MetadataInfo:
     fields: dict[str, Any] = {"kind": "image", "carriers": list(carriers.found)}
     tags: dict[str, str] = {}
+    sections: list[MetadataSection] = []
+    uncounted: list[UncountedDetail] = []
     location = False
-    if carriers.exif is not None:
-        exif = Image.Exif()
-        try:
-            exif.load(b"Exif\x00\x00" + carriers.exif)
-            fields["camera_make"] = _text(exif.get(0x010F))
-            fields["camera_model"] = _text(exif.get(0x0110))
-            fields["software"] = _text(exif.get(0x0131))
-            fields["artist"] = _text(exif.get(0x013B))
-            details = exif.get_ifd(0x8769)
-            fields["date_taken"] = _text(details.get(0x9003)) or _text(exif.get(0x0132))
-            description = _text(exif.get(0x010E))
-            if description:
-                tags["ImageDescription"] = description
-            gps = exif.get_ifd(GPS_IFD)
-            if gps:
-                location = True
-                fields["latitude"] = _dms(gps.get(2), gps.get(1), "S")
-                fields["longitude"] = _dms(gps.get(4), gps.get(3), "W")
-                altitude = _ratio(gps.get(6))
-                if altitude is not None:
-                    fields["altitude"] = -altitude if gps.get(5) in (1, b"\x01") else altitude
-        except (ValueError, TypeError, KeyError, struct.error, SyntaxError):
-            pass
+    fmt = str(img.format)
+    exif = ExifRead(carriers.exif) if carriers.exif is not None else None
+    if exif is not None:
+        sections += exif.sections()
+        ifd0, details, gps = exif.ifd0, exif.details, exif.gps
+        fields["camera_make"] = _text(ifd0.get(0x010F))
+        fields["camera_model"] = _text(ifd0.get(0x0110))
+        fields["software"] = _text(ifd0.get(0x0131))
+        fields["artist"] = _text(ifd0.get(0x013B))
+        fields["date_taken"] = _text(details.get(0x9003))
+        if fields["date_taken"]:
+            fields["date_taken_offset"] = offset_of(_text(details.get(0x9011)) or "")
+            subseconds = _text(details.get(0x9291))
+            fields["date_taken_subseconds"] = subseconds if subseconds and subseconds.isdigit() else None
+        fields["lens_make"] = _text(details.get(0xA433))
+        fields["lens_model"] = _text(details.get(0xA434))
+        fields["exposure_time"] = _positive(details.get(0x829A))
+        fields["f_number"] = _positive(details.get(0x829D))
+        iso = details.get(0x8827)
+        iso = iso[0] if isinstance(iso, tuple) and iso else iso
+        fields["iso"] = iso if isinstance(iso, int) and iso > 0 else None
+        fields["focal_length"] = _positive(details.get(0x920A))
+        fields["focal_length_35mm"] = _positive(details.get(0xA405))
+        if exif.maker_note is not None:
+            fields["maker_note"] = maker_of(exif.maker_note, exif.make)
+        fields["thumbnail_size"] = exif.thumbnail
+        description = _text(ifd0.get(0x010E))
+        if description:
+            tags["ImageDescription"] = description[:200]
+        if gps:
+            location = True
+            fields["latitude"] = _dms(gps.get(2), gps.get(1), "S")
+            fields["longitude"] = _dms(gps.get(4), gps.get(3), "W")
+            altitude = _ratio(gps.get(6))
+            if altitude is not None:
+                fields["altitude"] = -altitude if gps.get(5) in (1, b"\x01") else altitude
+            direction = _ratio(gps.get(0x11))
+            if direction is not None and 0 <= direction <= 360:
+                fields["image_direction"] = direction
+                reference = _text(gps.get(0x10))
+                fields["image_direction_ref"] = {"T": "true", "M": "magnetic"}.get(reference or "")
     if carriers.xmp is not None:
         xmp = carriers.xmp
+        shown = display_xmp_parts(xmp)
+        sections.append(xmp_section(xmp, counted=not shown))
+        if shown:
+            fields["carriers"] = [name for name in fields["carriers"] if name != "XMP"]
+            uncounted.append(UncountedDetail(name="display XMP", value=", ".join(shown)))
         if xmp_has_location(xmp):
             location = True
             if fields.get("latitude") is None:
@@ -199,23 +374,34 @@ def _image_info(path: PathLike, img: Image.Image, carriers: Carriers) -> Metadat
                 fields["longitude"] = _xmp_coordinate(_xmp_value(xmp, "GPSLongitude"))
         fields["camera_make"] = fields.get("camera_make") or _xmp_value(xmp, "Make")
         fields["camera_model"] = fields.get("camera_model") or _xmp_value(xmp, "Model")
+        fields["lens_model"] = fields.get("lens_model") or _xmp_value(xmp, "LensModel") or _xmp_value(xmp, "Lens")
         fields["software"] = fields.get("software") or _xmp_value(xmp, "CreatorTool")
-        fields["date_taken"] = fields.get("date_taken") or _xmp_value(xmp, "DateTimeOriginal")
-        fields["date_taken"] = fields.get("date_taken") or _xmp_value(xmp, "CreateDate")
+        if not fields.get("date_taken"):
+            taken = _xmp_value(xmp, "DateTimeOriginal") or _xmp_value(xmp, "DateCreated")
+            fields["date_taken"] = taken
+            fields["date_taken_offset"] = offset_of(taken)
         places = [_xmp_value(xmp, name) for name in ("City", "State", "Country")]
         if any(places):
             fields["place"] = ", ".join(place for place in places if place)
     if carriers.photoshop is not None:
         location = location or photoshop_has_location(carriers.photoshop)
+        sections.append(photoshop_section(carriers.photoshop))
         iptc = photoshop_iptc(carriers.photoshop)
         if iptc:
+            sections.append(iptc_section(iptc))
             location = location or iptc_has_location(iptc)
             places = [iptc_value(iptc, number) for number in (90, 95, 101)]
             if any(places) and not fields.get("place"):
                 fields["place"] = ", ".join(place for place in places if place)
+            if not fields.get("date_taken"):
+                fields["date_taken"], fields["date_taken_offset"] = _iptc_date(iptc)
+            fields["artist"] = fields.get("artist") or iptc_value(iptc, 80)
+    text_pairs: list[tuple[str, Any]] = []
     for kind, payload in carriers.png_text:
         key, value = png_text(kind, payload)
         name = key.decode("latin-1", "replace")
+        raw = _PNG_RAW.match(name)
+        text_pairs.append((name, f"({len(value):,} bytes of encoded {raw.group(1).upper()})" if raw else value))
         text = _text(value)
         if not text:
             continue
@@ -228,16 +414,43 @@ def _image_info(path: PathLike, img: Image.Image, carriers: Carriers) -> Metadat
             fields["software"] = fields.get("software") or text
         elif lowered == "creation time":
             fields["date_taken"] = fields.get("date_taken") or text
-        elif lowered != "comment" and not lowered.startswith("raw profile type"):
+        elif lowered != "comment" and not raw:
             tags[name] = text[:200]
         if is_location_key(name):
             location = True
+    if text_pairs:
+        sections.append(_section("PNG text", "PNG text", text_pairs))
     if carriers.comments:
         fields["comment"] = _text(carriers.comments[0])
+        if fmt != "PNG":
+            sections.append(_section("comment", "Comments", [("Comment", c) for c in carriers.comments]))
+    icc = img.info.get("icc_profile")
+    if isinstance(icc, bytes) and icc:
+        profile = IccRead(icc)
+        sections.append(profile.section())
+        fields["color_profile"] = profile.description
+        uncounted.append(UncountedDetail(name="colour profile", value=profile.description or f"({len(icc):,} bytes)"))
+    orientation = _orientation(exif, carriers.xmp)
+    if orientation is not None:
+        meaning = ORIENTATIONS.get(orientation)
+        uncounted.insert(
+            0, UncountedDetail(name="orientation", value=f"{orientation} ({meaning})" if meaning else str(orientation))
+        )
+    resolution = _resolution(img, exif)
+    if resolution:
+        uncounted.append(UncountedDetail(name="resolution", value=resolution))
+    if not fields.get("date_taken"):
+        fields["date_taken_offset"] = fields["date_taken_subseconds"] = None
     fields["has_location"] = location
-    fields["has_color_profile"] = bool(img.info.get("icc_profile"))
+    fields["has_color_profile"] = bool(icc)
     fields["tags"] = tags
+    fields["looked_for"] = _image_looked_for(fmt)
+    fields["not_counted"] = uncounted
+    fields["sections"], fields["sections_omitted"] = sections[:MAX_SECTIONS], max(0, len(sections) - MAX_SECTIONS)
     return MetadataInfo(**{key: value for key, value in fields.items() if value is not None})
+
+
+_PNG_RAW = re.compile(r"(?i)^raw profile type (\w+)$")
 
 
 def _probe_full(path: PathLike) -> dict[str, Any]:
@@ -276,12 +489,86 @@ def _tag(tags: dict[str, str], *names: str) -> str | None:
     return None
 
 
+def _trivial(key: str, value: str) -> bool:
+    return bool(_TRIVIAL_TAGS.match(key)) and not (key.lower() == "encoder" and not value.startswith("Lav"))
+
+
 def _interesting(tags: dict[str, str]) -> dict[str, str]:
-    return {
-        key: value
-        for key, value in tags.items()
-        if not _TRIVIAL_TAGS.match(key) or (key.lower() == "encoder" and not value.startswith("Lav"))
-    }
+    return {key: value for key, value in tags.items() if not _trivial(key, value)}
+
+
+_UNCOUNTED_TAGS = {
+    "encoder": "writing application",
+    "handler_name": "handler name",
+    "vendor_id": "vendor",
+    "language": "language",
+}
+_FILE_TYPE = ("major_brand", "minor_version", "compatible_brands")
+
+
+def _uncounted(tags: dict[str, str], stream: int | None) -> list[UncountedDetail]:
+    found = []
+    lowered = {key.lower(): value for key, value in tags.items()}
+    for key, name in _UNCOUNTED_TAGS.items():
+        value = _text(lowered.get(key))
+        if value and _trivial(key, value) and not (key == "language" and value == "und"):
+            label = "encoder" if key == "encoder" and stream is not None else name
+            found.append(UncountedDetail(name=label, value=readable(value), stream=stream))
+    brands = [lowered[key].strip() for key in ("major_brand", "compatible_brands") if _text(lowered.get(key))]
+    if brands:
+        found.append(UncountedDetail(name="file type", value=readable(" ".join(dict.fromkeys(brands))), stream=stream))
+    return found
+
+
+def _stream_heading(index: int, stream: dict[str, Any], what: str = "tags") -> str:
+    kind = stream.get("codec_type", "unknown")
+    codec = stream.get("codec_name") or stream.get("codec_tag_string") or "unknown"
+    if codec == "unknown" and stream.get("codec_tag_string"):
+        codec = stream["codec_tag_string"]
+    return f"Stream {index} {what} ({kind}, {codec})" if what else f"Stream {index} ({kind}, {codec})"
+
+
+def _chapter_section(chapters: list[dict[str, Any]]) -> MetadataSection:
+    from sashimi.core._ffmpeg import fmt_seconds
+
+    pairs = []
+    for number, chapter in enumerate(chapters, 1):
+        start, end = _ratio(chapter.get("start_time")), _ratio(chapter.get("end_time"))
+        span = f"{fmt_seconds(start)}s-{fmt_seconds(end)}s" if start is not None and end is not None else ""
+        title = _text((chapter.get("tags") or {}).get("title"))
+        pairs.append((f"Chapter {number}", " ".join(part for part in (span, title and f"{title}") if part)))
+        for key, value in (chapter.get("tags") or {}).items():
+            if key.lower() != "title":
+                pairs.append((f"Chapter {number} {key}", value))
+    return _section("chapters", "Chapters", pairs)
+
+
+def _media_sections(data: dict[str, Any], family: str, info: MediaInfo) -> list[MetadataSection]:
+    sections = []
+    fmt_tags = info.tags
+    if fmt_tags:
+        sections.append(_section(family, family, fmt_tags.items(), counted=bool(_interesting(fmt_tags))))
+    raw_streams = data.get("streams", [])
+    for index, stream in enumerate(info.streams):
+        raw = raw_streams[index] if index < len(raw_streams) else {}
+        if stream.attached_pic:
+            heading = _stream_heading(index, raw, "cover art")
+            pairs: list[tuple[str, Any]] = [("Codec", stream.codec)]
+            if raw.get("width") and raw.get("height"):
+                pairs.append(("Size", f"{raw['width']}x{raw['height']}"))
+            pairs += list(stream.tags.items())
+            sections.append(_section("cover art", heading, pairs, stream=index))
+        elif stream.type == "data" and not stream.chapter_track:
+            heading = _stream_heading(index, raw, "timed metadata")
+            pairs = [("Codec tag", stream.codec_tag or "unknown"), *stream.tags.items()]
+            sections.append(_section("timed metadata track", heading, pairs, stream=index))
+        elif stream.tags:
+            heading = _stream_heading(index, raw)
+            counted = bool(_interesting({k: v for k, v in stream.tags.items() if k.lower() != "title" or v}))
+            sections.append(_section("stream tags", heading, stream.tags.items(), stream=index, counted=counted))
+    if data.get("chapters"):
+        sections.append(_chapter_section(data["chapters"]))
+    return sections
 
 
 def _media_info(data: dict[str, Any]) -> MetadataInfo:
@@ -289,9 +576,9 @@ def _media_info(data: dict[str, Any]) -> MetadataInfo:
     names = info.container_names
     kind: Literal["video", "audio"] = "video" if info.has_video else "audio"
     global_tags = _interesting(info.tags)
+    family = next((label for name, label in _FAMILY if name in names), "tags")
     carriers: list[str] = []
     if global_tags:
-        family = next((label for name, label in _FAMILY if name in names), "tags")
         carriers.append(family)
     stream_tags = [_interesting({k: v for k, v in s.tags.items() if k.lower() != "title" or v}) for s in info.streams]
     if any(stream_tags):
@@ -318,18 +605,35 @@ def _media_info(data: dict[str, Any]) -> MetadataInfo:
                 fields["altitude"] = float(match.group(3))
     fields["has_location"] = location
     fields["place"] = _tag(every, "com.apple.quicktime.location.name")
-    fields["camera_make"] = _tag(every, "com.apple.quicktime.make", "make", "com.android.manufacturer")
-    fields["camera_model"] = _tag(every, "com.apple.quicktime.model", "model", "com.android.model")
+    fields["camera_make"] = _tag(every, "com.apple.quicktime.make", "make", "com.android.manufacturer", "manufacturer")
+    fields["camera_model"] = _tag(every, "com.apple.quicktime.model", "model", "com.android.model", "camera_type")
+    fields["lens_model"] = _tag(every, "com.apple.quicktime.camera.lens_model")
+    fields["focal_length_35mm"] = _positive(_tag(every, "com.apple.quicktime.camera.focal_length.35mm_equivalent"))
     fields["software"] = _tag(every, "com.apple.quicktime.software", "software", "encoded_by")
     fields["title"] = _tag(every, "title")
     fields["artist"] = _tag(every, "artist", "album_artist", "author")
     fields["album"] = _tag(every, "album")
-    fields["creation_time"] = _tag(every, "com.apple.quicktime.creationdate", "creation_time", "date")
-    fields["date_taken"] = _tag(every, "com.apple.quicktime.creationdate", "creation_time")
+    fields["creation_time"] = _tag(info.tags, "creation_time", "date") or _tag(every, "creation_time")
+    taken = _tag(every, *_CAPTURE_DATES)
+    fields["date_taken"] = taken
+    fields["date_taken_offset"] = offset_of(taken)
     fields["comment"] = _tag(every, "comment", "description")
     fields["display_rotation"] = info.display_turn
-    fields["tags"] = global_tags
+    fields["tags"] = {key: value for key, value in global_tags.items()}
+    uncounted = _uncounted(info.tags, None)
+    for index, stream in enumerate(info.streams):
+        uncounted += _uncounted(stream.tags, index)
+    if info.display_turn:
+        uncounted.append(UncountedDetail(name="display rotation", value=f"{info.display_turn}° clockwise"))
+    fields["not_counted"] = uncounted
+    fields["looked_for"] = [family, "stream tags", "chapters", "cover art", "timed metadata track"]
+    sections = _media_sections(data, family, info)
+    fields["sections"], fields["sections_omitted"] = sections[:MAX_SECTIONS], max(0, len(sections) - MAX_SECTIONS)
     return MetadataInfo(**{key: value for key, value in fields.items() if value is not None})
+
+
+_CAPTURE_DATES = ("com.apple.quicktime.creationdate", "date_recorded")
+"""Tags that hold when a video or recording was captured (``creation_time`` is when the file was written)."""
 
 
 def _as_image(path: PathLike, limits: Limits | None) -> MetadataInfo | None:
@@ -405,7 +709,7 @@ def _media_muxer(input_path: PathLike, info: MediaInfo) -> str:
         brand = (
             (head[8:12].decode("latin-1") if head[4:8] == b"ftyp" else info.tags.get("major_brand", "")).strip().lower()
         )
-        if brand == "qt":
+        if brand in ("qt", ""):
             return "mov"
         if brand in ("m4a", "m4b"):
             return "ipod"
@@ -500,14 +804,38 @@ MOTION_KEPT = {
 def _image_strip_fidelity(
     input_path: PathLike, output_path: PathLike, mode: MetadataMode, keep_icc: bool, notes: list[str]
 ) -> Fidelity:
-    from sashimi.core.fidelity import COLOUR_PROFILE, differences, fidelity, image_inventory
+    from sashimi.core.fidelity import COLOUR_PROFILE, and_list, differences, fidelity, image_inventory
 
     source, output = image_inventory(input_path), image_inventory(output_path)
     asked = [name for name in source.items if name in _STRIPPED_WITH_METADATA and name not in output.items]
     if not keep_icc:
         asked.append(COLOUR_PROFILE)
     lost, removed = differences(source, output, removed_metadata=mode, removed=asked)
-    return fidelity("picture", lost=lost, removed=removed, notes=notes, checked=source.checked)
+    after = read(output_path, limits=Limits.unlimited())
+    left = {detail.name: detail.value for detail in after.not_counted}
+    if "EXIF" in removed and any(s.carrier == "EXIF" for s in after.sections):
+        rest = [f"the {name}" for name in ("orientation", "resolution") if _in_exif(after, name)]
+        removed[removed.index("EXIF")] = f"EXIF (all but {and_list(rest)})" if rest else "EXIF"
+    if "XMP" in removed and "display XMP" in left:
+        shown = and_list(left["display XMP"].split(", "))
+        removed[removed.index("XMP")] = f"XMP (all but how to show the {shown})"
+    kept = [_kept_text(name, value) for name, value in left.items()] if mode == "remove_all" else []
+    return fidelity("picture", lost=lost, removed=removed, notes=notes, checked=source.checked, kept=kept)
+
+
+_EXIF_FIELDS = {"orientation": ("Orientation",), "resolution": ("XResolution", "YResolution")}
+
+
+def _in_exif(info: MetadataInfo, name: str) -> bool:
+    fields = {f.name for s in info.sections if s.carrier == "EXIF" for f in s.fields}
+    return any(field in fields for field in _EXIF_FIELDS[name])
+
+
+def _kept_text(name: str, value: str) -> str:
+    """``orientation (turned 90° clockwise)``, ``colour profile (Display P3)``. Pure."""
+    if name == "orientation":
+        value = value.partition(" (")[2].rstrip(")") or value
+    return f"{name} ({value})"
 
 
 def _needs_stripping(inventory: Any, mode: MetadataMode) -> bool:
@@ -635,14 +963,15 @@ def strip(
         cmd = build_strip_command(input_path, temp, mode, source=info, muxer=muxer, ffmpeg=ffmpeg_binary())
         run_ffmpeg(cmd)
     from sashimi.core.fidelity import media_fidelity
-    from sashimi.core.video import _mode_removals, _timecode_kept, hidden_tail, tail_text
+    from sashimi.core.video import _mode_removals, _timecode_kept, tail_report
 
-    tail = hidden_tail(input_path, info) if info.has_video else 0
+    tail, notes = tail_report(input_path, info) if info.has_video else ([], [])
     told = media_fidelity(
         input_path,
         output_path,
         "picture and sound" if info.has_video and info.has_audio else "picture" if info.has_video else "sound",
-        changed=[tail_text(tail)] if tail else [],
+        changed=tail,
+        notes=notes,
         removed_metadata=mode,
         removed=_mode_removals(info, mode),
         kept=_timecode_kept(info),

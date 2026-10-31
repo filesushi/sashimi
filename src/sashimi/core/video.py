@@ -4,6 +4,7 @@
 """Video conversion (GIF/animated WebP/WebM/MP4), lossless or frame-accurate trimming, and rotate/flip."""
 
 import logging
+import os
 from collections.abc import Collection, Sequence
 from typing import Literal
 
@@ -458,11 +459,13 @@ GENERATED_PTS = frozenset({"mpeg"})
 _LEAD_PACKETS = 256
 
 
-def hidden_lead(input_path: PathLike) -> float:
+def hidden_lead(input_path: PathLike) -> float | None:
     """
     How many seconds of video a file keeps hidden before its start: packets an MP4 or MOV edit list
     shows before time 0 or marks to discard (a phone's pre-roll, Dolby Vision's leading GOP). A
-    stream copy with ``-avoid_negative_ts make_zero`` would show them. Reads the first packets only.
+    stream copy with ``-avoid_negative_ts make_zero`` would show them. None when ffprobe couldn't
+    read the first packets, so it isn't known (:func:`lead_report` says so). Reads the first
+    packets only.
     """
     cmd = [ffprobe_binary(), "-hide_banner", "-loglevel", "error", *INPUT_PROTOCOLS, "-select_streams", "V:0"]
     cmd += ["-read_intervals", f"%+#{_LEAD_PACKETS}", "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0"]
@@ -470,8 +473,9 @@ def hidden_lead(input_path: PathLike) -> float:
         listing = run_ffmpeg([*cmd, file_arg(input_path)], capture_stdout=True).decode("ascii", "replace")
     except BinaryNotFoundError:
         raise
-    except ProcessingError:
-        return 0.0
+    except ProcessingError as e:
+        logger.info("Couldn't read the first packets of %s: %s", os.fspath(input_path), str(e).splitlines()[0])
+        return None
     earliest = 0.0
     for line in listing.splitlines():
         fields = line.strip().split(",")
@@ -484,11 +488,13 @@ def hidden_lead(input_path: PathLike) -> float:
     return round(-earliest, 6)
 
 
-def hidden_tail(input_path: PathLike, info: MediaInfo) -> int:
+def hidden_tail(input_path: PathLike, info: MediaInfo) -> int | None:
     """
     How many video frames an MP4 or MOV file keeps hidden after its end: packets marked to discard
     in its last seconds (some iPhone recordings). A stream copy shows them, since no container
-    sashimi writes can hide frames after the end. 0 for other containers. Reads the last packets only.
+    sashimi writes can hide frames after the end. 0 for other containers; None when ffprobe
+    couldn't read the last packets, so it isn't known (:func:`tail_report` says so). Reads the
+    last packets only.
     """
     if not info.container_names & {"mov", "mp4"} or not info.duration:
         return 0
@@ -499,8 +505,9 @@ def hidden_tail(input_path: PathLike, info: MediaInfo) -> int:
         listing = run_ffmpeg(cmd, capture_stdout=True).decode("ascii", "replace")
     except BinaryNotFoundError:
         raise
-    except ProcessingError:
-        return 0
+    except ProcessingError as e:
+        logger.info("Couldn't read the last packets of %s: %s", os.fspath(input_path), str(e).splitlines()[0])
+        return None
     hidden = 0
     for line in listing.splitlines():
         fields = line.strip().split(",")
@@ -511,6 +518,32 @@ def hidden_tail(input_path: PathLike, info: MediaInfo) -> int:
         if time >= 0 and "D" in (fields[1] if len(fields) > 1 else ""):
             hidden += 1
     return hidden
+
+
+LEAD_UNCHECKED = (
+    "sashimi couldn't read the source's first packets, so the copy may show frames the source keeps hidden at its start"
+)
+"""What a copy's ``fidelity.notes`` says when :func:`hidden_lead` couldn't tell."""
+
+
+def lead_report(input_path: PathLike) -> tuple[float, list[str]]:
+    """``(hidden, notes)`` for a copy of `input_path`: the seconds :func:`hidden_lead` found (0 when unknown), and a note when it couldn't tell."""
+    lead = hidden_lead(input_path)
+    return (0.0, [LEAD_UNCHECKED]) if lead is None else (lead, [])
+
+
+TAIL_UNCHECKED = (
+    "sashimi couldn't read the source's last packets, so the copy may show frames the source keeps hidden at its end"
+)
+"""What a copy's ``fidelity.notes`` says when :func:`hidden_tail` couldn't tell."""
+
+
+def tail_report(input_path: PathLike, info: MediaInfo) -> tuple[list[str], list[str]]:
+    """``(changed, notes)`` for a copy to the end of `input_path`: the frames it shows that the source hides, or that it couldn't tell."""
+    tail = hidden_tail(input_path, info)
+    if tail is None:
+        return [], [TAIL_UNCHECKED]
+    return ([tail_text(tail)] if tail else []), []
 
 
 _TAIL_SECONDS = 3.0
@@ -887,12 +920,22 @@ def convert(
                 decode_from=decode_from,
                 origin=origin,
                 browser_timing=retime,
-                hidden=hidden_lead(input_path) if route != "encode" else 0.0,
+                hidden=_lead(route),
             )
             run_ffmpeg(cmd, progress_total=expected, on_progress=report, stage="encoding")
             if config.start_seconds > 0 and not animated:
                 _require_video(temp, input_path, config.start_seconds, ffmpeg, "convert", index)
         return route
+
+    lead_notes: list[str] = []
+
+    def _lead(route: VideoRoute) -> float:
+        if route == "encode":
+            lead_notes.clear()
+            return 0.0
+        hidden, notes = lead_report(input_path)
+        lead_notes[:] = notes
+        return hidden
 
     _log_opus_cap(config, info)
     planned = plan_mp4_route(info, config) if isinstance(config, Mp4VideoConfig) else "encode"
@@ -911,22 +954,30 @@ def convert(
             raise
         logger.info(f"Copying into MP4 failed, re-encoding instead: {str(e).splitlines()[0]}")
         taken = run("encode")
-    told = _conversion_fidelity(input_path, output_path, config, info, taken)
+    told = _conversion_fidelity(input_path, output_path, config, info, taken, lead_notes)
     if on_progress:
         on_progress(1.0, "done")
     return VideoConversion(route=taken, fidelity=told)
 
 
 def _conversion_fidelity(
-    input_path: PathLike, output_path: PathLike, config: VideoConvertConfig, info: MediaInfo, route: VideoRoute
+    input_path: PathLike,
+    output_path: PathLike,
+    config: VideoConvertConfig,
+    info: MediaInfo,
+    route: VideoRoute,
+    lead_notes: Sequence[str] = (),
 ) -> Fidelity:
     if isinstance(config, (GifVideoConfig, WebpVideoConfig)):
         return _animated_fidelity(input_path, config, info)
     if route == "encode" or not isinstance(config, Mp4VideoConfig):
         return _reencode_fidelity(input_path, output_path, config, info)
     changed = [] if route == "copy" else _encoded(config, info)[-1:]
-    if config.duration_seconds is None and (tail := hidden_tail(input_path, info)):
-        changed.append(tail_text(tail))
+    notes: list[str] = list(lead_notes)
+    if config.duration_seconds is None:
+        tail, tail_notes = tail_report(input_path, info)
+        changed += tail
+        notes += tail_notes
     data = [index for index, stream in enumerate(info.streams) if stream.type == "data"]
     return _copy_fidelity(
         input_path,
@@ -938,6 +989,7 @@ def _conversion_fidelity(
         changed=changed,
         muted=config.mute,
         forced=data,
+        notes=notes,
     )
 
 
@@ -1144,6 +1196,7 @@ def _copy_fidelity(
     muted: bool = False,
     adjusted: Sequence[str] = (),
     forced: Collection[int] = (),
+    notes: Sequence[str] = (),
 ) -> Fidelity:
     """
     What a stream copy kept: the picture and sound as they were, then the tracks and tags (see
@@ -1176,7 +1229,7 @@ def _copy_fidelity(
             *(["sound"] if muted and info.has_audio else []),
         ],
         kept=[*_timecode_kept(info), *(["display rotation"] if adjusted else [])],
-        notes=[note] if note else [],
+        notes=[*([note] if note else []), *notes],
         lost=lost,
         adjusted=adjusted,
     )
@@ -1415,7 +1468,7 @@ def trim(
             if decode_from is not None:
                 origin = index.origin(decode_from, audio=not getattr(config, "mute", False))
     threads = 1 if copy else resolve_max_workers(max_workers)
-    hidden = hidden_lead(input_path) if copy else 0.0
+    hidden, lead_notes = lead_report(input_path) if copy else (0.0, [])
     if not copy and not keeps_hdr(config, info):
         require_tone_mapping(info, ffmpeg)
     _log_opus_cap(config, info)
@@ -1468,9 +1521,14 @@ def trim(
         shown = hidden if from_start and config.container not in EDIT_LIST_CONTAINERS else 0.0
         changed = [f"{revealed_text(shown)}, which {config.container.upper()} can't hide"] if shown else []
         to_end = config.length is None or start + config.length >= info.duration
-        if to_end and (tail := hidden_tail(input_path, info)):
-            changed.append(tail_text(tail))
-        told = _copy_fidelity(input_path, output_path, info, config.metadata, plan, config.container, changed=changed)
+        notes: list[str] = list(lead_notes)
+        if to_end:
+            tail, tail_notes = tail_report(input_path, info)
+            changed += tail
+            notes += tail_notes
+        told = _copy_fidelity(
+            input_path, output_path, info, config.metadata, plan, config.container, changed=changed, notes=notes
+        )
     else:
         told = _reencode_fidelity(input_path, output_path, config, info)
     if on_progress:
@@ -1727,15 +1785,16 @@ def transform(
     if route == "display":
         assert isinstance(config, _DISPLAY_CONFIGS)
         plan = plan_copy(info, config.target, config.metadata)
-        hidden = hidden_lead(input_path)
+        hidden, lead_notes = lead_report(input_path)
         with atomic_output(output_path, scratch_dir) as temp:
             cmd = build_rotation_command(
                 input_path, temp, config, source=info, ffmpeg=ffmpeg, drop=plan.dropped, hidden=hidden
             )
             run_ffmpeg(cmd, progress_total=info.duration, on_progress=on_progress, stage="copying")
         changed = _encoded(config, info)[-1:] if _reencoded_audio(info, config) else []
-        if tail := hidden_tail(input_path, info):
-            changed.append(tail_text(tail))
+        tail, notes = tail_report(input_path, info)
+        changed += tail
+        notes = [*lead_notes, *notes]
         told = _copy_fidelity(
             input_path,
             output_path,
@@ -1746,6 +1805,7 @@ def transform(
             changed=changed,
             muted=config.mute,
             adjusted=[_rotation_text(info.display_turn, turned(info, config.rotate))],
+            notes=notes,
         )
     else:
         check_decodable(info)

@@ -20,6 +20,7 @@ __all__ = [
     "SashimiError",
     "UserInputError",
     "UnsupportedMediaError",
+    "UndecodableVideoError",
     "NoAudioTrackError",
     "MediaTooLongError",
     "MediaTooShortError",
@@ -57,6 +58,28 @@ class UserInputError(SashimiError):
 
 class UnsupportedMediaError(UserInputError):
     """The input isn't a kind of file this operation can read (wrong type, corrupt, or no usable stream)."""
+
+
+class UndecodableVideoError(UnsupportedMediaError):
+    """
+    The video's pictures can't be decoded (faithfully): FFmpeg has no decoder for its codec (such
+    as Blackmagic RAW), or decodes it without its real colours (Dolby Vision in IPT, ProRes RAW).
+    Routes that copy the streams without decoding them (remux, a cut that isn't accurate,
+    removing metadata, extracting the sound) still work. ``codec`` is ffprobe's codec name, if
+    any, and ``codec_tag`` the codec tag the file stores (``brvm``), if any.
+    """
+
+    def __init__(
+        self,
+        user_message: str,
+        detail: str | None = None,
+        *,
+        codec: str | None = None,
+        codec_tag: str | None = None,
+    ):
+        super().__init__(user_message, detail)
+        self.codec = codec
+        self.codec_tag = codec_tag
 
 
 class NoAudioTrackError(UnsupportedMediaError):
