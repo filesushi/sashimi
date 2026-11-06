@@ -4,10 +4,14 @@
 """Reading what metadata a file holds, for display, and removing it without re-encoding."""
 
 import json
+import logging
 import math
 import os
 import re
+import struct
 import tempfile
+import zlib
+from collections.abc import Callable
 from typing import Any, Literal
 
 from PIL import Image
@@ -37,24 +41,30 @@ from sashimi.core._imagemeta import (
     xmp_has_location,
 )
 from sashimi.core._metaread import (
+    MAX_NOT_COUNTED,
+    MAX_READ_BYTES,
     MAX_SECTIONS,
+    MAX_TAGS,
     ORIENTATIONS,
     ExifRead,
     IccRead,
     MetadataField,
     MetadataSection,
     UncountedDetail,
-    display_xmp_parts,
+    XmpRead,
+    bounded_text,
+    extended_xmp,
+    extended_xmp_section,
     iptc_section,
     maker_of,
     photoshop_section,
     readable,
-    xmp_section,
+    within_budget,
 )
 from sashimi.core._metaread import section as _section
 from sashimi.core._mediameta import dropped_streams, is_location_key, merged_movflags, metadata_args, quicktime_tag_args
-from sashimi.core.fidelity import Fidelity, Outcome
-from sashimi.core.image import _open_image
+from sashimi.core.fidelity import Content, Fidelity, Outcome, checked_after_writing
+from sashimi.core.image import _open_image, refuse_unexpected
 from sashimi.core.probe import MediaInfo, parse_ffprobe_json, probe
 from sashimi.errors import BinaryNotFoundError, InvalidOptionsError, ProcessingError, UnsupportedMediaError
 
@@ -69,6 +79,8 @@ __all__ = [
     "strip",
     "strip_format",
 ]
+
+logger = logging.getLogger("sashimi")
 
 NOT_SUPPORTED = "Removing metadata from this kind of file isn't supported."
 NOT_MEDIA = "This file doesn't look like an image, video or audio file we can read."
@@ -96,7 +108,10 @@ class MetadataInfo(BaseModel):
     what is still in the file (``not_counted``).
 
     The named fields are highlights; ``sections`` lists every field read, grouped by where it was
-    found (an EXIF directory, an XMP packet, a track's tags).
+    found (an EXIF directory, an XMP packet, a track's tags). Every text is clean (control
+    characters as spaces) and capped, and a whole read is about ``MAX_READ_BYTES`` of JSON at most:
+    what didn't fit is counted in ``not_counted_omitted``, ``tags_omitted``, ``sections_omitted``
+    and each section's ``omitted``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -118,8 +133,10 @@ class MetadataInfo(BaseModel):
     What sashimi saw in the file but doesn't count as metadata to remove, because showing or
     playing the file needs it or the format always records it: the orientation, colour profile
     and resolution of an image; the writing application, each track's encoder, handler name and
-    language, the file type and display rotation of video and audio.
+    language, the file type and display rotation of video and audio. At most ``MAX_NOT_COUNTED``.
     """
+    not_counted_omitted: int = 0
+    """How many more ``not_counted`` entries the file has than are listed."""
     sections: list[MetadataSection] = []
     """Every field read, grouped by where it was found, at most ``MAX_SECTIONS`` sections."""
     sections_omitted: int = 0
@@ -191,7 +208,9 @@ class MetadataInfo(BaseModel):
     It says how to show the picture, so every ``metadata`` mode keeps it; ``rotate`` changes it.
     """
     tags: dict[str, str] = {}
-    """Every other named field found (global tags of video and audio; a few EXIF and PNG text fields)."""
+    """Every other named field found (global tags of video and audio; a few EXIF and PNG text fields), at most ``MAX_TAGS``."""
+    tags_omitted: int = 0
+    """How many more ``tags`` the file has than are listed."""
 
     @property
     def has_metadata(self) -> bool:
@@ -204,8 +223,7 @@ def _text(value: Any) -> str | None:
         value = value.decode("utf-8", "replace")
     if value is None:
         return None
-    text = str(value).strip("\0 \t\r\n")
-    return text or None
+    return bounded_text(value) or None
 
 
 def _ratio(value: Any) -> float | None:
@@ -232,7 +250,7 @@ def _dms(value: Any, ref: Any, negative: str) -> float | None:
 
 
 def _xmp_value(xmp: bytes, name: str) -> str | None:
-    pattern = rb"(?:\w+):" + name.encode() + rb"\s*=\s*\"([^\"]*)\"|<(?:\w+):" + name.encode() + rb">([^<]*)<"
+    pattern = rb"(?<!\w)\w+:" + name.encode() + rb"\s*=\s*\"([^\"]*)\"|<\w+:" + name.encode() + rb">([^<]*)<"
     match = re.search(pattern, xmp)
     if not match:
         return None
@@ -297,7 +315,7 @@ def _orientation(exif: ExifRead | None, xmp: bytes | None) -> int | None:
     value = exif.ifd0.get(0x0112) if exif is not None else None
     if not isinstance(value, int) and xmp is not None:
         stored = _xmp_value(xmp, "Orientation")
-        value = int(stored) if stored and stored.isdigit() else None
+        value = int(stored) if stored and re.fullmatch(r"[0-9]{1,6}", stored) else None
     return value if isinstance(value, int) else None
 
 
@@ -313,16 +331,33 @@ def _image_looked_for(fmt: str) -> list[str]:
     return ["EXIF", "GPS", "XMP"]
 
 
-def _image_info(path: PathLike, img: Image.Image, carriers: Carriers) -> MetadataInfo:
-    fields: dict[str, Any] = {"kind": "image", "carriers": list(carriers.found)}
-    tags: dict[str, str] = {}
-    sections: list[MetadataSection] = []
-    uncounted: list[UncountedDetail] = []
-    location = False
-    fmt = str(img.format)
-    exif = ExifRead(carriers.exif) if carriers.exif is not None else None
-    if exif is not None:
-        sections += exif.sections()
+class _ImageReading:
+    """What a read of an image has found so far; each carrier is read by a step that can't stop the others."""
+
+    def __init__(self, img: Image.Image, carriers: Carriers):
+        self.img = img
+        self.carriers = carriers
+        self.fields: dict[str, Any] = {"kind": "image", "carriers": list(carriers.found)}
+        self.tags: dict[str, str] = {}
+        self.sections: list[MetadataSection] = []
+        self.uncounted: list[UncountedDetail] = []
+        self.location = False
+        self.exif: ExifRead | None = None
+
+    def step(self, carrier: str, name: str, read: Callable[[], None]) -> None:
+        """Runs `read`, listing a section that says so when the carrier can't be read: it stays counted."""
+        try:
+            read()
+        except _READ_FAULTS as e:
+            logger.info(f"Couldn't read the {name}: {type(e).__name__}: {e}")
+            self.sections.append(_section(carrier, f"{name} (unreadable)", []))
+
+    def read_exif(self) -> None:
+        carriers, fields, tags = self.carriers, self.fields, self.tags
+        assert carriers.exif is not None
+        exif = ExifRead(carriers.exif)
+        self.exif = exif
+        self.sections += exif.sections()
         ifd0, details, gps = exif.ifd0, exif.details, exif.gps
         fields["camera_make"] = _text(ifd0.get(0x010F))
         fields["camera_model"] = _text(ifd0.get(0x0110))
@@ -332,7 +367,9 @@ def _image_info(path: PathLike, img: Image.Image, carriers: Carriers) -> Metadat
         if fields["date_taken"]:
             fields["date_taken_offset"] = offset_of(_text(details.get(0x9011)) or "")
             subseconds = _text(details.get(0x9291))
-            fields["date_taken_subseconds"] = subseconds if subseconds and subseconds.isdigit() else None
+            fields["date_taken_subseconds"] = (
+                subseconds if subseconds and re.fullmatch(r"[0-9]{1,18}", subseconds) else None
+            )
         fields["lens_make"] = _text(details.get(0xA433))
         fields["lens_model"] = _text(details.get(0xA434))
         fields["exposure_time"] = _positive(details.get(0x829A))
@@ -343,13 +380,13 @@ def _image_info(path: PathLike, img: Image.Image, carriers: Carriers) -> Metadat
         fields["focal_length"] = _positive(details.get(0x920A))
         fields["focal_length_35mm"] = _positive(details.get(0xA405))
         if exif.maker_note is not None:
-            fields["maker_note"] = maker_of(exif.maker_note, exif.make)
+            fields["maker_note"] = _text(maker_of(exif.maker_note, exif.make))
         fields["thumbnail_size"] = exif.thumbnail
         description = _text(ifd0.get(0x010E))
         if description:
             tags["ImageDescription"] = description[:200]
         if gps:
-            location = True
+            self.location = True
             fields["latitude"] = _dms(gps.get(2), gps.get(1), "S")
             fields["longitude"] = _dms(gps.get(4), gps.get(3), "W")
             altitude = _ratio(gps.get(6))
@@ -360,15 +397,20 @@ def _image_info(path: PathLike, img: Image.Image, carriers: Carriers) -> Metadat
                 fields["image_direction"] = direction
                 reference = _text(gps.get(0x10))
                 fields["image_direction_ref"] = {"T": "true", "M": "magnetic"}.get(reference or "")
-    if carriers.xmp is not None:
+
+    def read_xmp(self) -> None:
+        carriers, fields = self.carriers, self.fields
         xmp = carriers.xmp
-        shown = display_xmp_parts(xmp)
-        sections.append(xmp_section(xmp, counted=not shown))
+        assert xmp is not None
+        parsed = XmpRead(xmp)
+        has_location = xmp_has_location(xmp)
+        shown = [] if has_location or carriers.more_xmp else parsed.display_parts()
+        self.sections.append(parsed.section(counted=not shown))
         if shown:
             fields["carriers"] = [name for name in fields["carriers"] if name != "XMP"]
-            uncounted.append(UncountedDetail(name="display XMP", value=", ".join(shown)))
-        if xmp_has_location(xmp):
-            location = True
+            self.uncounted.append(UncountedDetail(name="display XMP", value=", ".join(shown)))
+        if has_location:
+            self.location = True
             if fields.get("latitude") is None:
                 fields["latitude"] = _xmp_coordinate(_xmp_value(xmp, "GPSLatitude"))
                 fields["longitude"] = _xmp_coordinate(_xmp_value(xmp, "GPSLongitude"))
@@ -383,71 +425,167 @@ def _image_info(path: PathLike, img: Image.Image, carriers: Carriers) -> Metadat
         places = [_xmp_value(xmp, name) for name in ("City", "State", "Country")]
         if any(places):
             fields["place"] = ", ".join(place for place in places if place)
-    if carriers.photoshop is not None:
-        location = location or photoshop_has_location(carriers.photoshop)
-        sections.append(photoshop_section(carriers.photoshop))
+
+    def read_more_xmp(self) -> None:
+        for number, xmp in enumerate(self.carriers.more_xmp, 2):
+            self.sections.append(XmpRead(xmp).section(f"XMP packet {number}"))
+            self.location = self.location or xmp_has_location(xmp)
+
+    def read_extended_xmp(self) -> None:
+        self.sections.append(extended_xmp_section(self.carriers.extended_xmp))
+        self.location = self.location or xmp_has_location(extended_xmp(self.carriers.extended_xmp))
+
+    def read_photoshop(self) -> None:
+        carriers, fields = self.carriers, self.fields
+        assert carriers.photoshop is not None
+        self.location = self.location or photoshop_has_location(carriers.photoshop)
+        listed = photoshop_section(carriers.photoshop, skip=_MADE_IPTC if carriers.iptc_from_tag else frozenset())
+        if listed is not None:
+            self.sections.append(listed)
         iptc = photoshop_iptc(carriers.photoshop)
         if iptc:
-            sections.append(iptc_section(iptc))
-            location = location or iptc_has_location(iptc)
+            self.sections.append(iptc_section(iptc))
+            self.location = self.location or iptc_has_location(iptc)
             places = [iptc_value(iptc, number) for number in (90, 95, 101)]
             if any(places) and not fields.get("place"):
                 fields["place"] = ", ".join(place for place in places if place)
             if not fields.get("date_taken"):
                 fields["date_taken"], fields["date_taken_offset"] = _iptc_date(iptc)
             fields["artist"] = fields.get("artist") or iptc_value(iptc, 80)
-    text_pairs: list[tuple[str, Any]] = []
-    for kind, payload in carriers.png_text:
-        key, value = png_text(kind, payload)
-        name = key.decode("latin-1", "replace")
-        raw = _PNG_RAW.match(name)
-        text_pairs.append((name, f"({len(value):,} bytes of encoded {raw.group(1).upper()})" if raw else value))
-        text = _text(value)
-        if not text:
-            continue
-        lowered = name.lower()
-        if lowered == "title":
-            fields["title"] = text
-        elif lowered == "author":
-            fields["artist"] = text
-        elif lowered == "software":
-            fields["software"] = fields.get("software") or text
-        elif lowered == "creation time":
-            fields["date_taken"] = fields.get("date_taken") or text
-        elif lowered != "comment" and not raw:
-            tags[name] = text[:200]
-        if is_location_key(name):
-            location = True
-    if text_pairs:
-        sections.append(_section("PNG text", "PNG text", text_pairs))
+
+    def read_png_text(self) -> None:
+        fields, tags = self.fields, self.tags
+        text_pairs: list[tuple[str, Any]] = []
+        for kind, payload in self.carriers.png_text:
+            key, value = png_text(kind, payload)
+            name = key.decode("latin-1", "replace")
+            raw = _PNG_RAW.match(name)
+            text_pairs.append((name, f"({len(value):,} bytes of encoded {raw.group(1).upper()})" if raw else value))
+            text = _text(value)
+            if is_location_key(name):
+                self.location = True
+            if not text:
+                continue
+            lowered = name.lower()
+            if lowered == "title":
+                fields["title"] = text
+            elif lowered == "author":
+                fields["artist"] = text
+            elif lowered == "software":
+                fields["software"] = fields.get("software") or text
+            elif lowered == "creation time":
+                fields["date_taken"] = fields.get("date_taken") or text
+            elif lowered != "comment" and not raw:
+                tags[name] = text[:200]
+        if text_pairs:
+            self.sections.append(_section("PNG text", "PNG text", text_pairs))
+
+    def read_comments(self) -> None:
+        comments = self.carriers.comments
+        self.fields["comment"] = _text(comments[0])
+        if self.img.format != "PNG":
+            self.sections.append(_section("comment", "Comments", [("Comment", c) for c in comments]))
+
+    def read_icc(self) -> None:
+        icc = self.img.info.get("icc_profile")
+        self.fields["has_color_profile"] = bool(icc)
+        if isinstance(icc, bytes) and icc:
+            profile = IccRead(icc)
+            description = profile.description
+            self.fields["color_profile"] = description
+            self.uncounted.append(UncountedDetail(name="colour profile", value=description or f"({len(icc):,} bytes)"))
+            self.sections.append(profile.section())
+
+    def read_layout(self) -> None:
+        orientation = _orientation(self.exif, self.carriers.xmp)
+        if orientation is not None:
+            meaning = ORIENTATIONS.get(orientation)
+            value = f"{orientation} ({meaning})" if meaning else str(orientation)
+            self.uncounted.insert(0, UncountedDetail(name="orientation", value=value))
+        resolution = _resolution(self.img, self.exif)
+        if resolution:
+            self.uncounted.append(UncountedDetail(name="resolution", value=resolution))
+
+
+_READ_FAULTS: tuple[type[Exception], ...] = (
+    ArithmeticError,
+    AttributeError,
+    LookupError,
+    OSError,
+    RuntimeError,
+    SyntaxError,
+    TypeError,
+    ValueError,
+    struct.error,
+    zlib.error,
+    Image.DecompressionBombError,
+)
+_MADE_IPTC = frozenset({0x0404})
+"""The Photoshop resource a TIFF's IPTC tag is carried in internally: the file itself holds no such resource."""
+
+
+def _image_info(path: PathLike, img: Image.Image, carriers: Carriers) -> MetadataInfo:
+    reading = _ImageReading(img, carriers)
+    fields = reading.fields
+    if carriers.exif is not None:
+        reading.step("EXIF", "EXIF", reading.read_exif)
+    if carriers.xmp is not None:
+        reading.step("XMP", "XMP", reading.read_xmp)
+    if carriers.more_xmp:
+        reading.step("XMP", "XMP packets", reading.read_more_xmp)
+    if carriers.extended_xmp:
+        reading.step("extended XMP", "Extended XMP", reading.read_extended_xmp)
+    if carriers.photoshop is not None:
+        reading.step("Photoshop", "Photoshop image resources", reading.read_photoshop)
+    if carriers.png_text:
+        reading.step("PNG text", "PNG text", reading.read_png_text)
     if carriers.comments:
-        fields["comment"] = _text(carriers.comments[0])
-        if fmt != "PNG":
-            sections.append(_section("comment", "Comments", [("Comment", c) for c in carriers.comments]))
-    icc = img.info.get("icc_profile")
-    if isinstance(icc, bytes) and icc:
-        profile = IccRead(icc)
-        sections.append(profile.section())
-        fields["color_profile"] = profile.description
-        uncounted.append(UncountedDetail(name="colour profile", value=profile.description or f"({len(icc):,} bytes)"))
-    orientation = _orientation(exif, carriers.xmp)
-    if orientation is not None:
-        meaning = ORIENTATIONS.get(orientation)
-        uncounted.insert(
-            0, UncountedDetail(name="orientation", value=f"{orientation} ({meaning})" if meaning else str(orientation))
-        )
-    resolution = _resolution(img, exif)
-    if resolution:
-        uncounted.append(UncountedDetail(name="resolution", value=resolution))
+        reading.step("comment", "Comments", reading.read_comments)
+    reading.step("ICC profile", "ICC profile", reading.read_icc)
+    reading.step("EXIF", "Orientation and resolution", reading.read_layout)
     if not fields.get("date_taken"):
         fields["date_taken_offset"] = fields["date_taken_subseconds"] = None
-    fields["has_location"] = location
-    fields["has_color_profile"] = bool(icc)
-    fields["tags"] = tags
-    fields["looked_for"] = _image_looked_for(fmt)
-    fields["not_counted"] = uncounted
-    fields["sections"], fields["sections_omitted"] = sections[:MAX_SECTIONS], max(0, len(sections) - MAX_SECTIONS)
-    return MetadataInfo(**{key: value for key, value in fields.items() if value is not None})
+    fields["has_location"] = reading.location
+    fields["tags"] = reading.tags
+    fields["looked_for"] = _image_looked_for(str(img.format))
+    fields["not_counted"] = reading.uncounted
+    return _bounded_info(fields, reading.sections)
+
+
+_COORDINATE_RANGES = {"latitude": 90.0, "longitude": 180.0}
+_NUMBERS = frozenset({"altitude", "exposure_time", "f_number", "focal_length", "focal_length_35mm", "image_direction"})
+
+
+def _bounded_info(fields: dict[str, Any], sections: list[MetadataSection]) -> MetadataInfo:
+    """
+    The :class:`MetadataInfo` of what a read found, holding its promises whatever the file says:
+    every text clean and capped, numbers finite and coordinates on Earth, and the whole within
+    ``MAX_READ_BYTES``, with what was left out counted.
+    """
+    kept: dict[str, Any] = {}
+    for key, value in fields.items():
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = bounded_text(value)
+        elif key in _COORDINATE_RANGES and not abs(value) <= _COORDINATE_RANGES[key]:
+            continue
+        elif key in _NUMBERS and not math.isfinite(value):
+            continue
+        kept[key] = value
+    tags = {bounded_text(key): bounded_text(value) for key, value in fields.get("tags", {}).items()}
+    kept["tags"] = dict(list(tags.items())[:MAX_TAGS])
+    kept["tags_omitted"] = max(0, len(tags) - MAX_TAGS)
+    details = fields.get("not_counted", [])
+    kept["not_counted"] = [
+        detail.model_copy(update={"name": bounded_text(detail.name), "value": bounded_text(detail.value)})
+        for detail in details[:MAX_NOT_COUNTED]
+    ]
+    kept["not_counted_omitted"] = max(0, len(details) - MAX_NOT_COUNTED)
+    kept["sections_omitted"] = max(0, len(sections) - MAX_SECTIONS)
+    rest = len(MetadataInfo(**kept).model_dump_json())
+    kept["sections"] = within_budget(sections[:MAX_SECTIONS], MAX_READ_BYTES - rest)
+    return MetadataInfo(**kept)
 
 
 _PNG_RAW = re.compile(r"(?i)^raw profile type (\w+)$")
@@ -627,9 +765,7 @@ def _media_info(data: dict[str, Any]) -> MetadataInfo:
         uncounted.append(UncountedDetail(name="display rotation", value=f"{info.display_turn}° clockwise"))
     fields["not_counted"] = uncounted
     fields["looked_for"] = [family, "stream tags", "chapters", "cover art", "timed metadata track"]
-    sections = _media_sections(data, family, info)
-    fields["sections"], fields["sections_omitted"] = sections[:MAX_SECTIONS], max(0, len(sections) - MAX_SECTIONS)
-    return MetadataInfo(**{key: value for key, value in fields.items() if value is not None})
+    return _bounded_info(fields, _media_sections(data, family, info))
 
 
 _CAPTURE_DATES = ("com.apple.quicktime.creationdate", "date_recorded")
@@ -659,7 +795,8 @@ def read(input_path: PathLike, *, limits: Limits | None = None) -> MetadataInfo:
     found = _as_image(input_path, limits)
     if found is not None:
         return found
-    return _media_info(_probe_full(input_path))
+    with refuse_unexpected():
+        return _media_info(_probe_full(input_path))
 
 
 _STRIP_IMAGE_EXTENSIONS = {
@@ -938,20 +1075,23 @@ def strip(
     if image_format is not None:
         if image_format not in _STRIP_IMAGE_EXTENSIONS:
             raise _refuse_image(image_format)
-        with open(os.fspath(input_path), "rb") as f:
-            data = f.read()
-        video: bytes | None = None
-        notes: list[str] = []
-        if image_format in ("JPEG", "MPO"):
-            folder = scratch_dir or os.path.dirname(os.path.abspath(os.fspath(output_path)))
-            video, notes = _motion_choice(data, mode, folder, limits)
-        stripped = strip_image(data, image_format, mode, keep_icc, video)
-        try:
-            with atomic_output(output_path, scratch_dir) as temp, open(temp, "wb") as out:
-                out.write(stripped)
-        except OSError as e:
-            raise ProcessingError(f"Cannot write {os.fspath(output_path)}: {e}") from e
-        told = _image_strip_fidelity(input_path, output_path, mode, keep_icc, notes)
+        with refuse_unexpected():
+            with open(os.fspath(input_path), "rb") as f:
+                data = f.read()
+            video: bytes | None = None
+            notes: list[str] = []
+            if image_format in ("JPEG", "MPO"):
+                folder = scratch_dir or os.path.dirname(os.path.abspath(os.fspath(output_path)))
+                video, notes = _motion_choice(data, mode, folder, limits)
+            stripped = strip_image(data, image_format, mode, keep_icc, video)
+            try:
+                with atomic_output(output_path, scratch_dir) as temp, open(temp, "wb") as out:
+                    out.write(stripped)
+            except OSError as e:
+                raise ProcessingError(f"Cannot write {os.fspath(output_path)}: {e}") from e
+        told = checked_after_writing(
+            "picture", lambda: _image_strip_fidelity(input_path, output_path, mode, keep_icc, notes), identical=True
+        )
         if on_progress:
             on_progress(1.0, "done")
         return StripResult(format=_STRIP_IMAGE_EXTENSIONS[image_format], fidelity=told)
@@ -965,17 +1105,24 @@ def strip(
     from sashimi.core.fidelity import media_fidelity
     from sashimi.core.video import _mode_removals, _timecode_kept, tail_report
 
-    tail, notes = tail_report(input_path, info) if info.has_video else ([], [])
-    told = media_fidelity(
-        input_path,
-        output_path,
-        "picture and sound" if info.has_video and info.has_audio else "picture" if info.has_video else "sound",
-        changed=tail,
-        notes=notes,
-        removed_metadata=mode,
-        removed=_mode_removals(info, mode),
-        kept=_timecode_kept(info),
+    content: Content = (
+        "picture and sound" if info.has_video and info.has_audio else "picture" if info.has_video else "sound"
     )
+
+    def report() -> Fidelity:
+        tail, notes = tail_report(input_path, info) if info.has_video else ([], [])
+        return media_fidelity(
+            input_path,
+            output_path,
+            content,
+            changed=tail,
+            notes=notes,
+            removed_metadata=mode,
+            removed=_mode_removals(info, mode),
+            kept=_timecode_kept(info),
+        )
+
+    told = checked_after_writing(content, report, identical=True)
     if on_progress:
         on_progress(1.0, "done")
     return StripResult(format=_STRIP_MUXERS[muxer], fidelity=told)

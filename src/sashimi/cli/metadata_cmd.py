@@ -13,7 +13,16 @@ import typer
 from sashimi.cli import _options as opt
 from rich.markup import escape
 
-from sashimi.cli._output import BatchRunner, console, display_path, fail, print_fields, refusal, refusals
+from sashimi.cli._output import (
+    BatchRunner,
+    console,
+    display_path,
+    fail,
+    print_fields,
+    refusal,
+    refusals,
+    terminal_safe,
+)
 
 
 def _number(value: float) -> str:
@@ -133,7 +142,7 @@ def metadata_cmd(
     except SashimiError as e:
         fail(str(e).splitlines()[0], code=1)
     if json_output:
-        print(info.model_dump_json(indent=2))
+        print(terminal_safe(info.model_dump_json(indent=2)))
         return
 
     rows = [("File", display_path(path)), *_rows(info)]

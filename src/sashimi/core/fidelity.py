@@ -10,8 +10,9 @@ the source's and the output's metadata and tracks as sashimi reads them, and, fo
 without loss, the decoded pixels of the output compared with the source's.
 """
 
+import logging
 import os
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -35,6 +36,8 @@ __all__ = [
 ]
 
 FidelityLevel = Literal["lossless", "content_lossless", "lossy"]
+logger = logging.getLogger("sashimi")
+
 Content = Literal["picture", "sound", "picture and sound"]
 
 
@@ -159,6 +162,26 @@ def fidelity(
         notes=_unique(notes),
         checked=checked,
     )
+
+
+UNCHECKED = "sashimi couldn't check this output against its source"
+"""What ``Fidelity.changed`` or ``notes`` says when the check after writing an output failed."""
+
+
+def checked_after_writing(content: Content, check: Callable[[], Fidelity], *, identical: bool = False) -> Fidelity:
+    """
+    The result of `check`, which runs once an output is written. The output stands whatever the
+    check finds, so a failed check is reported rather than raised: as ``lossy`` and unchecked,
+    since nothing can be claimed for it, or ``content_lossless`` when the route copies the picture
+    or sound as they are (`identical`).
+    """
+    try:
+        return check()
+    except Exception as e:
+        logger.warning(f"{UNCHECKED}: {type(e).__name__}: {e}")
+        if identical:
+            return fidelity(content, notes=[UNCHECKED], checked=False)
+        return fidelity(content, changed=[UNCHECKED], checked=False)
 
 
 @dataclass

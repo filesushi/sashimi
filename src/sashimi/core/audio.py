@@ -15,7 +15,7 @@ from sashimi.config import (
     WavAudioConfig,
 )
 from sashimi.config._limits import resolve_limits, too_long_text
-from sashimi.core.fidelity import Outcome, media_fidelity
+from sashimi.core.fidelity import Outcome, checked_after_writing, media_fidelity
 from sashimi.core._atomic import PathLike, atomic_output
 from sashimi.core._ffmpeg import (
     INPUT_PROTOCOLS,
@@ -248,13 +248,16 @@ def convert(
         run_ffmpeg(cmd, progress_total=expected, on_progress=on_progress, stage="encoding")
         if config.start_seconds > 0:
             _require_audio(temp, input_path, config.start_seconds, ffmpeg)
-    told = media_fidelity(
-        input_path,
-        output_path,
+    told = checked_after_writing(
         "sound",
-        changed=sound_changes(config, info, sample_format(input_path), sample_format(output_path)[1]),
-        removed_metadata=config.metadata,
-        kept=["display rotation", "Dolby Vision settings"],
+        lambda: media_fidelity(
+            input_path,
+            output_path,
+            "sound",
+            changed=sound_changes(config, info, sample_format(input_path), sample_format(output_path)[1]),
+            removed_metadata=config.metadata,
+            kept=["display rotation", "Dolby Vision settings"],
+        ),
     )
     if on_progress:
         on_progress(1.0, "done")

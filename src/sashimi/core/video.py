@@ -29,7 +29,15 @@ from sashimi.config._video import _H264Options, _Vp9Options
 from sashimi.core._atomic import PathLike, atomic_output
 from sashimi.core._capabilities import require_behaviour
 from sashimi.core._hdr import hdr_name, is_hdr, require_tone_mapping, tone_map_filter, with_tone_map
-from sashimi.core.fidelity import Fidelity, Outcome, derived, fidelity as make_fidelity, media_fidelity
+from sashimi.core.fidelity import (
+    Content,
+    Fidelity,
+    Outcome,
+    checked_after_writing,
+    derived,
+    fidelity as make_fidelity,
+    media_fidelity,
+)
 from sashimi.core._ffmpeg import (
     INPUT_PROTOCOLS,
     OUTPUT_FLAGS,
@@ -861,8 +869,11 @@ def convert(
     limits = resolve_limits(limits)
     limits.check(config)
     threads = resolve_max_workers(max_workers)
-    info = _probe_video(input_path, limits)
+    info = _probe_video(input_path, limits, decoding=False)
     assert info.duration is not None
+    planned = plan_mp4_route(info, config) if isinstance(config, Mp4VideoConfig) else "encode"
+    if planned == "encode":
+        check_decodable(info)
     if isinstance(config, WebpVideoConfig):
         check_webp_size(*animated_size(info, config.max_width))
     remaining = info.duration - config.start_seconds
@@ -870,7 +881,7 @@ def convert(
     ffmpeg = ffmpeg_binary()
     if config.start_seconds > 0:
         require_behaviour("start times", ffmpeg)
-    if not keeps_hdr(config, info):
+    if planned == "encode" and not keeps_hdr(config, info):
         require_tone_mapping(info, ffmpeg)
     animated = isinstance(config, (GifVideoConfig, WebpVideoConfig))
     index = _start_index(input_path, info, config.start_seconds, limits)
@@ -938,7 +949,6 @@ def convert(
         return hidden
 
     _log_opus_cap(config, info)
-    planned = plan_mp4_route(info, config) if isinstance(config, Mp4VideoConfig) else "encode"
     try:
         taken = run(planned)
     except BinaryNotFoundError:
@@ -953,8 +963,14 @@ def convert(
         if planned == "encode":
             raise
         logger.info(f"Copying into MP4 failed, re-encoding instead: {str(e).splitlines()[0]}")
+        check_decodable(info)
+        if not keeps_hdr(config, info):
+            require_tone_mapping(info, ffmpeg)
         taken = run("encode")
-    told = _conversion_fidelity(input_path, output_path, config, info, taken, lead_notes)
+    content: Content = "picture" if animated or getattr(config, "mute", False) else _clip_content(info)
+    told = checked_after_writing(
+        content, lambda: _conversion_fidelity(input_path, output_path, config, info, taken, lead_notes)
+    )
     if on_progress:
         on_progress(1.0, "done")
     return VideoConversion(route=taken, fidelity=told)
@@ -1521,19 +1537,29 @@ def trim(
         shown = hidden if from_start and config.container not in EDIT_LIST_CONTAINERS else 0.0
         changed = [f"{revealed_text(shown)}, which {config.container.upper()} can't hide"] if shown else []
         to_end = config.length is None or start + config.length >= info.duration
-        notes: list[str] = list(lead_notes)
-        if to_end:
-            tail, tail_notes = tail_report(input_path, info)
-            changed += tail
-            notes += tail_notes
-        told = _copy_fidelity(
-            input_path, output_path, info, config.metadata, plan, config.container, changed=changed, notes=notes
-        )
+        notes: list[str] = list(lead_notes) if from_start else []
+
+        def report() -> Fidelity:
+            if to_end:
+                tail, tail_notes = tail_report(input_path, info)
+                changed.extend(tail)
+                notes.extend(tail_notes)
+            return _copy_fidelity(
+                input_path, output_path, info, config.metadata, plan, config.container, changed=changed, notes=notes
+            )
+
+        told = checked_after_writing(_clip_content(info), report, identical=not changed)
     else:
-        told = _reencode_fidelity(input_path, output_path, config, info)
+        told = checked_after_writing(
+            _clip_content(info), lambda: _reencode_fidelity(input_path, output_path, config, info)
+        )
     if on_progress:
         on_progress(1.0, "done")
     return TrimResult(dropped=plan.dropped, dropped_names=plan.dropped_names, fidelity=told)
+
+
+def _clip_content(info: MediaInfo) -> Content:
+    return "picture and sound" if info.has_video and info.has_audio else "picture" if info.has_video else "sound"
 
 
 def _seek_to_keyframe(input_path: PathLike, info: MediaInfo, start: float, limits: Limits | None) -> float | None:
@@ -1791,22 +1817,24 @@ def transform(
                 input_path, temp, config, source=info, ffmpeg=ffmpeg, drop=plan.dropped, hidden=hidden
             )
             run_ffmpeg(cmd, progress_total=info.duration, on_progress=on_progress, stage="copying")
-        changed = _encoded(config, info)[-1:] if _reencoded_audio(info, config) else []
-        tail, notes = tail_report(input_path, info)
-        changed += tail
-        notes = [*lead_notes, *notes]
-        told = _copy_fidelity(
-            input_path,
-            output_path,
-            info,
-            config.metadata,
-            plan,
-            config.target,
-            changed=changed,
-            muted=config.mute,
-            adjusted=[_rotation_text(info.display_turn, turned(info, config.rotate))],
-            notes=notes,
-        )
+
+        def report() -> Fidelity:
+            changed = _encoded(config, info)[-1:] if _reencoded_audio(info, config) else []
+            tail, notes = tail_report(input_path, info)
+            return _copy_fidelity(
+                input_path,
+                output_path,
+                info,
+                config.metadata,
+                plan,
+                config.target,
+                changed=[*changed, *tail],
+                muted=config.mute,
+                adjusted=[_rotation_text(info.display_turn, turned(info, config.rotate))],
+                notes=[*lead_notes, *notes],
+            )
+
+        told = checked_after_writing(_clip_content(info), report)
     else:
         check_decodable(info)
         if not keeps_hdr(config, info):
@@ -1824,7 +1852,9 @@ def transform(
                 source=info,
             )
             run_ffmpeg(cmd, progress_total=info.duration, on_progress=on_progress, stage="encoding")
-        told = _reencode_fidelity(input_path, output_path, config, info)
+        told = checked_after_writing(
+            _clip_content(info), lambda: _reencode_fidelity(input_path, output_path, config, info)
+        )
     if on_progress:
         on_progress(1.0, "done")
     return TransformResult(route=route, fidelity=told)

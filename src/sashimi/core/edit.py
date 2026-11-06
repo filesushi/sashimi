@@ -70,6 +70,7 @@ from sashimi.core.image import (
     eight_bit,
     encode_for,
     encoder_change,
+    checked_after_writing,
     still_fidelity,
 )
 from sashimi.errors import InvalidOptionsError, MediaTooLargeError, ProcessingError, UnsupportedMediaError
@@ -523,24 +524,29 @@ def edit(
                     on_progress((index + 1) / (total + 1), "editing")
             metadata = _metadata(img, config, carriers, frames[0].size, _PIL_FORMAT[config.target])
             save_animation(frames, durations, loop, config, output_path, scratch_dir, metadata)
-            told = _animated_edit_fidelity(img, input_path, output_path, config, transpose)
+            told = checked_after_writing(
+                "picture", lambda: _animated_edit_fidelity(img, input_path, output_path, config, transpose)
+            )
             result = ImageConversion(frames=total, source_frames=count, source=kind, fidelity=told)
         else:
             source_mode, alpha, shown = img.mode, _uses_alpha(img), _shown_size(img)
             written, reference = _edit_still(img, config, carriers, output_path, scratch_dir)
             changed, removed = _edits(config, shown)
             asked = kind == "animation" and isinstance(config, EDIT_ANIMATED)
-            told = still_fidelity(
-                input_path,
-                output_path,
-                config,
-                upright=reference,
-                source_mode=source_mode,
-                alpha=alpha,
-                written=written,
-                changed=changed,
-                removed=removed,
-                first_frame_asked=asked,
+            told = checked_after_writing(
+                "picture",
+                lambda: still_fidelity(
+                    input_path,
+                    output_path,
+                    config,
+                    upright=reference,
+                    source_mode=source_mode,
+                    alpha=alpha,
+                    written=written,
+                    changed=changed,
+                    removed=removed,
+                    first_frame_asked=asked,
+                ),
             )
             reason: Literal["kept", "target", "asked"] = "kept" if count == 1 else "asked" if asked else "target"
             result = ImageConversion(frames=1, source_frames=count, source=kind, reason=reason, fidelity=told)
@@ -645,7 +651,9 @@ def select_frames(
                 on_progress((index + 1) / (total + 1), "selecting")
         metadata = _metadata(img, config, carriers, frames[0].size, _PIL_FORMAT[config.target])
         save_animation(frames, durations, loop, config, output_path, scratch_dir, metadata)
-        told = _animated_edit_fidelity(img, input_path, output_path, config, transpose, frozenset(keep))
+        told = checked_after_writing(
+            "picture", lambda: _animated_edit_fidelity(img, input_path, output_path, config, transpose, frozenset(keep))
+        )
     if on_progress:
         on_progress(1.0, "done")
     return Outcome(fidelity=told)

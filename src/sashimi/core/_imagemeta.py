@@ -104,6 +104,12 @@ class Carriers:
     """PNG text chunks other than XMP, as (chunk type, payload), from a PNG source."""
     found: list[str] = field(default_factory=list)
     """The carriers found in the source, including those no output carries (such as extended XMP)."""
+    more_xmp: list[bytes] = field(default_factory=list)
+    """XMP packets after the first; no output carries them."""
+    extended_xmp: list[bytes] = field(default_factory=list)
+    """A JPEG's extended XMP segments, without their signature; no output carries them."""
+    iptc_from_tag: bool = False
+    """True when ``photoshop``'s IPTC resource was made from a TIFF's IPTC tag, so the file holds no such resource."""
     dpi: tuple[float, float] | None = None
     """The resolution the source states outside EXIF, in dots per inch (see :func:`stated_dpi`)."""
 
@@ -186,18 +192,28 @@ def _png_chunk(kind: bytes, payload: bytes) -> bytes:
     return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload))
 
 
+MAX_PNG_TEXT = 8 << 20
+"""The most a compressed PNG text chunk is decompressed to; past it, it reads as empty."""
+
+
+def _inflated(data: bytes) -> bytes:
+    inflater = zlib.decompressobj()
+    text = inflater.decompress(data, MAX_PNG_TEXT + 1)
+    return b"" if len(text) > MAX_PNG_TEXT else text
+
+
 def png_text(kind: bytes, payload: bytes) -> tuple[bytes, bytes]:
-    """The keyword and text of a tEXt, zTXt or iTXt chunk (decompressed)."""
+    """The keyword and text of a tEXt, zTXt or iTXt chunk (decompressed, up to ``MAX_PNG_TEXT``)."""
     key, _, rest = payload.partition(b"\0")
     try:
         if kind == b"tEXt":
             return key, rest
         if kind == b"zTXt":
-            return key, zlib.decompress(rest[1:])
+            return key, _inflated(rest[1:])
         compressed, rest = rest[:1], rest[2:]
         _, _, rest = rest.partition(b"\0")
         _, _, text = rest.partition(b"\0")
-        return key, zlib.decompress(text) if compressed == b"\x01" else text
+        return key, _inflated(text) if compressed == b"\x01" else text
     except zlib.error:
         return key, b""
 
@@ -521,6 +537,7 @@ def _tiff_carriers(img: Image.Image) -> Carriers:
         if carriers.photoshop is None or photoshop_iptc(carriers.photoshop) is None:
             existing = photoshop_resources(carriers.photoshop or b"")
             carriers.photoshop = _photoshop_bytes([*existing, (b"8BIM", PHOTOSHOP_IPTC, b"\0\0", iptc)])
+            carriers.iptc_from_tag = True
     try:
         exif = Image.Exif()
         exif.load(img.getexif().tobytes())
@@ -546,6 +563,14 @@ def _info_carriers(img: Image.Image) -> Carriers:
     return carriers
 
 
+def _add_xmp(carriers: Carriers, xmp: bytes) -> None:
+    if carriers.xmp is None:
+        carriers.xmp = xmp
+    else:
+        carriers.more_xmp.append(xmp)
+    _note(carriers, "XMP")
+
+
 def _add_exif(carriers: Carriers, exif: bytes) -> None:
     carriers.exif = exif.removeprefix(EXIF_PREFIX)
     if not exif_is_trivial(carriers.exif):
@@ -562,10 +587,10 @@ def _jpeg_carriers(data: bytes) -> Carriers:
         payload = segment[4:]
         if marker == 0xE1 and payload.startswith(b"Exif\x00") and carriers.exif is None:
             _add_exif(carriers, payload[6:])
-        elif marker == 0xE1 and payload.startswith(XMP_JPEG) and carriers.xmp is None:
-            carriers.xmp = payload[len(XMP_JPEG) :]
-            _note(carriers, "XMP")
+        elif marker == 0xE1 and payload.startswith(XMP_JPEG):
+            _add_xmp(carriers, payload[len(XMP_JPEG) :])
         elif marker == 0xE1 and payload.startswith(XMP_EXTENSION_JPEG):
+            carriers.extended_xmp.append(payload[len(XMP_EXTENSION_JPEG) :])
             _note(carriers, "extended XMP")
         elif marker == 0xED and payload.startswith(PHOTOSHOP_JPEG):
             photoshop += payload[len(PHOTOSHOP_JPEG) :]
@@ -589,9 +614,7 @@ def _png_carriers(data: bytes) -> Carriers:
         elif kind in _PNG_TEXT:
             key, text = png_text(kind, payload)
             if key == XMP_PNG_KEY:
-                if carriers.xmp is None:
-                    carriers.xmp = text
-                    _note(carriers, "XMP")
+                _add_xmp(carriers, text)
                 continue
             carriers.png_text.append((kind, payload))
             _note(carriers, "PNG text")
@@ -608,9 +631,8 @@ def _webp_carriers(data: bytes) -> Carriers:
         payload = data[start + 8 : start + 8 + size]
         if fourcc == b"EXIF" and carriers.exif is None:
             _add_exif(carriers, payload)
-        elif fourcc == b"XMP " and carriers.xmp is None:
-            carriers.xmp = payload
-            _note(carriers, "XMP")
+        elif fourcc == b"XMP ":
+            _add_xmp(carriers, payload)
     return carriers
 
 
@@ -623,9 +645,8 @@ def _gif_carriers(data: bytes) -> Carriers:
         if label == 0xFE:
             carriers.comments.append(_gif_sub_blocks(data, start + 2, end))
             _note(carriers, "comment")
-        elif label == 0xFF and _gif_application(data, start) == GIF_XMP_ID and carriers.xmp is None:
-            carriers.xmp = _gif_xmp(data, start, end)
-            _note(carriers, "XMP")
+        elif label == 0xFF and _gif_application(data, start) == GIF_XMP_ID:
+            _add_xmp(carriers, _gif_xmp(data, start, end))
     return carriers
 
 
@@ -685,7 +706,7 @@ def _read_carriers(path: str | os.PathLike[str], img: Image.Image) -> Carriers:
             return _webp_carriers(_read(path))
         if fmt == "GIF":
             return _gif_carriers(_read(path))
-    except (ValueError, struct.error):
+    except (ValueError, struct.error, IndexError):
         return _info_carriers(img)
     if fmt == "TIFF":
         return _tiff_carriers(img)
@@ -1080,6 +1101,16 @@ def display_xmp(xmp: bytes, *, gain_map: bool, video: bool) -> bytes | None:
         )
     if not attributes and not body:
         return None
+    from sashimi.core._metaread import XmpRead
+
+    for kept in ((attributes, body), (attributes, b"")):
+        packet = _display_packet(*kept)
+        if XmpRead(packet).display_parts():
+            return packet
+    return None
+
+
+def _display_packet(attributes: list[bytes], body: bytes) -> bytes:
     used = [prefix for prefix in _NAMESPACES if any(prefix + b":" in part for part in (*attributes, body))]
     declarations = b"".join(b" xmlns:" + prefix + b'="' + _NAMESPACES[prefix] + b'"' for prefix in used)
     return (

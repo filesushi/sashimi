@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import time
 import traceback
 from collections.abc import Iterable, Iterator
@@ -31,8 +32,23 @@ if TYPE_CHECKING:
 
     from sashimi.api._batch import YieldType
 
-console = Console(soft_wrap=True, highlight=False)
-err_console = Console(stderr=True, soft_wrap=True, highlight=False)
+_TERMINAL_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+
+
+def terminal_safe(text: str) -> str:
+    """`text` with what a terminal would act on, or reorder lines by, as spaces; tabs and newlines stay. Pure."""
+    return _TERMINAL_CONTROLS.sub(" ", text)
+
+
+class _SafeConsole(Console):
+    """A console that never passes on control characters from what it's given: file names, tags, messages."""
+
+    def render_str(self, text: str, **options: Any) -> Any:
+        return super().render_str(terminal_safe(text), **options)
+
+
+console = _SafeConsole(soft_wrap=True, highlight=False)
+err_console = _SafeConsole(stderr=True, soft_wrap=True, highlight=False)
 
 STATUS_STYLES = {
     "success": "[bold green]Success[/bold green]",
@@ -135,7 +151,7 @@ class LineLogHandler(logging.Handler):
 
     def __init__(self, level: int = logging.NOTSET) -> None:
         super().__init__(level)
-        self.console = Console(stderr=True, soft_wrap=True, highlight=False)
+        self.console = _SafeConsole(stderr=True, soft_wrap=True, highlight=False)
 
     def emit(self, record: logging.LogRecord) -> None:
         from datetime import datetime
@@ -146,6 +162,7 @@ class LineLogHandler(logging.Handler):
             message = record.getMessage()
             if record.exc_info:
                 message += "\n" + "".join(traceback.format_exception(*record.exc_info)).rstrip()
+            message = terminal_safe(message)
             name = record.levelname
             line = Text.assemble(
                 (datetime.fromtimestamp(record.created).strftime("[%X] "), "log.time"),
@@ -160,7 +177,7 @@ class LineLogHandler(logging.Handler):
 
 def print_json(payload: Any) -> None:
     """Prints a JSON report on stdout (logging and warnings go to stderr)."""
-    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    print(terminal_safe(json.dumps(payload, indent=2, ensure_ascii=False)))
 
 
 def every(count: int) -> str:

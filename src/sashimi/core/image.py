@@ -9,13 +9,15 @@ import io
 import json
 import logging
 import os
+import struct
 import threading
 import warnings
 import zipfile
+import zlib
 from collections.abc import Iterator
 from typing import Any, Literal
 
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageOps
 from pydantic import BaseModel, ConfigDict
 
 from sashimi.config._image import (
@@ -66,6 +68,7 @@ from sashimi.core.fidelity import (
     COLOUR_PROFILE,
     Fidelity,
     Outcome,
+    checked_after_writing,
     derived,
     differences,
     fidelity,
@@ -74,7 +77,7 @@ from sashimi.core.fidelity import (
     same_picture,
     shown_length,
 )
-from sashimi.errors import MediaTooLargeError, ProcessingError, UnsupportedMediaError
+from sashimi.errors import MediaTooLargeError, ProcessingError, SashimiError, UnsupportedMediaError
 
 __all__ = ["ImageConversion", "convert", "to_ico", "favicon_pack", "heif_available", "to_srgb"]
 
@@ -157,6 +160,48 @@ def too_large_image(width: int, height: int, limit: int) -> MediaTooLargeError:
     )
 
 
+_FILE_FAULTS: tuple[type[Exception], ...] = (
+    ArithmeticError,
+    AssertionError,
+    AttributeError,
+    BufferError,
+    EOFError,
+    LookupError,
+    MemoryError,
+    OSError,
+    RuntimeError,
+    SyntaxError,
+    TypeError,
+    ValueError,
+    struct.error,
+    zlib.error,
+    Image.DecompressionBombError,
+)
+
+
+@contextlib.contextmanager
+def refuse_unexpected() -> Iterator[None]:
+    """
+    Turns anything a damaged or hostile file makes a parser or decoder raise into a
+    :class:`~sashimi.errors.SashimiError`: ProcessingError for what the system reports (a full
+    disk, no memory), UnsupportedMediaError otherwise. Other exceptions, such as one raised by a
+    caller's progress callback to stop the work, pass through.
+    """
+    try:
+        yield
+    except SashimiError:
+        raise
+    except MemoryError as e:
+        raise ProcessingError(f"Ran out of memory: {e}") from e
+    except OSError as e:
+        if e.errno is not None:
+            raise ProcessingError(f"{type(e).__name__}: {e}") from e
+        raise UnsupportedMediaError(DAMAGED_IMAGE, detail=f"{type(e).__name__}: {e}") from e
+    except _FILE_FAULTS as e:
+        logger.info(f"{DAMAGED_IMAGE} {type(e).__name__}: {e}")
+        raise UnsupportedMediaError(DAMAGED_IMAGE, detail=f"{type(e).__name__}: {e}") from e
+
+
 @contextlib.contextmanager
 def _open_image(input_path: PathLike, limits: Limits | None, *, load: bool = True) -> Iterator[Image.Image]:
     """
@@ -181,9 +226,9 @@ def _open_image(input_path: PathLike, limits: Limits | None, *, load: bool = Tru
             detail=str(e),
             limit="max_pixels",
         ) from e
-    except (UnidentifiedImageError, OSError) as e:
+    except _FILE_FAULTS as e:
         raise UnsupportedMediaError(NOT_AN_IMAGE, detail=str(e)) from e
-    with img:
+    with img, refuse_unexpected():
         if img.format not in _INPUT_FORMATS:
             raise UnsupportedMediaError(NOT_AN_IMAGE, detail=f"Pillow format {img.format}")
         if max_pixels is not None and img.width * img.height > max_pixels:
@@ -626,7 +671,9 @@ def convert(
         kind, count = _source_kind(img)
         if kind == "animation" and isinstance(config, ANIMATED_SAVES) and getattr(config, "animated", True):
             frames = _convert_animation(img, input_path, output_path, config, scratch_dir, limits, on_progress)
-            told = _animation_fidelity(img, input_path, output_path, config, limits)
+            told = checked_after_writing(
+                "picture", lambda: _animation_fidelity(img, input_path, output_path, config, limits)
+            )
             result = ImageConversion(frames=frames, source_frames=count, source=kind, fidelity=told)
         else:
             carriers = (
@@ -638,16 +685,19 @@ def convert(
             _save(rendered, output_path, pil_format, kwargs, scratch_dir, groups)
             asked = kind == "animation" and isinstance(config, ANIMATED_SAVES)
             reason: Literal["kept", "target", "asked"] = "kept" if count == 1 else "asked" if asked else "target"
-            told = still_fidelity(
-                input_path,
-                output_path,
-                config,
-                upright=upright,
-                source_mode=source_mode,
-                alpha=alpha,
-                written=rendered,
-                first_frame_asked=reason == "asked",
-                limits=limits,
+            told = checked_after_writing(
+                "picture",
+                lambda: still_fidelity(
+                    input_path,
+                    output_path,
+                    config,
+                    upright=upright,
+                    source_mode=source_mode,
+                    alpha=alpha,
+                    written=rendered,
+                    first_frame_asked=reason == "asked",
+                    limits=limits,
+                ),
             )
             result = ImageConversion(frames=1, source_frames=count, source=kind, reason=reason, fidelity=told)
     if on_progress:
