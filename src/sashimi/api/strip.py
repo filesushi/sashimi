@@ -16,7 +16,7 @@ from sashimi.core.metadata import strip
 __all__ = ["STRIP_EXTENSIONS", "strip_files", "strip_files_generator"]
 
 STRIP_EXTENSIONS = (
-    ".jpg", ".jpeg", ".jfif", ".jpe", ".jif", ".png", ".apng", ".webp", ".gif", ".tif", ".tiff",
+    ".jpg", ".jpeg", ".jfif", ".jpe", ".jif", ".mpo", ".png", ".apng", ".webp", ".gif", ".tif", ".tiff",
     ".heic", ".heif", ".avif", ".bmp", ".ico", ".tga", ".psd",
     ".mp4", ".m4v", ".f4v", ".mov", ".mkv", ".mk3d", ".webm", ".3gp", ".3g2",
     ".ts", ".m2ts", ".mts", ".vob", ".mpg", ".mpeg", ".flv", ".wmv", ".asf", ".avi", ".divx", ".ogv",

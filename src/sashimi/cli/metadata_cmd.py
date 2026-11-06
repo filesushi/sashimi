@@ -21,7 +21,7 @@ from sashimi.cli._output import (
     print_fields,
     refusal,
     refusals,
-    terminal_safe,
+    json_safe,
 )
 
 
@@ -142,7 +142,7 @@ def metadata_cmd(
     except SashimiError as e:
         fail(str(e).splitlines()[0], code=1)
     if json_output:
-        print(terminal_safe(info.model_dump_json(indent=2)))
+        print(json_safe(info.model_dump_json(indent=2)))
         return
 
     rows = [("File", display_path(path)), *_rows(info)]

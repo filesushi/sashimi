@@ -255,7 +255,7 @@ def test_help_defaults_match_the_models(command):
 @pytest.mark.parametrize("command", sorted(EXPECTED))
 def test_every_valued_option_names_its_default(command):
     for flag, param in _options(command).items():
-        if param.is_flag or flag == "--help" or flag in NO_DEFAULT and command in ("resize", "extract"):
+        if param.is_flag or param.count or flag == "--help" or flag in NO_DEFAULT and command in ("resize", "extract"):
             continue
         has_typer_default = param.default is not None and param.show_default is not False
         assert _note(param) is not None or has_typer_default or flag in NO_DEFAULT, flag

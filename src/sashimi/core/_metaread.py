@@ -38,7 +38,7 @@ MAKER_NOTE = 0x927C
 _POINTERS = frozenset({EXIF_IFD, GPS_IFD, INTEROP_IFD, 0x014A, 0x0201, 0x0202})
 _XP_TAGS = frozenset({0x9C9B, 0x9C9C, 0x9C9D, 0x9C9E, 0x9C9F})
 _USER_COMMENT = 0x9286
-_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069\ud800-\udfff]")
 _MAKERS = (
     (b"Apple iOS", "Apple"),
     (b"Nikon", "Nikon"),
@@ -227,8 +227,8 @@ def cap(text: str) -> str:
 
 def clean_text(text: str) -> str:
     """
-    `text` without NULs and surrounding space; control characters (but tabs and newlines) and the
-    characters that reorder or break lines on a terminal become spaces. Pure.
+    `text` without NULs and surrounding space; control characters (but tabs and newlines), the
+    characters that reorder or break lines on a terminal, and lone surrogates become spaces. Pure.
     """
     return _CONTROL.sub(" ", text.strip("\0 \t\r\n"))
 
@@ -320,22 +320,27 @@ def section(
     )
 
 
+def _json_size(model: BaseModel) -> int:
+    return len(model.model_dump_json().encode())
+
+
 def within_budget(sections: list[MetadataSection], budget: int) -> list[MetadataSection]:
     """
-    `sections` holding at most `budget` bytes of JSON: fields past it are counted in ``omitted``,
-    and later sections keep their headings, so what was left out can still be told. Pure.
+    `sections` holding at most `budget` bytes of JSON: every section keeps its heading, and fields
+    past the budget are counted in ``omitted``, so what was left out can still be told. Pure.
     """
+    bare = [found.model_copy(update={"fields": []}) for found in sections]
+    budget -= sum(_json_size(found) for found in bare)
     kept: list[MetadataSection] = []
-    for found in sections:
-        budget -= len(found.model_copy(update={"fields": []}).model_dump_json())
+    for found, heading in zip(sections, bare, strict=True):
         fields: list[MetadataField] = []
-        for number, entry in enumerate(found.fields):
-            budget -= len(entry.model_dump_json())
+        for entry in found.fields:
+            budget -= _json_size(entry) + 1
             if budget < 0:
-                found = found.model_copy(update={"omitted": found.omitted + len(found.fields) - number})
                 break
             fields.append(entry)
-        kept.append(found.model_copy(update={"fields": fields}))
+        omitted = found.omitted + len(found.fields) - len(fields)
+        kept.append(heading.model_copy(update={"fields": fields, "omitted": omitted}))
     return kept
 
 
@@ -603,6 +608,15 @@ class _XmpProperties:
         self.pairs: list[tuple[str, str]] = []
         self.total = 0
 
+    @property
+    def full(self) -> bool:
+        """Whether nothing more will be listed, so the rest need only be counted."""
+        return len(self.pairs) >= MAX_FIELDS
+
+    def count_rest(self, element: ElementTree.Element) -> None:
+        """Counts what `element` holds without reading it: once full, ``omitted`` counts elements."""
+        self.total += sum(1 for _ in element.iter())
+
     def add(self, name: str, value: str) -> None:
         self.total += 1
         if len(self.pairs) < MAX_FIELDS:
@@ -635,7 +649,9 @@ def _xmp_values(element: ElementTree.Element, prefixes: Mapping[str, str], path:
     for name, value in attributes:
         found.add(name, value)
     for child in children:
-        if child.tag in _RDF_LISTS:
+        if found.full:
+            found.count_rest(child)
+        elif child.tag in _RDF_LISTS:
             for number, item in enumerate(child, 1):
                 if _is_struct(item):
                     _xmp_description(item, prefixes, found, f"{path}[{number}]")
@@ -656,6 +672,9 @@ def _xmp_description(
         name = _qualified(key, prefixes)
         found.add(f"{path}/{name}" if path else name, value)
     for child in element:
+        if found.full:
+            found.count_rest(child)
+            continue
         if child.tag == f"{{{_RDF}}}Description":
             _xmp_description(child, prefixes, found, path)
             continue
@@ -682,11 +701,12 @@ class XmpRead:
     def __init__(self, xmp: bytes):
         self.xmp = xmp
         self.properties: _XmpProperties | None = None
-        self.only_properties = False
+        self.root: ElementTree.Element | None = None
+        self.namespaces: set[tuple[str, str]] = set()
         parsed = _parse_xmp(xmp)
         if parsed is None:
             return
-        root, prefixes = parsed
+        root, prefixes, self.namespaces = parsed
         found = _XmpProperties()
         try:
             for description in _top_descriptions(root):
@@ -694,7 +714,7 @@ class XmpRead:
         except RecursionError:
             return
         self.properties = found
-        self.only_properties = _only_properties(xmp, root)
+        self.root = root
 
     def section(self, name: str = "XMP", *, counted: bool = True, carrier: str = "XMP") -> MetadataSection:
         """A section of the packet's properties, or its size when it can't be read."""
@@ -709,9 +729,13 @@ class XmpRead:
         it holds, as :func:`strip` leaves it under ``remove_all``; empty when it holds anything else.
         """
         found = self.properties
-        if found is None or not found.pairs or found.total > len(found.pairs) or not self.only_properties:
+        if found is None or self.root is None or not found.pairs or found.total > len(found.pairs):
             return []
-        if not all(_display_property(name, value) for name, value in found.pairs):
+        if not all(display_property(name, value) for name, value in found.pairs):
+            return []
+        if any(_DISPLAY_NAMESPACES.get(prefix) != namespace for prefix, namespace in self.namespaces):
+            return []
+        if not _only_properties(self.xmp, self.root):
             return []
         parts = []
         if any(name.startswith("hdrgm:") or value == "GainMap" for name, value in found.pairs):
@@ -734,20 +758,22 @@ def _xmp_body(xmp: bytes) -> bytes | None:
     return body.rstrip(b"\0 \r\n\t")
 
 
-def _parse_xmp(xmp: bytes) -> tuple[ElementTree.Element, dict[str, str]] | None:
+def _parse_xmp(xmp: bytes) -> tuple[ElementTree.Element, dict[str, str], set[tuple[str, str]]] | None:
     body = _xmp_body(xmp)
     if body is None:
         return None
     prefixes: dict[str, str] = {}
+    declared: set[tuple[str, str]] = set()
     try:
         reading = ElementTree.iterparse(io.BytesIO(body), events=("start-ns",))
         for _event, item in reading:
             prefix, namespace = item  # type: ignore[misc]
             prefixes.setdefault(namespace, prefix)
+            declared.add((prefix, namespace))
     except (ElementTree.ParseError, ValueError, RecursionError):
         return None
     root = reading.root  # type: ignore[attr-defined]
-    return None if root is None else (root, prefixes)
+    return None if root is None else (root, prefixes, declared)
 
 
 def xmp_pairs(xmp: bytes) -> list[tuple[str, str]] | None:
@@ -785,51 +811,141 @@ def extended_xmp(segments: list[bytes]) -> bytes:
     return b"".join(data for _, data in sorted(pieces, key=lambda piece: piece[0]))
 
 
-_DISPLAY_NUMBER = re.compile(r"-?[0-9]{1,20}(?:\.[0-9]{1,20})?", re.ASCII)
-_DISPLAY_ITEM = re.compile(
+_ITEM_PATH = re.compile(
     r"Container:Directory(?:\[[0-9]+\])?/Container:Item/Item:(Mime|Semantic|Length|Padding)", re.ASCII
 )
-_ITEM_VALUE = {
-    "Mime": re.compile(r"(?:image|video)/[A-Za-z0-9.+-]{1,32}"),
-    "Semantic": re.compile(r"[A-Za-z]{1,32}"),
-    "Length": re.compile(r"[0-9]{1,20}"),
-    "Padding": re.compile(r"[0-9]{1,20}"),
+DISPLAY_ITEM_VALUES = {
+    "Mime": re.compile(r"image/(?:jpeg|heic|heif|avif|png|webp)|video/(?:mp4|quicktime)|application/octet-stream"),
+    "Semantic": re.compile(r"Primary|GainMap|MotionPhoto|Depth|Confidence|Unknown"),
+    "Length": re.compile(r"[0-9]{1,12}", re.ASCII),
+    "Padding": re.compile(r"[0-9]{1,12}", re.ASCII),
 }
-_DISPLAY_NUMBERS = re.compile(r"hdrgm:Version|GCamera:(?:MotionPhoto|MicroVideo)[A-Za-z]*")
+"""What a container item may say and still only locate a part of the file: closed lists and sizes up to a terabyte."""
+_VERSION = re.compile(r"[0-9]{1,3}(?:\.[0-9]{1,3})?", re.ASCII)
+_OFFSET_OR_TIME = re.compile(r"-?[0-9]{1,12}", re.ASCII)
+_GAIN_MAP_NUMBER = re.compile(
+    r"[+-]?[0-9]{1,12}(?:\.[0-9]{1,12})?(?:[eE][+-]?[0-9]{1,3})?(?:, ?[+-]?[0-9]{1,12}(?:\.[0-9]{1,12})?(?:[eE][+-]?[0-9]{1,3})?){0,2}",
+    re.ASCII,
+)
+_DISPLAY_VALUES = {
+    "hdrgm:Version": _VERSION,
+    "hdrgm:BaseRenditionIsHDR": re.compile(r"[Tt]rue|[Ff]alse", re.ASCII),
+    "hdrgm:GainMapMin": _GAIN_MAP_NUMBER,
+    "hdrgm:GainMapMax": _GAIN_MAP_NUMBER,
+    "hdrgm:Gamma": _GAIN_MAP_NUMBER,
+    "hdrgm:OffsetSDR": _GAIN_MAP_NUMBER,
+    "hdrgm:OffsetHDR": _GAIN_MAP_NUMBER,
+    "hdrgm:HDRCapacityMin": _GAIN_MAP_NUMBER,
+    "hdrgm:HDRCapacityMax": _GAIN_MAP_NUMBER,
+    "GCamera:MotionPhoto": _VERSION,
+    "GCamera:MotionPhotoVersion": _VERSION,
+    "GCamera:MotionPhotoPresentationTimestampUs": _OFFSET_OR_TIME,
+    "GCamera:MicroVideo": _VERSION,
+    "GCamera:MicroVideoVersion": _VERSION,
+    "GCamera:MicroVideoOffset": _OFFSET_OR_TIME,
+    "GCamera:MicroVideoPresentationTimestampUs": _OFFSET_OR_TIME,
+}
+"""The properties that say how to show a gain map or motion photo, each with what its value can be."""
+_DISPLAY_NAMESPACES = {
+    "x": "adobe:ns:meta/",
+    "rdf": _RDF,
+    "xml": _XML,
+    "hdrgm": "http://ns.adobe.com/hdr-gain-map/1.0/",
+    "GCamera": "http://ns.google.com/photos/1.0/camera/",
+    "Container": "http://ns.google.com/photos/1.0/container/",
+    "Item": "http://ns.google.com/photos/1.0/container/item/",
+    "dc": "http://purl.org/dc/elements/1.1/",
+    "exif": "http://ns.adobe.com/exif/1.0/",
+    "tiff": "http://ns.adobe.com/tiff/1.0/",
+    "xmp": "http://ns.adobe.com/xap/1.0/",
+    "xmpMM": "http://ns.adobe.com/xap/1.0/mm/",
+    "xmpNote": "http://ns.adobe.com/xmp/note/",
+    "photoshop": "http://ns.adobe.com/photoshop/1.0/",
+}
+"""Each prefix a display packet may declare, with its only namespace: a declaration can hold free text in either."""
+_ITEM_NAMESPACE = _DISPLAY_NAMESPACES["Item"]
+_CONTAINER_ITEM = f"{{{_DISPLAY_NAMESPACES['Container']}}}Item"
 
 
-def _display_property(name: str, value: str) -> bool:
-    """Whether an XMP property is one that only says how to show a gain map or motion photo, with a value such a property has."""
-    if _DISPLAY_NUMBERS.fullmatch(name):
-        return _DISPLAY_NUMBER.fullmatch(value) is not None
-    item = _DISPLAY_ITEM.fullmatch(name)
-    return item is not None and _ITEM_VALUE[item[1]].fullmatch(value) is not None
+_ITEM_TAG = re.compile(rb"<Container:Item\b[^<>]*>")
+_ITEM_ATTRIBUTE = re.compile(rb"\sItem:(\w+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')")
 
 
-_LAYOUT_ATTRIBUTES = frozenset({"{adobe:ns:meta/}xmptk", f"{{{_RDF}}}parseType"})
-_XPACKET = re.compile(rb"<\?xpacket[^>]*\?>")
+def display_property(name: str, value: str) -> bool:
+    """Whether an XMP property only says how to show a gain map or motion photo, with a value such a property has."""
+    pattern = _DISPLAY_VALUES.get(name)
+    if pattern is not None:
+        return pattern.fullmatch(value) is not None
+    item = _ITEM_PATH.fullmatch(name)
+    return item is not None and DISPLAY_ITEM_VALUES[item[1]].fullmatch(value) is not None
+
+
+def directory_items(xmp: bytes) -> list[dict[str, str]]:
+    """
+    Each item of a packet's container directory, in the order stored, by the name of each ``Item:``
+    field. In a packet that isn't well-formed XML, as far as its tags' attributes say.
+    """
+    root = XmpRead(xmp).root
+    if root is None:
+        return [
+            {
+                name.decode(): (first or second).decode("latin-1")
+                for name, first, second in _ITEM_ATTRIBUTE.findall(tag[0])
+            }
+            for tag in _ITEM_TAG.finditer(xmp)
+        ]
+    prefix = f"{{{_ITEM_NAMESPACE}}}"
+    items = []
+    for element in root.iter(_CONTAINER_ITEM):
+        fields = {key.removeprefix(prefix): value for key, value in element.attrib.items() if key.startswith(prefix)}
+        for child in element:
+            if child.tag.startswith(prefix):
+                fields[child.tag.removeprefix(prefix)] = (child.text or "").strip()
+        items.append(fields)
+    return items
+
+
+_XMP_TOOLKIT = re.compile(
+    r"(?:Adobe )?XMP Core (?:Test\.SNAPSHOT|[0-9]+(?:\.[0-9]+)*(?:-[A-Za-z0-9]{1,8})?(?: [0-9.]+, [0-9/:-]+ *)?)"
+    r"|Image::ExifTool [0-9.]+",
+    re.ASCII,
+)
+_LANGUAGE = re.compile(r"x-default|[a-z]{2,3}(?:-[A-Z]{2})?", re.ASCII)
+_LAYOUT_ATTRIBUTES = {
+    "{adobe:ns:meta/}xmptk": _XMP_TOOLKIT,
+    f"{{{_RDF}}}parseType": re.compile("Resource"),
+    f"{{{_XML}}}lang": _LANGUAGE,
+    f"{{{_XML}}}space": re.compile("default|preserve"),
+}
+"""Attributes outside properties that say nothing about the file, each with the values that can't hold free text."""
+_XPACKET = re.compile(
+    rb"<\?xpacket (?:begin=[\"'](?:\xef\xbb\xbf)?[\"'] id=[\"']W5M0MpCehiHzreSzNTczkc9d[\"']|end=[\"'][rw][\"']) *\?>"
+)
 
 
 def _only_properties(xmp: bytes, root: ElementTree.Element) -> bool:
     """
     Whether a packet holds nothing that its properties leave out: no comments, stray text, named
-    subjects, or attributes and elements outside where properties are read.
+    subjects, unknown namespaces, or attributes and elements outside where properties are read.
     """
     body = _xmp_body(xmp) or b""
     outside = xmp.replace(body, b"", 1)
     if _XPACKET.sub(b"", outside).strip(b"\0 \r\n\t") or b"<!--" in body or b"<![CDATA[" in body or b"<?" in body:
         return False
     for element in root.iter():
-        if (element.tail or "").strip() or (len(element) and (element.text or "").strip()):
-            return False
         unread = element is root or element.tag == f"{{{_RDF}}}RDF" or element.tag in _RDF_LISTS
+        holder = unread or len(element) > 0 or element.tag == f"{{{_RDF}}}Description"
+        if (element.tail or "").strip() or (holder and (element.text or "").strip()):
+            return False
         for key, value in element.attrib.items():
+            layout = _LAYOUT_ATTRIBUTES.get(key)
             if key == f"{{{_RDF}}}about":
                 if value:
                     return False
-            elif key in _LAYOUT_ATTRIBUTES or key.startswith("{" + _XML):
-                continue
-            elif unread or key.startswith("{" + _RDF):
+            elif layout is not None:
+                if layout.fullmatch(value) is None:
+                    return False
+            elif unread or key.startswith("{" + _RDF) or key.startswith("{" + _XML):
                 return False
         if element.tag == f"{{{_RDF}}}RDF" and any(item.tag != f"{{{_RDF}}}Description" for item in element):
             return False

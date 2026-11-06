@@ -101,8 +101,9 @@ from typing import Any
 from sashimi.api._kinds import AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, count_text, kind_of, unsupported
 from sashimi.api._naming import NameRefused, NameTemplate, Naming, endings, length_problem
 from sashimi.api._outputs import own_outputs, path_key, rendered_names
+from sashimi.core._faults import caller_progress, from_caller
 from sashimi.errors import InvalidOptionsError, MediaTooShortError, ProcessingError, UnsupportedMediaError
-from sashimi.errors import FFmpegPathError, UnsuitableFFmpegError, UserInputError
+from sashimi.errors import FFmpegPathError, NothingToDoError, UnsuitableFFmpegError, UserInputError
 
 __all__ = [
     "AUDIO_EXTENSIONS",
@@ -136,10 +137,12 @@ class FileResult(tuple[pathlib.Path, str, str, pathlib.Path | None]):
     A result ``(path, status, message, output)`` (see :data:`YieldType`), which unpacks and
     compares as that 4-tuple. A ``success`` that wrote a file also says what the output kept
     of its input: ``fidelity`` (:class:`~sashimi.fidelity.Fidelity`), whose ``text`` ends the message.
-    ``fidelity`` is None for every other result, and for a dry run.
+    ``fidelity`` is None for every other result, and for a dry run. ``routine`` is True for a
+    ``skipped`` file that was sound and needed nothing done (:class:`~sashimi.errors.NothingToDoError`).
     """
 
     fidelity: Any
+    routine: bool
 
     def __new__(
         cls,
@@ -148,9 +151,12 @@ class FileResult(tuple[pathlib.Path, str, str, pathlib.Path | None]):
         message: str,
         output: pathlib.Path | None,
         fidelity: Any = None,
+        *,
+        routine: bool = False,
     ) -> "FileResult":
         result = super().__new__(cls, (path, status, message, output))
         result.fidelity = fidelity
+        result.routine = routine
         return result
 
 
@@ -857,14 +863,16 @@ def _execute(
             verb = f"replace {where} ({_replace_note(source, target)})" if existed else f"write {where}"
             yield (source, "success", f"Would {verb}", target)
             continue
-        progress = functools.partial(on_file_progress, source) if on_file_progress is not None else None
+        progress = caller_progress(functools.partial(on_file_progress, source) if on_file_progress else None)
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             written, done = _write(process, source, target, progress, force)
         except Exception as e:
+            if from_caller(e):
+                raise
             logger.debug(f"{source}: {e!r}")
             status, message = classify(e)
-            yield (source, status, message, target)
+            yield FileResult(source, status, message, target, routine=isinstance(e, NothingToDoError))
         else:
             if not written:
                 yield (source, "exists", _exists_message(source, target, names, inputs, by_output), target)

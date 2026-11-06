@@ -20,11 +20,14 @@ A full metadata read: every field, by where it was found, with what isn't counte
   (were 0).
 - Dolby Vision IPT and ProRes RAW raise `UndecodableVideoError` (still an `UnsupportedMediaError`).
 - `MIGRATION.md` is gone.
+- A run over several files lists only what needs attention under its summary (`-v` lists every
+  file), and "Exists (Skipped)" reads "Exists".
 
 ### Added
 
 - `MetadataInfo.sections` (`MetadataSection`, `MetadataField`): every field read, by carrier,
-  bounded (200 fields a section, 300 characters a value, 100 sections).
+  bounded (200 fields a section, 300 characters a value, 100 sections, 1 MiB of JSON a read), with
+  `tags_omitted` and `not_counted_omitted` beside `sections_omitted`.
 - `MetadataInfo.looked_for` and `not_counted` (`UncountedDetail`: orientation, colour profile,
   resolution, writing application, encoder, handler name, language, file type, display rotation).
 - Highlights: `lens_make`, `lens_model`, `exposure_time`, `f_number`, `iso`, `focal_length`,
@@ -34,13 +37,41 @@ A full metadata read: every field, by where it was found, with what isn't counte
   Blackmagic RAW, or whose codec the FFmpeg in use can't decode (`probe()` asks it once,
   `-codecs`); `MediaInfo.video_decodable` and `video_codec_tag`.
 - `Fidelity.kept`: what a removal left because showing the file needs it.
+- `errors.NothingToDoError` (an `UnsupportedMediaError`): a BMP to strip, a still image for `frames`.
 - `sashimi metadata --all`.
+- `.mpo` is read as an image, in folders and by name.
+- `-v` also after the command.
 
 ### Fixed
 
 - Video whose codec FFmpeg can't decode was reported as "may be damaged" or an FFmpeg error.
 - `strip` of a QuickTime file without `ftyp` (Blackmagic RAW) wrote MP4 and failed; it writes MOV.
 - `strip` said EXIF was removed when its orientation stayed.
+- Hostile or damaged metadata can only raise a `SashimiError`, and a check that fails after writing
+  keeps the output and says it couldn't check.
+- A PNG with a large text chunk or colour profile no longer reads as "not an image": text is read up
+  to 8 MiB a chunk, 64 MiB a file, and past that as not read.
+- A damaged file reads as damaged, whatever its decoder raises.
+- A missing codec, a changed Pillow or a bug in sashimi reads as an internal error and exit 1, never as a damaged file.
+- `strip` keeps every picture after a JPEG's main one (depth maps, a stereo pair's other eye) without its metadata, and updates what locates it.
+- `read` counts metadata in pictures after a JPEG's main one.
+- `strip` keeps the container directory of a photo with depth or labelled items, without the labels, and names only what really went.
+- A GIF frame that overflows its canvas is clipped as browsers clip it, on every target.
+- A palette PNG with several transparent entries converts to GIF.
+- A run of identical frames held for over 65 s converts to APNG on any Pillow, saying its timing changed if it must.
+- `strip` of an image Pillow can't open reads as damaged, not as FFmpeg's error.
+- A PNG's text and colour profile chunks share one budget for what a read inflates, and only the first profile counts.
+- Every XMP scan takes time in proportion to the packet; past 4 MiB a packet counts as holding a location.
+- `Fidelity` text from a file is clean, on one line and capped.
+- Display-only XMP allows no free text in namespaces, languages, toolkit or xpacket lines.
+- Whatever a progress callback raises passes through unchanged.
+- A line break in a file name or tag can't start a new line in the CLI.
+- A two-page file's lost page gets a row in a folder run; so does a stereo pair's other picture, named as such.
+- A folder of clips too short for the full grid ends with one line saying so.
+- The CLI passes no control or text-reordering characters to the terminal; `--json` writes them as
+  `\uXXXX`.
+- `video.convert` copies video this FFmpeg can't decode into MP4; only routes that decode refuse it.
+- A cut from mid-file no longer warns about frames hidden at the source's start.
 - A failed read of a copy's first or last packets silently dropped the note about hidden frames.
 
 ## 0.7.0 — 2026-10-30

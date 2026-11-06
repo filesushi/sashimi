@@ -23,7 +23,7 @@ from sashimi.cli._output import (
     refusal,
     print_fields,
     print_json,
-    terminal_safe,
+    json_safe,
 )
 
 
@@ -340,7 +340,7 @@ def info_cmd(
         fail(str(e).splitlines()[0], code=1)
 
     if json_output:
-        print(terminal_safe(info.model_dump_json(indent=2)))
+        print(json_safe(info.model_dump_json(indent=2)))
         return
 
     rows = [
@@ -384,7 +384,7 @@ _SHORT_FRAMES = " (under 20 ms plays as 100 ms, as browsers play it)"
 
 def _print_image_info(path: pathlib.Path, info: Any, json_output: bool, size: str) -> None:
     if json_output:
-        print(terminal_safe(info.model_dump_json(indent=2)))
+        print(json_safe(info.model_dump_json(indent=2)))
         return
     rows = [
         ("File", display_path(path)),

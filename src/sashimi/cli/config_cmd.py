@@ -405,6 +405,7 @@ def defaults(
 
     from rich.markup import escape
     from rich.table import Table
+    from rich.text import Text
 
     for title, model, doc, fields in sections:
         heading = f"[bold]{escape(title)}[/bold]" + (f"  [dim]{model.__name__}[/dim]" if model else "")
@@ -433,8 +434,8 @@ def defaults(
         table.add_column("Default", style="green", min_width=widths[1])
         table.add_column("Accepted", min_width=widths[2])
         table.add_column("Description", min_width=widths[3])
-        for cell in cells:
-            table.add_row(*cell)
+        for option, default, accepted, description in cells:
+            table.add_row(option, Text.from_markup(default), accepted, description)
         if sum(widths) + 3 * len(widths) + 1 <= console.width:
             console.print(table, soft_wrap=False)
         else:

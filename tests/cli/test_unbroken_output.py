@@ -138,19 +138,19 @@ def test_a_run_names_the_file_and_its_output_whole(command):
     assert_whole(again.stdout, str(source), output)
 
 
-def test_several_files_too_long_for_a_table_print_one_line_each():
+def test_several_files_too_long_for_a_table_print_one_line_each(no_live_log_of_sashimi):
     names = [picture(PICTURE), picture("another-photo-from-a-little-further-up-the-hill.png")]
-    result = invoke("convert", *map(str, names), "webp")
+    result = invoke("-v", "convert", *map(str, names), "webp")
     assert result.exit_code == 0, result.output
     for name in names:
         assert_whole(result.stdout, f"Success: {name}: Converted to {name.name}.webp")
     assert "┃ File" not in result.stdout
 
 
-def test_several_files_that_fit_still_get_a_table(tmp_path):
+def test_several_files_that_fit_still_get_a_table(tmp_path, no_live_log_of_sashimi):
     Image.new("RGB", (8, 8)).save(tmp_path / "a.png")
     Image.new("RGB", (8, 8)).save(tmp_path / "b.png")
-    result = invoke("resize", "a.png", "b.png", "-w", "4")
+    result = invoke("-v", "resize", "a.png", "b.png", "-w", "4")
     assert result.exit_code == 0, result.output
     assert any(f"{border} File" in result.stdout for border in "┃│") and "│ a.png " in result.stdout
     assert max(len(line) for line in result.stdout.splitlines()) <= 80

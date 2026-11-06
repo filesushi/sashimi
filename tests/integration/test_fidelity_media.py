@@ -341,3 +341,107 @@ def test_a_copy_that_shows_frames_hidden_at_the_end_says_so(tmp_path):
         assert told.level == "lossy" and "shows 2 frames the source keeps hidden at its end" in told.changed
     told = video.trim(source, tmp_path / "part.mp4", CopyTrimConfig(container="mp4", duration_seconds=1)).fidelity
     assert told.level != "lossy"
+
+
+def _plain_mp4(path: pathlib.Path) -> bytes:
+    make = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=32x24:r=5:d=0.4"]
+    command = [*make, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-map_metadata", "-1", "-fflags", "+bitexact"]
+    subprocess.run([*command, "-flags", "+bitexact", "-brand", "isom", str(path)], check=True)
+    return path.read_bytes()
+
+
+def _tagged_mp4(path: pathlib.Path, *, location: bool = False) -> bytes:
+    make = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=32x24:r=5:d=0.4"]
+    tag = "location=+48.85+002.35/" if location else "title=Jane"
+    subprocess.run([*make, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-metadata", tag, str(path)], check=True)
+    return path.read_bytes()
+
+
+def test_a_photo_with_depth_items_keeps_a_findable_video_through_strip(tmp_path):
+    from tests.core.test_hostile_metadata import items_of, layered_photo
+
+    clip = _plain_mp4(tmp_path / "clip.mp4")
+    data, _, gain = layered_photo(video=clip)
+    source = tmp_path / "photo.jpg"
+    source.write_bytes(data)
+    told = metadata.strip(source, tmp_path / "out.jpg", "remove_all").fidelity
+    output = (tmp_path / "out.jpg").read_bytes()
+    found = _embedded(output)
+    assert (
+        found is not None and subprocess.run(["ffprobe", "-v", "error", "-"], input=found, check=False).returncode == 0
+    )
+    assert gain in output
+    semantics = [item["Semantic"] for item in items_of(output)]
+    assert "MotionPhoto" in semantics and "GainMap" in semantics
+    assert "XMP" not in metadata.read(tmp_path / "out.jpg").carriers
+    if "Depth" not in semantics:
+        assert "the photo's Depth item" in told.lost and "the photo's Confidence item" in told.lost
+
+
+@pytest.mark.parametrize("mode", ["remove_all", "remove_location"])
+def test_a_replaced_video_says_what_it_left_behind(tmp_path, mode):
+    from tests.core.test_hostile_metadata import items_of, layered_photo
+
+    data, _, _ = layered_photo(video=_tagged_mp4(tmp_path / "clip.mp4", location=mode == "remove_location"))
+    source = tmp_path / "photo.jpg"
+    source.write_bytes(data)
+    told = metadata.strip(source, tmp_path / "out.jpg", mode).fidelity
+    output = (tmp_path / "out.jpg").read_bytes()
+    assert b"+48.85" not in output and (mode == "remove_location" or b"Jane" not in output)
+    found = _embedded(output)
+    assert found is not None
+    assert [item["Semantic"] for item in items_of(output)] == [
+        "Primary",
+        "GainMap",
+        "Depth",
+        "Confidence",
+        "MotionPhoto",
+    ]
+    assert told.lost == []
+
+
+class _Stop(Exception):
+    pass
+
+
+STOPS = [
+    _Stop("mine"),
+    ValueError("stop"),
+    RuntimeError("stop"),
+    KeyError("stop"),
+    TimeoutError("stop"),
+    OSError(28, "stop"),
+]
+FFMPEG_ROUTES = {
+    "gif": lambda clip, out, report: video.convert(
+        clip, out / "a.gif", VIDEO_CONVERT.from_params({}, target="gif"), on_progress=report
+    ),
+    "webp": lambda clip, out, report: video.convert(
+        clip, out / "a.webp", VIDEO_CONVERT.from_params({}, target="webp"), on_progress=report
+    ),
+    "mp4": lambda clip, out, report: video.convert(
+        clip, out / "a.mp4", VIDEO_CONVERT.from_params({}, target="mp4"), on_progress=report
+    ),
+    "webm": lambda clip, out, report: video.convert(
+        clip, out / "a.webm", VIDEO_CONVERT.from_params({"crf": 40}, target="webm"), on_progress=report
+    ),
+    "copy": lambda clip, out, report: video.trim(
+        clip, out / "a.mkv", CopyTrimConfig(container="mkv"), on_progress=report
+    ),
+    "sound": lambda clip, out, report: audio.convert(
+        clip, out / "a.mp3", AUDIO_CONVERT.from_params({}, target="mp3"), on_progress=report
+    ),
+    "sheet": lambda clip, out, report: sheets.render(clip, out / "a.jpg", JpegSheetConfig(), on_progress=report),
+    "strip": lambda clip, out, report: metadata.strip(clip, out / "a.mp4", "remove_all", on_progress=report),
+}
+
+
+@pytest.mark.parametrize("stop", STOPS, ids=[type(stop).__name__ for stop in STOPS])
+@pytest.mark.parametrize("route", sorted(FFMPEG_ROUTES))
+def test_what_a_progress_callback_raises_passes_through_every_ffmpeg_route(tmp_path, video_blob, route, stop):
+    def report(_fraction: float, _stage: str) -> None:
+        raise stop
+
+    with pytest.raises(type(stop)) as raised:
+        FFMPEG_ROUTES[route](video_blob, tmp_path, report)
+    assert raised.value is stop

@@ -30,6 +30,7 @@ from sashimi.core._atomic import PathLike, atomic_output
 from sashimi.core._capabilities import require_behaviour
 from sashimi.core._hdr import hdr_name, is_hdr, require_tone_mapping, tone_map_filter, with_tone_map
 from sashimi.core.fidelity import (
+    quoted_label,
     Content,
     Fidelity,
     Outcome,
@@ -1059,8 +1060,8 @@ def _track_name(stream: StreamInfo) -> str:
     tag = (stream.codec_tag or "").strip().lower()
     if tag in _DATA_TRACKS:
         return _DATA_TRACKS[tag]
-    handler = next((value for key, value in stream.tags.items() if key.lower() == "handler_name"), "").strip()
-    return f"a data track ({handler or tag or stream.codec})"
+    handler = next((value for key, value in stream.tags.items() if key.lower() == "handler_name"), "")
+    return f"a data track ({quoted_label(handler) or quoted_label(tag) or stream.codec})"
 
 
 def _and(items: Sequence[str]) -> str:

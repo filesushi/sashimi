@@ -39,6 +39,7 @@ from sashimi.core._animation import (
     plays,
     save_animation,
 )
+from sashimi.core._faults import caller_progress
 from sashimi.core._atomic import PathLike, atomic_output
 from sashimi.core._ffmpeg import ProgressCallback
 from sashimi.core._imagemeta import (
@@ -73,7 +74,13 @@ from sashimi.core.image import (
     checked_after_writing,
     still_fidelity,
 )
-from sashimi.errors import InvalidOptionsError, MediaTooLargeError, ProcessingError, UnsupportedMediaError
+from sashimi.errors import (
+    InvalidOptionsError,
+    MediaTooLargeError,
+    NothingToDoError,
+    ProcessingError,
+    UnsupportedMediaError,
+)
 
 __all__ = [
     "FramesInfo",
@@ -501,6 +508,7 @@ def edit(
     written (:class:`~sashimi.image.ImageConversion`): an animation or multi-page TIFF saved as one
     picture says so.
     """
+    on_progress = caller_progress(on_progress)
     with _open_image(input_path, limits) as img:
         kind, count = _source_kind(img)
         carriers = (
@@ -626,9 +634,10 @@ def select_frames(
     MediaTooLargeError over ``limits.max_animation_bytes`` or ``limits.max_pixels``. Written
     atomically. Returns what the output kept (:class:`~sashimi.core.fidelity.Outcome`).
     """
+    on_progress = caller_progress(on_progress)
     with _open_image(input_path, limits) as img:
         if not _is_animated(img):
-            raise UnsupportedMediaError(NOT_ANIMATED, detail=f"Pillow format {img.format}")
+            raise NothingToDoError(NOT_ANIMATED, detail=f"Pillow format {img.format}")
         total = frame_count(img)
         check_budget(img.width, img.height, total, limits)
         keep = config.keep if config.keep is not None else tuple(range(total))
@@ -699,6 +708,7 @@ def frame_strip(
     areas stay transparent. Refused over ``limits.max_animation_bytes`` and ``limits.max_pixels``,
     like edits. Written atomically.
     """
+    on_progress = caller_progress(on_progress)
     config = config or FrameStripConfig()
     with _open_image(input_path, limits) as img:
         animated = _is_animated(img)

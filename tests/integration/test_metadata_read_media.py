@@ -16,6 +16,7 @@ import sashimi
 from sashimi import audio, metadata, sheets, video
 from sashimi.config import AUDIO_CONVERT, VIDEO_CONVERT, VIDEO_PREVIEW, VIDEO_TRANSFORM, VIDEO_TRIM, JpegSheetConfig
 from sashimi.core import preview as core_preview
+from sashimi.core import _capabilities as core_capabilities
 from sashimi.core import video as core_video
 from sashimi.core._metaread import MAX_VALUE_CHARS
 from sashimi.errors import ProcessingError, UndecodableVideoError, UnsupportedMediaError
@@ -312,3 +313,180 @@ def test_real_ffmpeg_without_an_evc_decoder_names_it(tmp_path):
     assert "damaged" not in caught.value.user_message
     metadata.strip(source, tmp_path / "stripped", "remove_all")
     audio.convert(source, tmp_path / "sound.mp3", AUDIO_CONVERT.from_params({}, target="mp3"))
+
+
+@pytest.fixture
+def without_h264(monkeypatch):
+    """This FFmpeg, as if it had no decoder for H.264."""
+    real = core_capabilities.decodable_codecs
+
+    def lacking(binary: str) -> frozenset[str] | None:
+        return (real(binary) or frozenset()) - {"h264"}
+
+    monkeypatch.setattr(core_capabilities, "decodable_codecs", lacking)
+
+
+@pytest.fixture(scope="module")
+def plain_h264(tmp_path_factory):
+    path = tmp_path_factory.mktemp("copy") / "plain.mp4"
+    ffmpeg(*clip("-c:v", "libx264", "-preset", "ultrafast", "-g", "5", "-pix_fmt", "yuv420p", "-c:a", "aac", str(path)))
+    return path
+
+
+@pytest.mark.parametrize("params", [{}, {"mute": True}], ids=["sound", "mute"])
+def test_a_copy_into_mp4_needs_no_decoder(tmp_path, plain_h264, without_h264, params):
+    info = sashimi.probe(plain_h264)
+    assert info.video_decodable is False
+    output = tmp_path / "out.mp4"
+    done = video.convert(plain_h264, output, VIDEO_CONVERT.from_params(target="mp4", **params))
+    assert done.route == "copy" and output.stat().st_size > 0
+
+
+def test_copying_the_video_and_encoding_the_sound_needs_no_decoder(tmp_path, without_h264):
+    source = tmp_path / "opus.mkv"
+    ffmpeg(*clip("-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "libopus", str(source)))
+    done = video.convert(source, tmp_path / "out.mp4", VIDEO_CONVERT.from_params(target="mp4"))
+    assert done.route != "encode"
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"target": "webm"},
+        {"target": "gif"},
+        {"target": "webp"},
+        {"target": "mp4", "crf": 30},
+        {"target": "mp4", "start_seconds": 0.5},
+        {"target": "mp4", "max_width": 80},
+    ],
+    ids=lambda p: "-".join(str(v) for v in p.values()),
+)
+def test_a_route_that_decodes_is_still_refused_and_writes_nothing(tmp_path, plain_h264, without_h264, params):
+    output = tmp_path / "out"
+    with pytest.raises(UndecodableVideoError):
+        video.convert(plain_h264, output, VIDEO_CONVERT.from_params(**params))
+    assert not output.exists()
+
+
+def test_a_copy_that_fails_refuses_rather_than_decoding(tmp_path, plain_h264, without_h264, monkeypatch):
+    real = core_video.run_ffmpeg
+
+    def copy_fails(cmd, **kwargs):
+        if "copy" in cmd:
+            raise ProcessingError("the copy failed")
+        return real(cmd, **kwargs)
+
+    monkeypatch.setattr(core_video, "run_ffmpeg", copy_fails)
+    output = tmp_path / "out.mp4"
+    with pytest.raises(UndecodableVideoError):
+        video.convert(plain_h264, output, VIDEO_CONVERT.from_params(target="mp4"))
+    assert not output.exists()
+
+
+def test_a_cut_from_the_middle_says_nothing_of_a_lead_it_cant_show(tmp_path, plain_h264, monkeypatch):
+    monkeypatch.setattr(core_video, "hidden_lead", lambda _path: None)
+    cut = video.trim(
+        plain_h264,
+        tmp_path / "mid.mp4",
+        VIDEO_TRIM.from_params(accurate=False, start_seconds=1, duration_seconds=0.5, container="mp4"),
+    )
+    assert core_video.LEAD_UNCHECKED not in cut.fidelity.notes
+    whole = video.trim(
+        plain_h264,
+        tmp_path / "start.mp4",
+        VIDEO_TRIM.from_params(accurate=False, duration_seconds=0.5, container="mp4"),
+    )
+    assert core_video.LEAD_UNCHECKED in whole.fidelity.notes
+
+
+HOSTILE_TAGS = (
+    *("-metadata", "title=\x1b]0;pwned\x07\x1b[31mred"),
+    *("-metadata", "comment=" + "c\u202e" * 2000),
+    *("-metadata", "location=+abc/"),
+    *("-metadata", "creation_time=\x9b31m"),
+    *("-metadata", "date_recorded=\x1b[2J"),
+    *("-metadata", "com.apple.quicktime.location.ISO6709=+99999999999999999999.0+999999999999.0/"),
+    *("-metadata", "com.apple.quicktime.camera.focal_length.35mm_equivalent=inf"),
+    *("-metadata:s:v:0", "handler_name=\x1b[31mhandler"),
+    *("-metadata:s:v:0", "rotate=abc"),
+    *("-metadata:s:a:0", "language=\x1b[31"),
+)
+
+
+@pytest.fixture(scope="module", params=["mov", "mkv", "mp3", "flac"])
+def hostile_media(request, tmp_path_factory):
+    path = tmp_path_factory.mktemp("hostile") / f"tags.{request.param}"
+    if request.param in ("mp3", "flac"):
+        ffmpeg("-f", "lavfi", "-i", "sine=d=1", *HOSTILE_TAGS[:12], str(path))
+    else:
+        video_args = ("-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac")
+        extra = ("-movflags", "use_metadata_tags") if request.param == "mov" else ()
+        ffmpeg(*clip(*video_args, *HOSTILE_TAGS, *extra, str(path)))
+    return path
+
+
+def test_hostile_tags_keep_a_reads_promises(hostile_media):
+    from tests.core.test_hostile_metadata import assert_keeps_promises
+
+    info = metadata.read(hostile_media)
+    assert_keeps_promises(info)
+    assert info.latitude is None or abs(info.latitude) <= 90
+    assert info.longitude is None or abs(info.longitude) <= 180
+
+
+@pytest.mark.parametrize("mode", ["remove_all", "remove_location"])
+def test_hostile_tags_never_break_strip(tmp_path, hostile_media, mode):
+    output = tmp_path / f"out{hostile_media.suffix}"
+    done = metadata.strip(hostile_media, output, mode)
+    assert output.exists() and done.fidelity is not None
+
+
+def test_hostile_tags_never_break_a_conversion(tmp_path, hostile_media):
+    if hostile_media.suffix in (".mp3", ".flac"):
+        output = tmp_path / "out.wav"
+        done = audio.convert(hostile_media, output, AUDIO_CONVERT.from_params(target="wav"))
+    else:
+        output = tmp_path / "out.webm"
+        done = video.convert(hostile_media, output, VIDEO_CONVERT.from_params(target="mp4", crf=30))
+    assert done.fidelity is not None
+
+
+def test_many_tags_and_streams_stay_within_the_bound(tmp_path):
+    from tests.core.test_hostile_metadata import READ_LIMIT
+
+    source = tmp_path / "many.mkv"
+    tags = [arg for number in range(400) for arg in ("-metadata", f"key{number}=" + "é" * 400)]
+    ffmpeg("-f", "lavfi", "-i", "sine=d=1", *tags, str(source))
+    info = metadata.read(source)
+    assert len(info.model_dump_json().encode()) <= READ_LIMIT
+    assert len(info.tags) + info.tags_omitted >= 400 and info.tags_omitted > 0
+
+
+def test_ffprobe_output_of_the_wrong_shape_is_a_refusal(tmp_path, plain_h264, monkeypatch):
+    from sashimi.core import probe as core_probe
+
+    shaped = '{"format": {"format_name": "mov", "duration": "1"}, "streams": [{"index": "x", "codec_type": 7}]}'
+    monkeypatch.setattr(core_probe, "run_ffmpeg", lambda *_args, **_kwargs: shaped.encode())
+    copy = tmp_path / "copy.mp4"
+    copy.write_bytes(plain_h264.read_bytes())
+    with pytest.raises(UnsupportedMediaError):
+        sashimi.probe(copy)
+
+
+def test_a_damaged_gif_through_video_routes_is_only_ever_refused(tmp_path):
+    import random
+
+    from tests.core.test_hostile_metadata import BASES, damaged
+
+    rng = random.Random("gif as video")
+    path = tmp_path / "input.gif"
+    for _ in range(12):
+        path.write_bytes(damaged(BASES["gif"], rng))
+        output = tmp_path / "out.mp4"
+        try:
+            done = video.convert(path, output, VIDEO_CONVERT.from_params(target="mp4", crf=30))
+        except sashimi.SashimiError:
+            assert not output.exists()
+        else:
+            assert done.fidelity is not None
+        output.unlink(missing_ok=True)

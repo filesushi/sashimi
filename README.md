@@ -23,7 +23,7 @@ no network.
 
 ### What it does
 
-* **Images:** convert between JPEG, PNG, WebP, GIF, BMP, TIFF, AVIF and APNG (and read HEIC, ICO,
+* **Images:** convert between JPEG, PNG, WebP, GIF, BMP, TIFF, AVIF and APNG (and read HEIC, MPO, ICO,
   TGA and PSD), keeping animated GIFs, WebPs, APNGs and AVIFs animated, resize, make ICO files and
   complete favicon packs; rotate, flip, crop, and adjust brightness, contrast and saturation to
   match CSS filters, on every frame of an animated GIF, WebP, APNG or AVIF too.
@@ -297,7 +297,7 @@ empty `carriers` can be shown honestly.
 
 `strip` copies the compressed pixels byte for byte (JPEG, PNG, WebP, GIF, TIFF, HEIC, AVIF) and
 stream-copies video and audio (MKV, WebM, MP4, MOV, M4A, 3GP, MPEG-TS and M2TS, VOB and MPG, FLV,
-WMV, AVI, MP3, FLAC, OGG, WAV); an MPO keeps only its main picture. BMP and ICO hold no metadata,
+WMV, AVI, MP3, FLAC, OGG, WAV). BMP and ICO hold no metadata,
 and TGA and PSD can't be stripped without re-encoding, so `strip` says so and leaves them.
 
 - **HEIC and AVIF** are rewritten in place: every picture item (the photo, its tiles, an iPhone's
@@ -307,10 +307,13 @@ and TGA and PSD can't be stripped without re-encoding, so `strip` says so and le
   than 1) and the photo's XMP, and keeps the XMP that tells viewers how to show the gain map and
   other auxiliary pictures (without location). On iPhones up to the 15, how bright the gain map's
   HDR is lives in the EXIF maker notes, so after `remove_all` viewers use their default.
+- **Pictures after a JPEG's main one** (a gain map, depth and confidence maps, an MPO's other
+  eye) stay in both modes without their own metadata: removing a segment leaves the picture as it
+  was, the lengths and offsets that locate it are updated, and a gain map keeps what says how to
+  apply it. `read` counts what such a picture holds. Anything else after the picture that isn't the
+  video goes, and the result says so.
 - **Motion photos and Ultra HDR JPEGs** (Google, Samsung) keep a video and a gain map after the
-  picture, listed in the XMP. Both modes keep the gain map (stripping removes information about
-  the person, place and device, not the picture), with the XMP that tells viewers how to show it,
-  unless the gain map holds location or, for `remove_all`, metadata of its own. The video stays
+  picture, listed in the XMP. The video stays
   when it holds nothing the mode removes (location or data tracks for `remove_location`, any
   metadata for `remove_all`); otherwise sashimi strips it the same way, checks the result and puts
   it back, updating the lengths in the XMP. A Samsung trailer points into the old video, so a
@@ -613,9 +616,12 @@ rotated, saved as PNG" is `photo.jpg.rotated.png`. Conversions have no role, so 
   place. Outputs are written to a temporary file first and moved into place, so a failure leaves
   the original as it was. Without `--force` nothing is ever replaced, even a file that appears
   while sashimi works.
-- **Problems come first:** the results table and the `--dry-run` listing show errors, then
-  skipped files (name clashes marked), then existing outputs, then successes, and
-  `--limit-output` cuts successes before problems.
+- **Only what needs attention is listed.** A run over several files prints a summary, then errors,
+  name clashes, files it couldn't use, and successes that dropped something you may want (a sound
+  track, chapters, a GoPro GPS track, an animation) or tone-mapped HDR. `sashimi -v` (or `-v` after
+  the command) lists every file. `--dry-run` and `--json` always list every file.
+- **Problems come first** in every listing: errors, then skipped files (name clashes marked), then
+  existing outputs, then successes, and `--limit-output` cuts successes before problems.
 - Messages name an output by its file name when it's beside its input, and otherwise by its path
   as built from the paths you gave, so relative to where you ran sashimi when those were relative
   ("Output already exists: sheets/hike-5.mkv.jpeg").

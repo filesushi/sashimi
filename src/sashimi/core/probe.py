@@ -441,7 +441,11 @@ def probe(input_path: str | os.PathLike[str], *, limits: Limits | None = None) -
         raise ProcessingError(f"ffprobe returned invalid JSON for {os.fspath(input_path)}: {e}") from e
     if not data.get("format"):
         raise UnsupportedMediaError("This file doesn't look like media we can read.")
-    info = _with_decoder(parse_ffprobe_json(data))
+    try:
+        parsed = parse_ffprobe_json(data)
+    except (ValueError, TypeError, AttributeError, LookupError, ArithmeticError) as e:
+        raise UnsupportedMediaError("This file doesn't look like media we can read.", detail=str(e)) from e
+    info = _with_decoder(parsed)
     if "gif" in info.container_names and info.duration and short_gif_frames(input_path):
         from sashimi.core._animation import gif_shown_seconds
 

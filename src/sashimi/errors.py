@@ -20,6 +20,7 @@ __all__ = [
     "SashimiError",
     "UserInputError",
     "UnsupportedMediaError",
+    "NothingToDoError",
     "UndecodableVideoError",
     "NoAudioTrackError",
     "MediaTooLongError",
@@ -58,6 +59,10 @@ class UserInputError(SashimiError):
 
 class UnsupportedMediaError(UserInputError):
     """The input isn't a kind of file this operation can read (wrong type, corrupt, or no usable stream)."""
+
+
+class NothingToDoError(UnsupportedMediaError):
+    """The file is sound, and already as this operation would leave it: a BMP has no metadata to remove, a still image no frames to pick."""
 
 
 class UndecodableVideoError(UnsupportedMediaError):

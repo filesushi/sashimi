@@ -31,13 +31,15 @@ from sashimi.core._ffmpeg import (
 )
 from sashimi.core._imagemeta import (
     Carriers,
+    PngTexts,
     iptc_has_location,
     iptc_value,
     photoshop_has_location,
     photoshop_iptc,
-    png_text,
+    png_keyword,
     read_carriers,
     strip_image,
+    MAX_XMP_SCAN,
     xmp_has_location,
 )
 from sashimi.core._metaread import (
@@ -64,9 +66,16 @@ from sashimi.core._metaread import (
 from sashimi.core._metaread import section as _section
 from sashimi.core._mediameta import dropped_streams, is_location_key, merged_movflags, metadata_args, quicktime_tag_args
 from sashimi.core.fidelity import Content, Fidelity, Outcome, checked_after_writing
-from sashimi.core.image import _open_image, refuse_unexpected
+from sashimi.core._faults import caller_progress, file_at_fault
+from sashimi.core.image import DAMAGED_IMAGE, _open_image, refuse_unexpected, stated_image_format
 from sashimi.core.probe import MediaInfo, parse_ffprobe_json, probe
-from sashimi.errors import BinaryNotFoundError, InvalidOptionsError, ProcessingError, UnsupportedMediaError
+from sashimi.errors import (
+    BinaryNotFoundError,
+    InvalidOptionsError,
+    NothingToDoError,
+    ProcessingError,
+    UnsupportedMediaError,
+)
 
 __all__ = [
     "MetadataField",
@@ -250,6 +259,8 @@ def _dms(value: Any, ref: Any, negative: str) -> float | None:
 
 
 def _xmp_value(xmp: bytes, name: str) -> str | None:
+    if len(xmp) > MAX_XMP_SCAN:
+        return None
     pattern = rb"(?<!\w)\w+:" + name.encode() + rb"\s*=\s*\"([^\"]*)\"|<\w+:" + name.encode() + rb">([^<]*)<"
     match = re.search(pattern, xmp)
     if not match:
@@ -344,13 +355,15 @@ class _ImageReading:
         self.location = False
         self.exif: ExifRead | None = None
 
-    def step(self, carrier: str, name: str, read: Callable[[], None]) -> None:
-        """Runs `read`, listing a section that says so when the carrier can't be read: it stays counted."""
+    def step(self, carrier: str, name: str, read: Callable[[], None], *, counted: bool = True) -> None:
+        """Runs `read`, listing a section that says so when the carrier can't be read."""
         try:
             read()
         except _READ_FAULTS as e:
+            if not file_at_fault(e, self.img.format):
+                raise
             logger.info(f"Couldn't read the {name}: {type(e).__name__}: {e}")
-            self.sections.append(_section(carrier, f"{name} (unreadable)", []))
+            self.sections.append(_section(carrier, f"{name} (unreadable)", [], counted=counted))
 
     def read_exif(self) -> None:
         carriers, fields, tags = self.carriers, self.fields, self.tags
@@ -404,7 +417,7 @@ class _ImageReading:
         assert xmp is not None
         parsed = XmpRead(xmp)
         has_location = xmp_has_location(xmp)
-        shown = [] if has_location or carriers.more_xmp else parsed.display_parts()
+        shown = [] if has_location or carriers.more_xmp or carriers.xmp_omitted else parsed.display_parts()
         self.sections.append(parsed.section(counted=not shown))
         if shown:
             fields["carriers"] = [name for name in fields["carriers"] if name != "XMP"]
@@ -430,6 +443,9 @@ class _ImageReading:
         for number, xmp in enumerate(self.carriers.more_xmp, 2):
             self.sections.append(XmpRead(xmp).section(f"XMP packet {number}"))
             self.location = self.location or xmp_has_location(xmp)
+        if self.carriers.xmp_omitted:
+            self.location = True
+            self.sections.append(_section("XMP", "XMP packets not read", [("Count", self.carriers.xmp_omitted)]))
 
     def read_extended_xmp(self) -> None:
         self.sections.append(extended_xmp_section(self.carriers.extended_xmp))
@@ -453,17 +469,51 @@ class _ImageReading:
                 fields["date_taken"], fields["date_taken_offset"] = _iptc_date(iptc)
             fields["artist"] = fields.get("artist") or iptc_value(iptc, 80)
 
+    def read_pictures(self) -> None:
+        """What the pictures after a JPEG's main one hold: it stays in the file, whatever the main picture holds."""
+        for number, carriers in enumerate(self.carriers.pictures, 2):
+            picture = _ImageReading(self.img, carriers)
+            picture.read_carriers()
+            self.location = self.location or picture.location
+            self.sections += [
+                found.model_copy(update={"name": f"Picture {number}: {found.name}"})
+                for found in picture.sections
+                if found.counted
+            ]
+
+    def read_carriers(self) -> None:
+        """Reads every carrier that can hold metadata, each by a step of its own."""
+        carriers = self.carriers
+        if carriers.exif is not None:
+            self.step("EXIF", "EXIF", self.read_exif)
+        if carriers.xmp is not None:
+            self.step("XMP", "XMP", self.read_xmp)
+        if carriers.more_xmp or carriers.xmp_omitted:
+            self.step("XMP", "XMP packets", self.read_more_xmp)
+        if carriers.extended_xmp:
+            self.step("extended XMP", "Extended XMP", self.read_extended_xmp)
+        if carriers.photoshop is not None:
+            self.step("Photoshop", "Photoshop image resources", self.read_photoshop)
+        if carriers.png_text:
+            self.step("PNG text", "PNG text", self.read_png_text)
+        if carriers.comments:
+            self.step("comment", "Comments", self.read_comments)
+
     def read_png_text(self) -> None:
         fields, tags = self.fields, self.tags
         text_pairs: list[tuple[str, Any]] = []
+        texts = PngTexts()
         for kind, payload in self.carriers.png_text:
-            key, value = png_text(kind, payload)
-            name = key.decode("latin-1", "replace")
+            name = png_keyword(payload).decode("latin-1", "replace")
+            value = texts.read(kind, payload)
+            if is_location_key(name):
+                self.location = True
+            if value is None:
+                text_pairs.append((name, "(not read)"))
+                continue
             raw = _PNG_RAW.match(name)
             text_pairs.append((name, f"({len(value):,} bytes of encoded {raw.group(1).upper()})" if raw else value))
             text = _text(value)
-            if is_location_key(name):
-                self.location = True
             if not text:
                 continue
             lowered = name.lower()
@@ -527,24 +577,16 @@ _MADE_IPTC = frozenset({0x0404})
 def _image_info(path: PathLike, img: Image.Image, carriers: Carriers) -> MetadataInfo:
     reading = _ImageReading(img, carriers)
     fields = reading.fields
-    if carriers.exif is not None:
-        reading.step("EXIF", "EXIF", reading.read_exif)
-    if carriers.xmp is not None:
-        reading.step("XMP", "XMP", reading.read_xmp)
-    if carriers.more_xmp:
-        reading.step("XMP", "XMP packets", reading.read_more_xmp)
-    if carriers.extended_xmp:
-        reading.step("extended XMP", "Extended XMP", reading.read_extended_xmp)
-    if carriers.photoshop is not None:
-        reading.step("Photoshop", "Photoshop image resources", reading.read_photoshop)
-    if carriers.png_text:
-        reading.step("PNG text", "PNG text", reading.read_png_text)
-    if carriers.comments:
-        reading.step("comment", "Comments", reading.read_comments)
-    reading.step("ICC profile", "ICC profile", reading.read_icc)
-    reading.step("EXIF", "Orientation and resolution", reading.read_layout)
+    reading.read_carriers()
+    reading.step("ICC profile", "ICC profile", reading.read_icc, counted=False)
+    reading.step("EXIF", "Orientation and resolution", reading.read_layout, counted=False)
+    if carriers.pictures:
+        reading.step("EXIF", "Other pictures", reading.read_pictures)
     if not fields.get("date_taken"):
         fields["date_taken_offset"] = fields["date_taken_subseconds"] = None
+    for found in reading.sections:
+        if found.counted and found.carrier not in fields["carriers"]:
+            fields["carriers"].append(found.carrier)
     fields["has_location"] = reading.location
     fields["tags"] = reading.tags
     fields["looked_for"] = _image_looked_for(str(img.format))
@@ -583,7 +625,7 @@ def _bounded_info(fields: dict[str, Any], sections: list[MetadataSection]) -> Me
     ]
     kept["not_counted_omitted"] = max(0, len(details) - MAX_NOT_COUNTED)
     kept["sections_omitted"] = max(0, len(sections) - MAX_SECTIONS)
-    rest = len(MetadataInfo(**kept).model_dump_json())
+    rest = len(MetadataInfo(**kept).model_dump_json().encode())
     kept["sections"] = within_budget(sections[:MAX_SECTIONS], MAX_READ_BYTES - rest)
     return MetadataInfo(**kept)
 
@@ -822,7 +864,7 @@ _STRIP_MUXERS.update({"flv": "flv", "asf": "wmv", "avi": "avi"})
 def _refuse_image(fmt: str) -> UnsupportedMediaError:
     """Why :func:`strip` doesn't take an image of Pillow format `fmt`."""
     if fmt in _NO_METADATA:
-        return UnsupportedMediaError(
+        return NothingToDoError(
             f"{_NO_METADATA[fmt]} files hold no metadata, so there's nothing to remove.", detail=f"Pillow format {fmt}"
         )
     if fmt in _UNSTRIPPABLE:
@@ -948,6 +990,10 @@ def _image_strip_fidelity(
     if not keep_icc:
         asked.append(COLOUR_PROFILE)
     lost, removed = differences(source, output, removed_metadata=mode, removed=asked)
+    unlisted, other_gone = _jpeg_tail_report(input_path, output_path, notes)
+    lost += unlisted
+    if other_gone and "data after the picture" not in removed and "motion photo video" not in removed:
+        removed.append("data after the picture")
     after = read(output_path, limits=Limits.unlimited())
     left = {detail.name: detail.value for detail in after.not_counted}
     if "EXIF" in removed and any(s.carrier == "EXIF" for s in after.sections):
@@ -958,6 +1004,43 @@ def _image_strip_fidelity(
         removed[removed.index("XMP")] = f"XMP (all but how to show the {shown})"
     kept = [_kept_text(name, value) for name, value in left.items()] if mode == "remove_all" else []
     return fidelity("picture", lost=lost, removed=removed, notes=notes, checked=source.checked, kept=kept)
+
+
+def _jpeg_tail_report(input_path: PathLike, output_path: PathLike, notes: list[str]) -> tuple[list[str], bool]:
+    """
+    What a stripped JPEG no longer has of what its source's directory listed, or of the pictures only
+    the source's bytes show; and whether it lost data after the picture that was neither a picture
+    nor a video. Items that stay may be renamed ``Unknown``, so items are compared under that name.
+    """
+    from sashimi.core._imagemeta import _jpeg_carriers, _read, motion_video, tail_summary
+    from sashimi.core._metaread import DISPLAY_ITEM_VALUES, directory_items
+    from sashimi.core.fidelity import counted
+
+    with open(os.fspath(input_path), "rb") as f:
+        if f.read(2) != b"\xff\xd8":
+            return [], False
+    source, output = _read(input_path), _read(output_path)
+
+    def named(item: dict[str, str]) -> str:
+        semantic = item.get("Semantic", "")
+        return semantic if DISPLAY_ITEM_VALUES["Semantic"].fullmatch(semantic) else "Unknown"
+
+    left = [named(item) for item in directory_items(_jpeg_carriers(output).xmp or b"")]
+    lost = []
+    for item in directory_items(_jpeg_carriers(source).xmp or b""):
+        semantic = named(item)
+        if semantic in left:
+            left.remove(semantic)
+        elif semantic not in ("Primary", "GainMap", "MotionPhoto"):
+            lost.append("another item the photo listed" if semantic == "Unknown" else f"the photo's {semantic} item")
+    if motion_video(source) is not None and motion_video(output) is None and not notes:
+        lost.append("the way to find the motion photo's video")
+    pictures, other = tail_summary(source)
+    pictures_after, other_after = tail_summary(output)
+    gone = pictures - pictures_after - len(lost)
+    if gone > 0:
+        lost += ["another item the photo listed"] * gone
+    return counted(lost), other and not other_after
 
 
 _EXIF_FIELDS = {"orientation": ("Orientation",), "resolution": ("XResolution", "YResolution")}
@@ -1044,8 +1127,8 @@ def strip(
     streams, their layout, dispositions and languages, the display rotation, and the colour
     profile unless `keep_icc` is False) or ``remove_location`` (GPS data, location tags and place
     names, and timed metadata tracks; everything else stays). Removal is best effort: it covers
-    the carriers sashimi knows of (see the README). An MPO's extra pictures are dropped, leaving
-    its main JPEG. HEIC and AVIF are rewritten in place (see below). Raises InvalidOptionsError for
+    the carriers sashimi knows of (see the README). HEIC and AVIF are rewritten in place (see
+    below). Raises InvalidOptionsError for
     ``keep``, and UnsupportedMediaError for files it can't handle, with the reason: BMP and ICO
     (which hold no metadata), TGA and PSD, BigTIFF, DNG, and containers other than MKV, WebM, MP4,
     MOV, M4A, 3GP, MP3, FLAC, OGG, WAV, MPEG-TS (and M2TS), MPEG-PS (VOB, MPG), FLV, ASF (WMV)
@@ -1059,23 +1142,26 @@ def strip(
     (without location). An iPhone's HDR brightness for its gain map is in the EXIF maker notes on
     older models, so ``remove_all`` makes viewers use their default there.
 
-    JPEG motion photos and Ultra HDR JPEGs keep their embedded video and gain map under
-    ``remove_location`` only when they hold no location (the video's own tags can); a JPEG's
-    data after the picture (the video, the gain map image) is otherwise removed, and so is the XMP
-    that points at it. Written atomically.
+    Every picture after a JPEG's main one (a gain map, depth and confidence maps, an MPO's other
+    eye) stays without what `mode` removes, and what lists it is updated. A motion photo's video
+    stays when it holds nothing `mode` removes or can be made to. Anything else after the picture
+    is removed, and so is the XMP that points at what went. Written atomically.
     """
+    on_progress = caller_progress(on_progress)
     if mode not in ("remove_location", "remove_all"):
         raise InvalidOptionsError("Choose remove_location or remove_all.")
     image_format: str | None = None
     try:
         with _open_image(input_path, limits, load=False) as img:
             image_format = str(img.format)
-    except UnsupportedMediaError:
+    except UnsupportedMediaError as e:
+        if stated_image_format(input_path) is not None and not isinstance(e, NothingToDoError):
+            raise UnsupportedMediaError(DAMAGED_IMAGE, detail=str(e)) from e
         image_format = None
     if image_format is not None:
         if image_format not in _STRIP_IMAGE_EXTENSIONS:
             raise _refuse_image(image_format)
-        with refuse_unexpected():
+        with refuse_unexpected(image_format):
             with open(os.fspath(input_path), "rb") as f:
                 data = f.read()
             video: bytes | None = None

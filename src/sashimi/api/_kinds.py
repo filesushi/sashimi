@@ -11,7 +11,7 @@ VIDEO_EXTENSIONS = (
 )  # fmt: skip
 IMAGE_EXTENSIONS = (
     ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".heif",
-    ".jfif", ".jpe", ".jif", ".apng", ".avif", ".ico", ".tga", ".psd",
+    ".jfif", ".jpe", ".jif", ".mpo", ".apng", ".avif", ".ico", ".tga", ".psd",
 )  # fmt: skip
 AUDIO_EXTENSIONS = (
     ".mp3", ".wav", ".ogg", ".opus", ".oga", ".flac", ".m4a", ".aac", ".weba", ".mka", ".m4b", ".mp2",

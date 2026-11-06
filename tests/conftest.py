@@ -154,3 +154,9 @@ def noise(size: tuple[int, int], seed: int, mode: str = "RGB") -> Image.Image:
     """
     count = size[0] * size[1] * Image.getmodebands(mode)
     return Image.frombytes(mode, size, random.Random(seed).randbytes(count))
+
+
+@pytest.fixture
+def no_live_log_of_sashimi(monkeypatch):
+    """Keeps ``-v``'s log records from pyproject's live log: inside typer's CliRunner they close its output on 3.11."""
+    monkeypatch.setattr(logging.getLogger("sashimi"), "propagate", False)

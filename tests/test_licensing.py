@@ -3,6 +3,7 @@
 
 """Licensing: SPDX headers on every hand-written source file, and the files that name the copyright holder."""
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -13,6 +14,13 @@ PROJECT = Path(__file__).resolve().parent.parent
 HEADER = "# SPDX-FileCopyrightText: 2026 The FileSushi Authors\n# SPDX-License-Identifier: Apache-2.0\n"
 HEADED_SUFFIXES = {".py", ".sh", ".toml"}
 HEADED_NAMES = {"Dockerfile"}
+
+
+def test_no_source_file_holds_a_literal_control_or_bidi_character():
+    hidden = re.compile("[\u2028\u2029\u202a-\u202e\u2066-\u2069\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+    for path in project_files():
+        if path.suffix in HEADED_SUFFIXES:
+            assert hidden.search(path.read_text(encoding="utf-8")) is None, path
 
 
 def project_files() -> list[Path]:

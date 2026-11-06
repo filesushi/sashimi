@@ -214,7 +214,7 @@ def _new_xmp(item: bytes, mode: MetadataMode, keep: bool) -> bytes:
     """An XMP item's new content, the same length, padded with spaces (which XML allows after the packet)."""
     from sashimi.core._imagemeta import xmp_without_location
 
-    content = xmp_without_location(item) if keep else EMPTY_XMP
+    content = (xmp_without_location(item) or EMPTY_XMP) if keep else EMPTY_XMP
     if len(content) > len(item):
         content = EMPTY_XMP if len(EMPTY_XMP) <= len(item) else b""
     return content + b" " * (len(item) - len(content))
