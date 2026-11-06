@@ -110,7 +110,10 @@ def display_path(path: pathlib.Path) -> str:
 def refusal(error: Any) -> str:
     """A user error's message, followed by how to change the limit it names (``sashimi config set limits.…``), if any."""
     from sashimi.cli._limits import with_hint
+    from sashimi.errors import MissingReaderError
 
+    if isinstance(error, MissingReaderError):
+        return error.advice
     return with_hint(error.user_message, getattr(error, "limit", None))
 
 

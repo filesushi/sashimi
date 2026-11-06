@@ -21,6 +21,7 @@ __all__ = [
     "UserInputError",
     "UnsupportedMediaError",
     "NothingToDoError",
+    "MissingReaderError",
     "UndecodableVideoError",
     "NoAudioTrackError",
     "MediaTooLongError",
@@ -63,6 +64,22 @@ class UnsupportedMediaError(UserInputError):
 
 class NothingToDoError(UnsupportedMediaError):
     """The file is sound, and already as this operation would leave it: a BMP has no metadata to remove, a still image no frames to pick."""
+
+
+class MissingReaderError(UnsupportedMediaError):
+    """
+    The file is a kind of image sashimi can't read as installed. ``install`` is the command that adds
+    what's missing, for people running sashimi rather than a website's visitors.
+    """
+
+    def __init__(self, user_message: str, detail: str | None = None, *, install: str):
+        super().__init__(user_message, detail)
+        self.install = install
+
+    @property
+    def advice(self) -> str:
+        """The message and the command, for people running sashimi."""
+        return f"{self.user_message} Install it with: {self.install}"
 
 
 class UndecodableVideoError(UnsupportedMediaError):

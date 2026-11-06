@@ -62,6 +62,7 @@ from sashimi.core._faults import (
     file_at_fault,
     from_caller,
     signature_format,
+    stated_still_format,
 )
 from sashimi.core._imagemeta import (
     Carriers,
@@ -88,11 +89,18 @@ from sashimi.core.fidelity import (
     differences,
     fidelity,
     image_inventory,
+    reencode_losses,
     same_animation,
     same_picture,
     shown_length,
 )
-from sashimi.errors import MediaTooLargeError, ProcessingError, SashimiError, UnsupportedMediaError
+from sashimi.errors import (
+    MediaTooLargeError,
+    MissingReaderError,
+    ProcessingError,
+    SashimiError,
+    UnsupportedMediaError,
+)
 
 __all__ = ["ImageConversion", "convert", "to_ico", "favicon_pack", "heif_available", "to_srgb"]
 
@@ -101,6 +109,11 @@ logger = logging.getLogger("sashimi")
 NOT_AN_IMAGE = "This file isn't an image we can convert."
 DAMAGED_IMAGE = "This image file is damaged or incomplete."
 TOO_LARGE_IMAGE = "This image is too large to process."
+_FTYP_HEAD = 256
+_NEEDS_READER = {
+    "HEIF": ("HEIC and HEIF photos need sashimi's heif extra.", "pip install 'sashimi-convert[heif]'"),
+    "AVIF": ("AVIF images need a Pillow that reads them.", "pip install --upgrade pillow"),
+}
 
 _INPUT_FORMATS = frozenset({"PNG", "JPEG", "MPO", "WEBP", "GIF", "BMP", "TIFF", "HEIF", "AVIF", "ICO", "TGA", "PSD"})
 _PIL_FORMAT = {
@@ -315,6 +328,19 @@ def _png_view(input_path: PathLike) -> tuple[io.BufferedReader | None, bytes | N
     return io.BufferedReader(_PngWithoutChunks(path, dropped)), profile
 
 
+def _missing_reader(input_path: PathLike) -> MissingReaderError | None:
+    """The refusal for a file that states HEIF or AVIF, when nothing installed reads that format."""
+    try:
+        with open(os.fspath(input_path), "rb") as f:
+            stated = stated_still_format(f.read(_FTYP_HEAD))
+    except OSError:
+        return None
+    if stated is None or (heif_available() if stated == "HEIF" else "AVIF" in Image.OPEN):
+        return None
+    message, install = _NEEDS_READER[stated]
+    return MissingReaderError(message, detail=f"no reader for {stated}", install=install)
+
+
 def stated_image_format(input_path: PathLike) -> str | None:
     """The image format a file's first bytes say it is (see :func:`~sashimi.core._faults.signature_format`)."""
     try:
@@ -354,6 +380,9 @@ def _open_image(input_path: PathLike, limits: Limits | None, *, load: bool = Tru
         except MemoryError as e:
             raise ProcessingError(f"Ran out of memory: {e}") from e
         except Exception as e:
+            missing = _missing_reader(input_path)
+            if missing is not None:
+                raise missing from e
             stated = stated_image_format(input_path)
             if stated is not None and not can_read(stated):
                 raise internal_error(e) from e
@@ -441,7 +470,6 @@ def _render_from(
     metadata = config if hasattr(config, "keep_icc") else None
     icc = img.info.get("icc_profile") if metadata and metadata.keep_icc else None
     cmyk_source = img.mode == "CMYK"
-    turned = config.auto_orient and img.getexif().get(0x0112, 1) not in (None, 1)
     if config.auto_orient:
         img = ImageOps.exif_transpose(img)
     upright = img
@@ -455,9 +483,7 @@ def _render_from(
         kwargs["icc_profile"] = None if cmyk_source and img.mode != "CMYK" else icc
     groups: dict[int, dict[int, Any]] = {}
     if isinstance(config, SourceMetadata):
-        kept = apply_mode(
-            carriers or Carriers(), config.metadata, upright=config.auto_orient, edited=turned, size=img.size
-        )
+        kept = apply_mode(carriers or Carriers(), config.metadata, upright=config.auto_orient, size=img.size)
         kwargs.update(save_arguments(kept, _PIL_FORMAT[config.target]))
         if config.target == "tiff":
             groups = tiff_groups(kept)
@@ -605,9 +631,7 @@ def _convert_animation(
         durations.append(_animation.shown_ms(duration))
         if on_progress:
             on_progress((index + 1) / (total + 1), "converting")
-    kept = apply_mode(
-        carriers, config.metadata, upright=config.auto_orient, edited=transpose is not None, size=(width, height)
-    )
+    kept = apply_mode(carriers, config.metadata, upright=config.auto_orient, size=(width, height))
     metadata = save_arguments(kept, _PIL_FORMAT[config.target])
     if icc:
         metadata["icc_profile"] = icc
@@ -707,6 +731,7 @@ def still_fidelity(
         removed_metadata=getattr(config, "metadata", "keep"),
         removed=[*(removed or []), *_asked_removals(config, COLOUR_PROFILE in source.items, first_frame_asked)],
     )
+    lost += reencode_losses(source, output)
     return fidelity("picture", changed=changes, lost=lost, removed=asked, checked=source.checked)
 
 
@@ -745,6 +770,7 @@ def _animation_fidelity(
         removed_metadata=config.metadata,
         removed=_asked_removals(config, COLOUR_PROFILE in source.items, False),
     )
+    lost += reencode_losses(source, output)
     if isinstance(config, _AvifSave) and _animation.plays(img) is not None:
         lost.append("play count (AVIF animations here loop forever)")
     return fidelity("picture", changed=changes, lost=lost, removed=asked, checked=source.checked)

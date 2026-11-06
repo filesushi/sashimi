@@ -29,6 +29,7 @@ from sashimi.core._tiffmeta import (
     TiffEditor,
     TiffStructureError,
     edit_exif,
+    exif_has_thumbnail,
     exif_is_trivial,
     exif_orientation,
     gps_directory,
@@ -80,6 +81,7 @@ _XMP_ORIENTATION_ATTRIBUTE = re.compile(rb"(:Orientation\s*=\s*[\"'])\s*\d+\s*([
 _XMP_ORIENTATION_ELEMENT = re.compile(rb"(<(" + _NAME + rb"):Orientation>)\s*\d+\s*(</\2:Orientation>)")
 _PNG_LOCATION_KEY = re.compile(rb"(?i)(gps|location|latitude|longitude|geo|city|country)")
 _PNG_RAW_PROFILE = re.compile(rb"(?i)^raw profile type (exif|app1|xmp|iptc|8bim)$")
+_PNG_RAW_EXIF = re.compile(rb"(?i)raw profile type (exif|app1)")
 _PNG_TEXT = frozenset({b"tEXt", b"zTXt", b"iTXt"})
 _PNG_DISPLAY = frozenset(
     {b"tRNS", b"gAMA", b"cHRM", b"sRGB", b"sBIT", b"bKGD", b"pHYs", b"hIST", b"sPLT", b"acTL", b"fcTL", b"fdAT"}
@@ -120,6 +122,8 @@ class Carriers:
     """The resolution the source states outside EXIF, in dots per inch (see :func:`stated_dpi`)."""
     pictures: list["Carriers"] = field(default_factory=list)
     """What each picture after a JPEG's main one holds; no output but a stripped copy carries them."""
+    tail_unread: bool = False
+    """True when a JPEG's search for those pictures stopped, or one couldn't be read, so what follows its main picture may hold more."""
 
 
 def _note(carriers: Carriers, name: str) -> None:
@@ -131,15 +135,11 @@ _ENTROPY_END = re.compile(rb"\xff[^\x00\xd0-\xd7\xff]")
 """The next marker after a JPEG scan: anything but a stuffed zero, a restart or a fill byte after 0xFF."""
 
 
-def jpeg_pieces(data: bytes) -> tuple[list[tuple[int | None, bytes]], bytes]:
+def _jpeg_walk(data: bytes, pos: int, size: int) -> Iterator[tuple[int | None, int, int]]:
     """
-    A JPEG split into its marker segments, as (marker, whole segment), and its entropy-coded data,
-    as (None, bytes), ending with EOI; plus whatever follows EOI. Raises ValueError if damaged.
+    Each piece of the JPEG whose SOI ends at `pos`, up to `size`, as (marker, start, end): entropy-coded
+    data has the marker None, and EOI, if there is one, comes last. Raises ValueError if damaged.
     """
-    if data[:2] != b"\xff\xd8":
-        raise ValueError("no SOI")
-    pieces: list[tuple[int | None, bytes]] = [(0xD8, data[:2])]
-    pos, size = 2, len(data)
     while pos < size:
         if data[pos] != 0xFF:
             raise ValueError(f"expected a marker at {pos}")
@@ -149,10 +149,10 @@ def jpeg_pieces(data: bytes) -> tuple[list[tuple[int | None, bytes]], bytes]:
             raise ValueError("truncated marker")
         marker = data[pos + 1]
         if marker == 0xD9:
-            pieces.append((0xD9, b"\xff\xd9"))
-            return pieces, data[pos + 2 :]
+            yield 0xD9, pos, pos + 2
+            return
         if 0xD0 <= marker <= 0xD7 or marker == 0x01:
-            pieces.append((marker, data[pos : pos + 2]))
+            yield marker, pos, pos + 2
             pos += 2
             continue
         if pos + 4 > size:
@@ -160,15 +160,29 @@ def jpeg_pieces(data: bytes) -> tuple[list[tuple[int | None, bytes]], bytes]:
         length = struct.unpack_from(">H", data, pos + 2)[0]
         if length < 2 or pos + 2 + length > size:
             raise ValueError(f"segment at {pos} runs past the data")
-        pieces.append((marker, data[pos : pos + 2 + length]))
+        yield marker, pos, pos + 2 + length
         pos += 2 + length
         if marker == 0xDA:
-            found = _ENTROPY_END.search(data, pos)
+            found = _ENTROPY_END.search(data, pos, size)
             if found is None:
-                pieces.append((None, data[pos:]))
-                return pieces, b""
-            pieces.append((None, data[pos : found.start()]))
+                yield None, pos, size
+                return
+            yield None, pos, found.start()
             pos = found.start()
+
+
+def jpeg_pieces(data: bytes) -> tuple[list[tuple[int | None, bytes]], bytes]:
+    """
+    A JPEG split into its marker segments, as (marker, whole segment), and its entropy-coded data,
+    as (None, bytes), ending with EOI; plus whatever follows EOI. Raises ValueError if damaged.
+    """
+    if data[:2] != b"\xff\xd8":
+        raise ValueError("no SOI")
+    pieces: list[tuple[int | None, bytes]] = [(0xD8, data[:2])]
+    for marker, start, end in _jpeg_walk(data, 2, len(data)):
+        pieces.append((marker, data[start:end]))
+        if marker == 0xD9:
+            return pieces, data[end:]
     return pieces, b""
 
 
@@ -259,25 +273,31 @@ class PngTexts:
         """The chunk's text (as :func:`png_text`), or None past its limit or once the budget is spent."""
         if self.left <= 0:
             return None
-        text = png_text(kind, payload)[1]
-        self.left -= MAX_PNG_TEXT if text is None else len(text) or (MAX_PNG_TEXT if kind != b"tEXt" else 0)
+        _, text, damaged = _png_text(kind, payload)
+        self.left -= MAX_PNG_TEXT if text is None or damaged else len(text)
         return text
+
+
+def _png_text(kind: bytes, payload: bytes) -> tuple[bytes, bytes | None, bool]:
+    """What :func:`png_text` returns, and whether the chunk's compressed data is damaged, so it may have cost anything."""
+    key, _, rest = payload.partition(b"\0")
+    try:
+        if kind == b"tEXt":
+            return key, rest, False
+        if kind == b"zTXt":
+            return key, _inflated(rest[1:]), False
+        compressed, rest = rest[:1], rest[2:]
+        _, _, rest = rest.partition(b"\0")
+        _, _, text = rest.partition(b"\0")
+        return key, _inflated(text) if compressed == b"\x01" else text, False
+    except zlib.error:
+        return key, b"", True
 
 
 def png_text(kind: bytes, payload: bytes) -> tuple[bytes, bytes | None]:
     """The keyword and text of a tEXt, zTXt or iTXt chunk, decompressed; no text past ``MAX_PNG_TEXT``, None."""
-    key, _, rest = payload.partition(b"\0")
-    try:
-        if kind == b"tEXt":
-            return key, rest
-        if kind == b"zTXt":
-            return key, _inflated(rest[1:])
-        compressed, rest = rest[:1], rest[2:]
-        _, _, rest = rest.partition(b"\0")
-        _, _, text = rest.partition(b"\0")
-        return key, _inflated(text) if compressed == b"\x01" else text
-    except zlib.error:
-        return key, b""
+    key, text, _ = _png_text(kind, payload)
+    return key, text
 
 
 def webp_chunks(data: bytes) -> Iterator[tuple[bytes, int, int]]:
@@ -407,6 +427,13 @@ _ATTACHMENT_PROPERTIES = (
 )
 """XMP properties (prefix, name) that point at data stored after a JPEG's picture or in extended XMP segments."""
 _MOTION_PROPERTIES = ((rb"GCamera", _MOTION_NAME), (rb"xmpNote", rb"HasExtendedXMP"))
+_PICTURE_PROPERTIES = (
+    (rb"xmp", rb"Thumbnails"),
+    (rb"xap", rb"Thumbnails"),
+    (rb"GImage", rb"Data"),
+    (rb"GDepth", rb"(?:Data|Confidence)"),
+)
+"""XMP properties that hold a whole picture, as base64."""
 _CONTAINER_DIRECTORY = re.compile(rb"<Container:Directory\b.*?</Container:Directory\s*>\s*", re.S)
 _CONTAINER_DIRECTORY_END = re.compile(rb"</Container:Directory\s*>\s*")
 _MOTION_ITEM = re.compile(
@@ -785,7 +812,7 @@ def _read_carriers(path: str | os.PathLike[str], img: Image.Image) -> Carriers:
         if fmt in ("JPEG", "MPO"):
             data = _read(path)
             carriers = _jpeg_carriers(data)
-            carriers.pictures = _tail_carriers(data)
+            carriers.pictures, carriers.tail_unread = _tail_carriers(data)
             return carriers
         if fmt == "PNG":
             return _png_carriers(_read(path))
@@ -805,14 +832,13 @@ def apply_mode(
     mode: MetadataMode,
     *,
     upright: bool = False,
-    edited: bool = False,
     size: tuple[int, int] | None = None,
 ) -> Carriers:
     """
-    What an output keeps of `carriers` under `mode`. `upright`: sashimi applied the orientation,
-    so it is reset to 1; otherwise ``remove_all`` keeps it (alone), since it says how to show the
-    picture. `edited`: the picture was edited, so embedded thumbnails (which show the original)
-    are dropped. `size`: the output's size, written into EXIF's pixel dimensions.
+    What a re-encoded output keeps of `carriers` under `mode`. `upright`: sashimi applied the
+    orientation, so it is reset to 1; otherwise ``remove_all`` keeps it (alone), since it says how
+    to show the picture. Pictures hidden in the metadata (EXIF's thumbnail, Photoshop's, XMP's) never
+    stay. `size`: the output's size, written into EXIF's pixel dimensions.
     """
     if mode == "remove_all":
         orientation = exif_orientation(carriers.exif) if carriers.exif is not None and not upright else None
@@ -820,22 +846,69 @@ def apply_mode(
     location = mode == "remove_location"
     exif = carriers.exif
     if exif is not None:
-        exif = _exif_or_none(exif, drop_gps=location, drop_thumbnail=edited, reset_orientation=upright, size=size)
+        exif = _exif_or_none(exif, drop_gps=location, drop_thumbnail=True, reset_orientation=upright, size=size)
     xmp = carriers.xmp
     if xmp is not None:
         if location:
             xmp = xmp_without_location(xmp)
-        xmp = xmp_without_attachments(xmp)
+        xmp = _without_properties(xmp_without_attachments(xmp), _PICTURE_PROPERTIES)
         if upright:
             xmp = xmp_upright(xmp)
         xmp = xmp or None
     photoshop = carriers.photoshop
-    if photoshop is not None and (location or edited):
-        photoshop = _photoshop_filtered(photoshop, location=location, thumbnails=edited)
-    text = carriers.png_text
+    if photoshop is not None:
+        photoshop = _photoshop_filtered(photoshop, location=location, thumbnails=True)
+    texts = PngTexts()
+    text = [_without_raw_thumbnail(kind, payload, texts) for kind, payload in carriers.png_text]
     if location:
         text = [(kind, payload) for kind, payload in text if not _png_location_text(kind, payload)]
     return replace(carriers, exif=exif, xmp=xmp, photoshop=photoshop, png_text=text)
+
+
+def _without_raw_thumbnail(kind: bytes, payload: bytes, texts: PngTexts) -> tuple[bytes, bytes]:
+    """A PNG text chunk, with the thumbnail gone if it's an EXIF profile written as text, as ImageMagick writes one."""
+    key = png_keyword(payload)
+    if _PNG_RAW_EXIF.fullmatch(key) is None:
+        return kind, payload
+    text = texts.read(kind, payload)
+    if text is None:
+        return kind, payload
+    head = text.split(b"\n", 3)
+    try:
+        raw = bytes.fromhex(head[3].decode("ascii"))
+    except (IndexError, ValueError):
+        return kind, payload
+    prefix = EXIF_PREFIX if raw.startswith(EXIF_PREFIX) else b""
+    exif = _exif_or_none(raw[len(prefix) :], drop_thumbnail=True)
+    if exif is None or not exif_has_thumbnail(raw[len(prefix) :]):
+        return kind, payload
+    body = b"\n".join((b"", head[1], b"%8d" % (len(prefix) + len(exif)), (prefix + exif).hex().encode(), b""))
+    return b"zTXt", key + b"\0\0" + zlib.compress(body)
+
+
+def holds_hidden_picture(carriers: Carriers) -> bool:
+    """Whether `carriers` hold a picture a re-encoded output leaves out: EXIF's thumbnail, Photoshop's or XMP's."""
+    if carriers.exif is not None and exif_has_thumbnail(carriers.exif):
+        return True
+    texts = PngTexts()
+    if any(_without_raw_thumbnail(kind, payload, texts)[1] != payload for kind, payload in carriers.png_text):
+        return True
+    if carriers.photoshop and any(row[1] in PHOTOSHOP_THUMBNAILS for row in photoshop_resources(carriers.photoshop)):
+        return True
+    return carriers.xmp is not None and _without_properties(carriers.xmp, _PICTURE_PROPERTIES) != carriers.xmp
+
+
+def location_shown(carriers: Carriers) -> Carriers:
+    """`carriers` without what a read counts as holding a location only because it couldn't look: what wasn't read, or is too large to search."""
+    xmp = carriers.xmp if carriers.xmp is None or len(carriers.xmp) <= MAX_XMP_SCAN else None
+    return replace(
+        carriers,
+        xmp=xmp,
+        more_xmp=[packet for packet in carriers.more_xmp if len(packet) <= MAX_XMP_SCAN],
+        xmp_omitted=0,
+        tail_unread=False,
+        pictures=[location_shown(picture) for picture in carriers.pictures],
+    )
 
 
 def _png_location_text(kind: bytes, payload: bytes) -> bool:
@@ -1075,17 +1148,36 @@ def _clean_picture(jpeg: bytes, everything: bool) -> bool:
 
 MAX_TAIL_PICTURES = 32
 """How many pictures after a JPEG's main one sashimi reads: past this, the rest counts as data it can't check."""
+MAX_TAIL_MARKERS = 50_000
+"""How many markers and possible starts of a picture one search after a JPEG's main picture looks at, whatever comes of them."""
 _ISO_GAIN_MAP = b"urn:iso:std:iso:ts:21496:-1\x00"
 _NOT_ZERO = re.compile(rb"[^\x00]")
+_SOI = re.compile(rb"\xff\xd8\xff")
 
 
 @dataclass(frozen=True)
 class TailPicture:
-    """A JPEG stored after the main one, at ``data[start:end]``; `entry` is its place in the MPF table, if it's listed."""
+    """
+    A JPEG stored after the main one, at ``data[start:end]``: `entry` is its place in the MPF table,
+    if it's listed there, and `listed` says whether MPF or the container directory lists it.
+    """
 
     start: int
     end: int
     entry: int | None = None
+    listed: bool = False
+
+
+@dataclass(frozen=True)
+class TailScan:
+    """The JPEGs found after the main one; `stopped` means the search ended early, so what's past them wasn't looked at."""
+
+    pictures: list[TailPicture]
+    stopped: bool = False
+
+    @property
+    def listed(self) -> list[TailPicture]:
+        return [picture for picture in self.pictures if picture.listed]
 
 
 def _mpf_listed(data: bytes, pieces: list[tuple[int | None, bytes]]) -> dict[int, tuple[int, int]]:
@@ -1112,70 +1204,89 @@ def _directory_starts(xmp: bytes, main: int, size: int) -> list[int]:
     return (_item_positions(directory_items(xmp), main, size) or [0])[1:]
 
 
-def tail_pictures(data: bytes, pieces: list[tuple[int | None, bytes]], limit: int) -> list[TailPicture]:
+class _TailBudget:
+    """What is left of one search's work: markers and starts looked at, and bytes of entropy-coded data searched."""
+
+    def __init__(self, tail: int) -> None:
+        self.markers = MAX_TAIL_MARKERS
+        self.bytes = 2 * tail
+
+    def spent(self) -> bool:
+        return self.markers < 0 or self.bytes < 0
+
+
+def tail_scan(data: bytes, pieces: list[tuple[int | None, bytes]], limit: int) -> TailScan:
     """
-    The JPEGs after the main picture, up to `limit`, whether or not anything lists them: each from
-    where the one before ends, past zeros, or where MPF or the container directory says one starts.
-    Anything else ends the search, unless one of those points further on. Reads no more than
-    :data:`MAX_TAIL_PICTURES`.
+    The JPEGs after the main picture, up to `limit`, whether or not anything lists them: every place
+    that starts like one is tried, so none hides behind data that isn't one. Stops, saying so, past
+    :data:`MAX_TAIL_PICTURES` pictures or once :class:`_TailBudget` is spent.
     """
     listed = _mpf_listed(data, pieces)
     at = sum(len(segment) for _, segment in pieces)
     xmp = next((s[4 + len(XMP_JPEG) :] for m, s in pieces if m == 0xE1 and s[4:].startswith(XMP_JPEG)), b"")
-    starts = sorted({start for start in (*listed, *_directory_starts(xmp, at, len(data))) if at <= start < limit})
+    in_directory = frozenset(_directory_starts(xmp, at, len(data)))
+    budget = _TailBudget(limit - at)
     found: list[TailPicture] = []
-    while at < limit and len(found) < MAX_TAIL_PICTURES:
-        next_byte = _NOT_ZERO.search(data, at, limit)
-        if next_byte is None:
-            break
-        if at not in starts:
-            at = next_byte.start()
+    while (start := _SOI.search(data, at, limit)) is not None:
+        at = start.start()
+        budget.markers -= 1
+        if budget.spent() or len(found) == MAX_TAIL_PICTURES:
+            return TailScan(found, stopped=True)
         entry, size = listed.get(at, (None, 0))
-        if data[at : at + 3] == b"\xff\xd8\xff":
-            end = at + size if entry is not None and at + size <= limit else _jpeg_end(data, at, limit)
-            if end is not None:
-                found.append(TailPicture(at, end, entry))
-                at = end
-                continue
-        later = bisect.bisect_right(starts, at)
-        if later == len(starts):
-            break
-        at = starts[later]
-    return found
+        stated = at + size if entry is not None and at + size <= limit else None
+        end = _jpeg_end(data, at, stated or limit, budget)
+        if budget.spent():
+            return TailScan(found, stopped=True)
+        end = end or stated
+        if end is None:
+            at += 1
+            continue
+        found.append(TailPicture(at, end, entry, entry is not None or at in in_directory))
+        at = end
+    return TailScan(found)
 
 
-def _jpeg_end(data: bytes, start: int, limit: int) -> int | None:
-    """Where the JPEG at ``data[start:]`` ends; None if it doesn't, before `limit`."""
+def _jpeg_end(data: bytes, start: int, limit: int, budget: _TailBudget) -> int | None:
+    """Where the JPEG at ``data[start:]`` ends; None if it doesn't, before `limit`, or `budget` runs out."""
     try:
-        pieces, trailer = jpeg_pieces(data[start:limit])
+        for marker, at, end in _jpeg_walk(data, start + 2, limit):
+            budget.markers -= 1
+            if marker is None:
+                budget.bytes -= end - at
+            if budget.spent():
+                return None
+            if marker == 0xD9:
+                return end
     except (ValueError, struct.error):
-        return None
-    return limit - len(trailer) if pieces[-1][0] == 0xD9 else None
+        pass
+    return None
 
 
-def _tail_carriers(data: bytes) -> list[Carriers]:
-    """What each picture after a JPEG's main one holds, as far as they can be read."""
+def _tail_carriers(data: bytes) -> tuple[list[Carriers], bool]:
+    """What each picture after a JPEG's main one holds, and whether any of what follows the main picture couldn't be read."""
     pieces, trailer = jpeg_pieces(data)
     if not trailer:
-        return []
+        return [], False
     motion = motion_video(data)
+    scan = tail_scan(data, pieces, motion.start if motion is not None else len(data))
     found = []
-    for picture in tail_pictures(data, pieces, motion.start if motion is not None else len(data)):
+    unread = scan.stopped
+    for picture in scan.pictures:
         try:
             found.append(_jpeg_carriers(data[picture.start : picture.end]))
         except (ValueError, struct.error):
-            continue
-    return found
+            unread = True
+    return found, unread
 
 
 def tail_summary(data: bytes) -> tuple[int, bool]:
-    """How many pictures not listed in MPF follow a JPEG's main one, and whether anything else but zeros does, besides a video."""
+    """How many pictures only a container directory lists follow a JPEG's main one, and whether anything else but zeros does, besides a video."""
     pieces, trailer = jpeg_pieces(data)
     if not trailer:
         return 0, False
     motion = motion_video(data)
     limit = motion.start if motion is not None else len(data)
-    found = tail_pictures(data, pieces, limit)
+    found = tail_scan(data, pieces, limit).listed
     return sum(picture.entry is None for picture in found), _other_data(data, len(data) - len(trailer), found, limit)
 
 
@@ -1372,7 +1483,7 @@ def _display_item(item: dict[str, str]) -> bytes:
 def _whole_item(item: dict[str, str]) -> bytes:
     """One container item, saying all it said."""
     fields = b"".join(
-        b' Item:%s="%s"' % (name.encode("latin-1"), xml_escape(value, {'"': "&quot;"}).encode("utf-8", "replace"))
+        b' Item:%s="%s"' % (name.encode("utf-8"), xml_escape(value, {'"': "&quot;"}).encode("utf-8", "replace"))
         for name, value in item.items()
         if re.fullmatch(r"\w+", name)
     )
@@ -1513,11 +1624,12 @@ def _display_packet(attributes: list[bytes], *bodies: bytes) -> bytes:
 
 def _strip_jpeg(data: bytes, mode: MetadataMode, keep_icc: bool, video: bytes | None = None) -> bytes:
     """
-    `data` without its metadata. Every picture after the main one stays, listed or not, without
-    what `mode` removes (see :func:`_cleaned_picture`), and what lists them is updated. `video` is
-    what becomes of a motion photo's video (:func:`motion_video`): :data:`KEEP_VIDEO` keeps it,
-    other bytes replace it (Google's layout only), None drops it. Anything else after the picture
-    goes, except a Samsung trailer around a video that stays.
+    `data` without its metadata. Every picture after the main one that MPF or a container directory
+    lists stays, without what `mode` removes (see :func:`_cleaned_picture`), and what lists them is
+    updated. `video` is what becomes of a motion photo's video (:func:`motion_video`):
+    :data:`KEEP_VIDEO` keeps it, other bytes replace it (Google's layout only), None drops it.
+    Anything else after the picture goes, what a search of it didn't reach included, except a Samsung
+    trailer around a video that stays.
     """
     from sashimi.core._metaread import directory_items
 
@@ -1527,9 +1639,12 @@ def _strip_jpeg(data: bytes, mode: MetadataMode, keep_icc: bool, video: bytes | 
         video, motion = None, None
     original = len(data) - len(trailer)
     limit = motion.start if motion is not None else len(data)
-    found = tail_pictures(data, pieces, limit)
+    scan = tail_scan(data, pieces, limit)
+    if scan.stopped and motion is not None and motion.samsung:
+        video, motion = None, None
+    found = scan.listed
     cleaned = [_cleaned_picture(data[picture.start : picture.end], mode, keep_icc) for picture in found]
-    after_last = found[-1].end if found else original
+    after_last = scan.pictures[-1].end if scan.pictures else original
     kept = list(zip(found, cleaned, strict=True))
     unchanged = all(new == data[p.start : p.end] for p, new in kept) and not _other_data(data, original, found, limit)
     samsung = motion is not None and motion.samsung

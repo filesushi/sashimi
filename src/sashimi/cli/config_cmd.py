@@ -214,7 +214,8 @@ def show(json_output: Annotated[bool, typer.Option("--json", help="Print JSON.")
     if project is not None:
         console.print(f"[dim]# Project file: {escape(str(project))} (wins over your settings here)[/dim]")
     console.print("[dim]# What applies here, both merged:[/dim]")
-    console.print(tomlkit.dumps(raw), markup=False, highlight=False)
+    for line in tomlkit.dumps(raw).splitlines():
+        console.print(line, markup=False, highlight=False)
 
 
 @app.command("path")

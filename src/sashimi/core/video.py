@@ -1549,7 +1549,7 @@ def trim(
                 input_path, output_path, info, config.metadata, plan, config.container, changed=changed, notes=notes
             )
 
-        told = checked_after_writing(_clip_content(info), report, identical=not changed)
+        told = checked_after_writing(_clip_content(info), report, identical=not changed and not to_end)
     else:
         told = checked_after_writing(
             _clip_content(info), lambda: _reencode_fidelity(input_path, output_path, config, info)

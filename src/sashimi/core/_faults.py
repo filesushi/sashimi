@@ -183,6 +183,28 @@ _SIGNATURES = (
 )
 
 
+_HEIF_BRANDS = frozenset(
+    {b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"hevm", b"hevs", b"mif1", b"mif2", b"msf1"}
+)
+_AVIF_BRANDS = frozenset({b"avif", b"avis"})
+_NEUTRAL_BRANDS = frozenset({b"mif1", b"mif2", b"msf1"})
+
+
+def stated_still_format(head: bytes) -> str | None:
+    """
+    ``AVIF`` or ``HEIF``, if the ``ftyp`` box a file starts with says so: its major brand does,
+    or, under a brand both formats use, its compatible brands say AVIF. Pure.
+    """
+    if head[4:8] != b"ftyp":
+        return None
+    major = head[8:12]
+    end = min(struct.unpack(">I", head[:4])[0], len(head))
+    compatible = {head[at : at + 4] for at in range(16, end - 3, 4)}
+    if major in _AVIF_BRANDS or (major in _NEUTRAL_BRANDS and compatible & _AVIF_BRANDS):
+        return "AVIF"
+    return "HEIF" if major in _HEIF_BRANDS else None
+
+
 def signature_format(head: bytes) -> str | None:
     """The format the first bytes of a file say it is, for those Pillow always ought to read, and AVIF if this Pillow knows it. Pure."""
     for signature, name in _SIGNATURES:

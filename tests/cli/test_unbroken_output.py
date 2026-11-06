@@ -10,6 +10,7 @@ whatever the width. These run under CliRunner without COLUMNS, as a pipe or a lo
 import io
 import logging
 import pathlib
+import tomllib
 import shlex
 import shutil
 
@@ -245,6 +246,15 @@ def test_config_show_path_and_unset_name_the_settings_file_whole(tmp_path, monke
     assert_whole(invoke("config", "path").stdout, written)
     assert_whole(invoke("config", "unset", "thumbs.output_name").stdout, f"Removed thumbs.output_name from {written}")
     assert_whole(invoke("config", "unset", "thumbs.output_name").stdout, f"thumbs.output_name isn't set in {written}.")
+
+
+def test_config_show_prints_toml_that_reads_back(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "USER_CONFIG_DIR", tmp_path)
+    assert invoke("config", "set", "thumbs.output_dir", "sheets").exit_code == 0
+    assert invoke("config", "set", "resize.output_dir", "small").exit_code == 0
+    shown = invoke("config", "show").stdout
+    assert tomllib.loads(shown) == {"thumbs": {"output_dir": "sheets"}, "resize": {"output_dir": "small"}}
+    assert 'output_dir = "sheets"' in shown.splitlines()
 
 
 def test_unknown_settings_warning_names_the_file_whole(tmp_path, monkeypatch):

@@ -197,6 +197,15 @@ def _with_hidden_lead(tmp_path: pathlib.Path) -> pathlib.Path:
     return hidden
 
 
+def test_a_cut_to_the_end_claims_nothing_when_its_check_of_the_end_fails(tmp_path, video_blob, monkeypatch):
+    def broken(*args):
+        raise RuntimeError("the check failed")
+
+    monkeypatch.setattr(core_video, "tail_report", broken)
+    told = video.trim(video_blob, tmp_path / "o.mp4", CopyTrimConfig(container="mp4")).fidelity
+    assert told.level == "lossy" and not told.checked
+
+
 def test_a_copy_keeps_a_hidden_lead_hidden(tmp_path):
     source = _with_hidden_lead(tmp_path)
     assert core_video.hidden_lead(source) == pytest.approx(0.5, abs=0.05)

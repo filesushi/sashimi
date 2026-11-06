@@ -38,6 +38,7 @@ A full metadata read: every field, by where it was found, with what isn't counte
   `-codecs`); `MediaInfo.video_decodable` and `video_codec_tag`.
 - `Fidelity.kept`: what a removal left because showing the file needs it.
 - `errors.NothingToDoError` (an `UnsupportedMediaError`): a BMP to strip, a still image for `frames`.
+- `errors.MissingReaderError` (an `UnsupportedMediaError`, with `install` and `advice`): a HEIC without the `heif` extra, an AVIF on a Pillow without AVIF.
 - `sashimi metadata --all`.
 - `.mpo` is read as an image, in folders and by name.
 - `-v` also after the command.
@@ -53,14 +54,17 @@ A full metadata read: every field, by where it was found, with what isn't counte
   to 8 MiB a chunk, 64 MiB a file, and past that as not read.
 - A damaged file reads as damaged, whatever its decoder raises.
 - A missing codec, a changed Pillow or a bug in sashimi reads as an internal error and exit 1, never as a damaged file.
-- `strip` keeps every picture after a JPEG's main one (depth maps, a stereo pair's other eye) without its metadata, and updates what locates it.
-- `read` counts metadata in pictures after a JPEG's main one.
+- `strip` keeps every picture after a JPEG's main one that MPF or a container directory lists (depth maps, a stereo pair's other eye) without its metadata, and updates what locates it; a picture nothing lists goes.
+- `read` counts metadata in pictures after a JPEG's main one, and says when false starts or too many pictures stopped it looking.
+- Re-encoded images drop EXIF, Photoshop and XMP thumbnails under every mode; the result lists `embedded thumbnail` as lost.
+- A HEIC or AVIF nothing installed can read names what it needs, on every image command and `read`, and `strip` no longer writes it as an MP4.
 - `strip` keeps the container directory of a photo with depth or labelled items, without the labels, and names only what really went.
 - A GIF frame that overflows its canvas is clipped as browsers clip it, on every target.
 - A palette PNG with several transparent entries converts to GIF.
 - A run of identical frames held for over 65 s converts to APNG on any Pillow, saying its timing changed if it must.
 - `strip` of an image Pillow can't open reads as damaged, not as FFmpeg's error.
-- A PNG's text and colour profile chunks share one budget for what a read inflates, and only the first profile counts.
+- A PNG's text and colour profile chunks share one budget for what a read inflates, and only the first profile counts; blank text costs nothing.
+- A conversion no longer says it lost a location when it only couldn't look for one.
 - Every XMP scan takes time in proportion to the packet; past 4 MiB a packet counts as holding a location.
 - `Fidelity` text from a file is clean, on one line and capped.
 - Display-only XMP allows no free text in namespaces, languages, toolkit or xpacket lines.

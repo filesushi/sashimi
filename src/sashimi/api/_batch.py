@@ -102,7 +102,13 @@ from sashimi.api._kinds import AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSI
 from sashimi.api._naming import NameRefused, NameTemplate, Naming, endings, length_problem
 from sashimi.api._outputs import own_outputs, path_key, rendered_names
 from sashimi.core._faults import caller_progress, from_caller
-from sashimi.errors import InvalidOptionsError, MediaTooShortError, ProcessingError, UnsupportedMediaError
+from sashimi.errors import (
+    InvalidOptionsError,
+    MediaTooShortError,
+    MissingReaderError,
+    ProcessingError,
+    UnsupportedMediaError,
+)
 from sashimi.errors import FFmpegPathError, NothingToDoError, UnsuitableFFmpegError, UserInputError
 
 __all__ = [
@@ -397,6 +403,8 @@ def classify(error: Exception) -> tuple[str, str]:
             gathered[str(error)] = None
             return "error", FFMPEG_UNUSABLE if isinstance(error, FFmpegPathError) else FFMPEG_REFUSED
         return "error", f"Failed: {error}"
+    if isinstance(error, MissingReaderError):
+        return "skipped", error.advice
     if isinstance(error, (UnsupportedMediaError, MediaTooShortError)):
         return "skipped", error.user_message
     if isinstance(error, UserInputError):

@@ -59,6 +59,7 @@ from sashimi.core.fidelity import (
     differences,
     fidelity,
     image_inventory,
+    reencode_losses,
     same_animation,
 )
 from sashimi.core.image import (
@@ -411,7 +412,7 @@ def _metadata(
     if isinstance(config, _Metadata) and config.keep_icc and img.mode != "CMYK" and img.info.get("icc_profile"):
         kept["icc_profile"] = img.info["icc_profile"]
     if isinstance(config, SourceMetadata):
-        carried = apply_mode(carriers, config.metadata, upright=True, edited=True, size=size)
+        carried = apply_mode(carriers, config.metadata, upright=True, size=size)
         kept.update(save_arguments(carried, pil_format))
         if pil_format == "TIFF":
             kept["_groups"] = tiff_groups(carried)
@@ -595,6 +596,7 @@ def _animated_edit_fidelity(
     if source.items.count(COLOUR_PROFILE) and getattr(config, "keep_icc", True) is False:
         asked.append(COLOUR_PROFILE)
     lost, asked = differences(source, output, removed_metadata=getattr(config, "metadata", "keep"), removed=asked)
+    lost += reencode_losses(source, output)
     if isinstance(config, _AvifSave) and plays(img) is not None:
         lost.append("play count (AVIF animations here loop forever)")
     return fidelity("picture", changed=changed, lost=lost, removed=asked, checked=source.checked)

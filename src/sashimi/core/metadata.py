@@ -72,6 +72,7 @@ from sashimi.core.probe import MediaInfo, parse_ffprobe_json, probe
 from sashimi.errors import (
     BinaryNotFoundError,
     InvalidOptionsError,
+    MissingReaderError,
     NothingToDoError,
     ProcessingError,
     UnsupportedMediaError,
@@ -582,6 +583,10 @@ def _image_info(path: PathLike, img: Image.Image, carriers: Carriers) -> Metadat
     reading.step("EXIF", "Orientation and resolution", reading.read_layout, counted=False)
     if carriers.pictures:
         reading.step("EXIF", "Other pictures", reading.read_pictures)
+    if carriers.tail_unread:
+        reading.location = True
+        fields["carriers"].append(TAIL_UNREAD)
+        reading.uncounted.append(UncountedDetail(name=TAIL_UNREAD, value="not read to its end"))
     if not fields.get("date_taken"):
         fields["date_taken_offset"] = fields["date_taken_subseconds"] = None
     for found in reading.sections:
@@ -818,6 +823,8 @@ def _as_image(path: PathLike, limits: Limits | None) -> MetadataInfo | None:
     try:
         with _open_image(path, limits, load=False) as img:
             return _image_info(path, img, read_carriers(path, img))
+    except MissingReaderError:
+        raise
     except UnsupportedMediaError:
         return None
 
@@ -832,7 +839,8 @@ def read(input_path: PathLike, *, limits: Limits | None = None) -> MetadataInfo:
     pixels or samples. It reports what it found, not a promise that nothing else is there: a
     device may store data where no tool knows to look. Works on sashimi's outputs too, so the
     two can be compared. Raises UnsupportedMediaError for files that aren't images, video or
-    audio sashimi reads, and MediaTooLargeError for images over ``limits.max_pixels``.
+    audio sashimi reads (MissingReaderError for a HEIC or AVIF nothing installed can read), and
+    MediaTooLargeError for images over ``limits.max_pixels``.
     """
     found = _as_image(input_path, limits)
     if found is not None:
@@ -965,6 +973,8 @@ class StripResult(Outcome):
     """The extension of the format written, which is the source's (``jpg``, ``png``, ``mkv``, …)."""
 
 
+TAIL_UNREAD = "data after the picture"
+"""What :attr:`MetadataInfo.carriers` and ``not_counted`` name when a read gave up on what follows a JPEG's main picture."""
 _STRIPPED_WITH_METADATA = ("motion photo video", "data after the picture")
 """What :func:`strip` may remove from a JPEG with the metadata: data after the picture that holds metadata of its own."""
 _HOLDS = {"remove_location": "location (or tracks that can hold it)", "remove_all": "metadata"}
@@ -1142,10 +1152,11 @@ def strip(
     (without location). An iPhone's HDR brightness for its gain map is in the EXIF maker notes on
     older models, so ``remove_all`` makes viewers use their default there.
 
-    Every picture after a JPEG's main one (a gain map, depth and confidence maps, an MPO's other
-    eye) stays without what `mode` removes, and what lists it is updated. A motion photo's video
-    stays when it holds nothing `mode` removes or can be made to. Anything else after the picture
-    is removed, and so is the XMP that points at what went. Written atomically.
+    A picture after a JPEG's main one (a gain map, depth and confidence maps, an MPO's other eye)
+    stays, without what `mode` removes, if MPF or a container directory lists it, and what lists it
+    is updated. A motion photo's video stays when it holds nothing `mode` removes or can be made to.
+    Anything else after the picture is removed, and so is the XMP that points at what went. Written
+    atomically.
     """
     on_progress = caller_progress(on_progress)
     if mode not in ("remove_location", "remove_all"):
@@ -1154,6 +1165,8 @@ def strip(
     try:
         with _open_image(input_path, limits, load=False) as img:
             image_format = str(img.format)
+    except MissingReaderError:
+        raise
     except UnsupportedMediaError as e:
         if stated_image_format(input_path) is not None and not isinstance(e, NothingToDoError):
             raise UnsupportedMediaError(DAMAGED_IMAGE, detail=str(e)) from e
@@ -1189,11 +1202,9 @@ def strip(
         cmd = build_strip_command(input_path, temp, mode, source=info, muxer=muxer, ffmpeg=ffmpeg_binary())
         run_ffmpeg(cmd)
     from sashimi.core.fidelity import media_fidelity
-    from sashimi.core.video import _mode_removals, _timecode_kept, tail_report
+    from sashimi.core.video import _clip_content, _mode_removals, _timecode_kept, tail_report
 
-    content: Content = (
-        "picture and sound" if info.has_video and info.has_audio else "picture" if info.has_video else "sound"
-    )
+    content = _clip_content(info)
 
     def report() -> Fidelity:
         tail, notes = tail_report(input_path, info) if info.has_video else ([], [])

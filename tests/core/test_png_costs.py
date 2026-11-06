@@ -44,6 +44,13 @@ def text_chunk(size: int, key: bytes = b"note") -> bytes:
     return chunk(b"zTXt", key + b"\0\0" + zlib.compress(bytes(size), 9))
 
 
+def broken_stream(size: int, key: bytes) -> bytes:
+    """A zTXt whose compressed data inflates `size` bytes, then fails its checksum."""
+    stream = bytearray(zlib.compress(bytes(size), 9))
+    stream[-1] ^= 0xFF
+    return chunk(b"zTXt", key + b"\0\0" + bytes(stream))
+
+
 @pytest.fixture
 def inflated(monkeypatch):
     """Counts every byte zlib inflates while it's on, in sashimi and Pillow alike."""
@@ -72,6 +79,9 @@ SHAPES = {
     "text chunks just under Pillow's limit": lambda: png_with(*[text_chunk((1 << 20) - 1024)] * 300),
     "text chunks just past Pillow's limit": lambda: png_with(*[text_chunk((1 << 20) + 1024)] * 300),
     "xmp chunks past every limit": lambda: png_with(*[text_chunk(9 << 20, b"XML:com.adobe.xmp")] * 100),
+    "text chunks that inflate to nothing": lambda: png_with(*[text_chunk(0)] * 3000, text_chunk(8 << 20)),
+    "damaged text chunks": lambda: png_with(*[broken_stream(8 << 20, b"note")] * 100),
+    "raw exif profiles": lambda: png_with(*[text_chunk(8 << 20, b"Raw profile type exif")] * 100),
 }
 ROUTES = {
     "read": lambda path, out: metadata.read(path),
@@ -165,3 +175,58 @@ def test_the_view_reads_and_seeks_as_the_file_without_those_ranges(tmp_path):
             assert view.read(size) == bytes(kept[where : where + size])
         assert view.seek(-4, os.SEEK_END) == len(kept) - 4
         assert view.read() == bytes(kept[-4:])
+
+
+XMP = (
+    b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+    b'<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/" dc:format="image/png"/>'
+    b"</rdf:RDF></x:xmpmeta>"
+)
+EMPTY_TEXT = {
+    "iTXt": lambda key: chunk(b"iTXt", key + b"\0\0\0\0\0"),
+    "compressed iTXt": lambda key: chunk(b"iTXt", key + b"\0\x01\0\0\0" + zlib.compress(b"")),
+    "zTXt": lambda key: chunk(b"zTXt", key + b"\0\0" + zlib.compress(b"")),
+    "tEXt": lambda key: chunk(b"tEXt", key + b"\0"),
+}
+XMP_CHUNK = chunk(b"iTXt", b"XML:com.adobe.xmp\0\0\0\0\0" + XMP)
+
+
+@pytest.mark.parametrize("kind", sorted(EMPTY_TEXT))
+def test_blank_text_doesnt_stop_later_text_being_read(tmp_path, kind):
+    path = tmp_path / "in.png"
+    blanks = [EMPTY_TEXT[kind](b"Blank%d" % index) for index in range(9)]
+    path.write_bytes(png_with(*blanks, chunk(b"tEXt", b"Title\0T"), chunk(b"tEXt", b"Author\0A")))
+    info = metadata.read(path)
+    assert (info.title, info.artist) == ("T", "A")
+
+
+@pytest.mark.parametrize("kind", sorted(EMPTY_TEXT))
+def test_blank_comments_dont_cost_a_png_its_xmp(tmp_path, kind):
+    path = tmp_path / "in.png"
+    path.write_bytes(png_with(*[EMPTY_TEXT[kind](b"Comment")] * 9, XMP_CHUNK))
+    info = metadata.read(path)
+    assert not info.has_location
+    told = image.convert(path, tmp_path / "o.png", IMAGE_CONVERT.from_params(target="png")).fidelity
+    assert told.lost == [] and told.level == "lossless"
+    assert b"xmpmeta" in (tmp_path / "o.png").read_bytes()
+
+
+def test_text_that_wasnt_read_still_reads_as_not_read_and_names_no_location(tmp_path):
+    path = tmp_path / "in.png"
+    path.write_bytes(png_with(*[broken_stream(1024, b"Comment")] * 9, XMP_CHUNK))
+    info = metadata.read(path)
+    assert info.has_location, "XMP that wasn't read can't be called clean"
+    assert any(section.name == "XMP packets not read" for section in info.sections)
+    told = image.convert(path, tmp_path / "o.png", IMAGE_CONVERT.from_params(target="png")).fidelity
+    assert "XMP" in told.lost
+    assert "location" not in told.lost
+
+
+def test_an_xmp_packet_too_large_to_search_names_no_location_when_it_is_lost(tmp_path):
+    packet = XMP.replace(b"</rdf:RDF>", b" " * (5 << 20) + b"</rdf:RDF>")
+    path = tmp_path / "in.png"
+    path.write_bytes(png_with(chunk(b"iTXt", b"XML:com.adobe.xmp\0\0\0\0\0" + packet)))
+    assert metadata.read(path).has_location
+    told = image.convert(path, tmp_path / "o.jpg", IMAGE_CONVERT.from_params(target="jpeg")).fidelity
+    assert "XMP" in told.lost
+    assert "location" not in told.lost

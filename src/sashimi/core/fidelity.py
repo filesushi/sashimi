@@ -222,6 +222,7 @@ class Inventory:
     location: bool = False
     checked: bool = True
     labels: dict[str, str] = field(default_factory=dict)
+    hidden_picture: bool = False
 
     def add(self, name: str, *, metadata: bool = False, label: str | None = None) -> None:
         """Adds `name`; `label` is how people see it when it differs (``animation (20 frames)`` for ``animation``)."""
@@ -259,6 +260,8 @@ _JPEG_STRUCTURAL = frozenset({0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0x
 _JPEG_STRUCTURAL |= frozenset({0xCD, 0xCE, 0xCF, 0xDA, 0xDB, 0xDD, 0xD8, 0xD9})
 
 
+HIDDEN_PICTURE = "embedded thumbnail"
+"""A picture stored in a file's metadata, which no re-encoded output keeps."""
 EXTRA_IMAGES = "extra images (such as a gain map)"
 """Pictures a phone adds to show the main one: a gain map or a preview, which go with most phone photos."""
 ANOTHER_PICTURE = "another picture (such as a stereo pair's other eye)"
@@ -360,7 +363,7 @@ def image_inventory(path: str | os.PathLike[str], *, limits: Any = None) -> Inve
     :func:`sashimi.metadata.read` finds them), colour profile, resolution, gamma, frames or pages,
     extra images and anything else in the file's structure. Decodes no pixels.
     """
-    from sashimi.core._imagemeta import read_carriers
+    from sashimi.core._imagemeta import holds_hidden_picture, location_shown, read_carriers
     from sashimi.core._animation import frame_count
     from sashimi.core.image import _open_image
     from sashimi.core.metadata import _image_info
@@ -370,6 +373,9 @@ def image_inventory(path: str | os.PathLike[str], *, limits: Any = None) -> Inve
         fmt = str(img.format)
         carriers = read_carriers(path, img)
         info = _image_info(path, img, carriers)
+        looked_at = location_shown(carriers)
+        shown = info.has_location and (looked_at == carriers or _image_info(path, img, looked_at).has_location)
+        inventory.hidden_picture = holds_hidden_picture(carriers)
         frames = frame_count(img)
         dpi = _stated_resolution(img)
         colour_tags = any(key in img.info for key in ("gamma", "chromaticity", "srgb"))
@@ -382,7 +388,7 @@ def image_inventory(path: str | os.PathLike[str], *, limits: Any = None) -> Inve
         label = _CARRIER_NAMES.get(name, name)
         if label:
             inventory.add(label, metadata=True)
-    if info.has_location:
+    if shown:
         inventory.add(LOCATION, metadata=True)
         inventory.location = True
     if info.has_color_profile:
@@ -477,6 +483,12 @@ def _dolby_vision(stream: dict[str, Any]) -> bool:
     return stream.get("codec_type") == "video" and any(
         str(side.get("side_data_type", "")).startswith("DOVI") for side in stream.get("side_data_list", [])
     )
+
+
+def reencode_losses(source: Inventory, output: Inventory) -> list[str]:
+    """What a re-encoded output left out with nothing in the inventories to say so: a picture hidden in metadata it kept. Pure."""
+    kept_metadata = any(name in output.items for name in ("EXIF", "XMP", "Photoshop data", "PNG text"))
+    return [HIDDEN_PICTURE] if source.hidden_picture and kept_metadata and not output.hidden_picture else []
 
 
 def differences(

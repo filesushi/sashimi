@@ -543,6 +543,7 @@ LABELS = {
     "the photo's Depth item": True,
     "another item the photo listed": True,
     "extra images (such as a gain map)": False,
+    "embedded thumbnail": False,
     "Apple metadata track": False,
     "EXIF": False,
     "XMP": False,

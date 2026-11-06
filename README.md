@@ -244,8 +244,9 @@ everywhere:
 
 Removal is best effort: it covers the carriers above, which are the ones sashimi knows of; a
 device may store data where no tool looks. When sashimi applies the EXIF orientation it resets the
-orientation to 1, so viewers don't turn the picture twice, and drops the EXIF thumbnail, which shows
-the picture before the change; edits always do both. `keep_icc` decides the colour profile alone.
+orientation to 1, so viewers don't turn the picture twice; edits always do. A re-encoded output never
+keeps a picture hidden in the metadata (an EXIF, Photoshop or XMP thumbnail), whatever the mode, and
+the result lists it as lost. `keep_icc` decides the colour profile alone.
 ICO files and favicon packs carry no metadata or profile: their colours are converted to sRGB.
 
 What `keep` can carry into each output format:
@@ -307,11 +308,13 @@ and TGA and PSD can't be stripped without re-encoding, so `strip` says so and le
   than 1) and the photo's XMP, and keeps the XMP that tells viewers how to show the gain map and
   other auxiliary pictures (without location). On iPhones up to the 15, how bright the gain map's
   HDR is lives in the EXIF maker notes, so after `remove_all` viewers use their default.
-- **Pictures after a JPEG's main one** (a gain map, depth and confidence maps, an MPO's other
-  eye) stay in both modes without their own metadata: removing a segment leaves the picture as it
-  was, the lengths and offsets that locate it are updated, and a gain map keeps what says how to
-  apply it. `read` counts what such a picture holds. Anything else after the picture that isn't the
-  video goes, and the result says so.
+- **Pictures after a JPEG's main one** that MPF or a container directory lists (a gain map, depth
+  and confidence maps, an MPO's other eye) stay in both modes without their own metadata: removing a
+  segment leaves the picture as it was, the lengths and offsets that locate it are updated, and a
+  gain map keeps what says how to apply it. Anything else after the picture that isn't the video
+  goes, a picture nothing lists included, and the result says so. `read` counts what every picture
+  there holds, listed or not, and says when it gave up on what follows the main picture
+  (`data after the picture` in `carriers` and `not_counted`, and `has_location`).
 - **Motion photos and Ultra HDR JPEGs** (Google, Samsung) keep a video and a gain map after the
   picture, listed in the XMP. The video stays
   when it holds nothing the mode removes (location or data tracks for `remove_location`, any
