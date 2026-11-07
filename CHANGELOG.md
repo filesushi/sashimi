@@ -3,7 +3,7 @@
 sashimi follows [Semantic Versioning](https://semver.org/). Before 1.0, minor versions may break
 the Python API; every break is listed here.
 
-## 0.8.0 — 2026-10-31
+## 0.8.0 — 2026-11-07
 
 A full metadata read: every field, by where it was found, with what isn't counted.
 
