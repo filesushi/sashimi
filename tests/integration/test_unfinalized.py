@@ -10,7 +10,9 @@ file's stated length means.
 """
 
 import json
+import logging
 import pathlib
+import random
 import re
 import struct
 import subprocess
@@ -35,9 +37,11 @@ from sashimi.config import (
     JpegSheetConfig,
     Limits,
     Mp4TransformConfig,
+    PngSheetConfig,
 )
 from sashimi.core import probe as probe_module
 from sashimi.core.sheets import animated, static
+from sashimi.core.sheets._layout import plan_layout
 from sashimi.errors import InvalidOptionsError, MediaTooLargeError
 
 from tests.conftest import made_by_current_ffmpeg, needs_trusted_cuts, _ffmpeg as make_media, leftovers, needs_ffmpeg
@@ -317,6 +321,124 @@ def test_a_late_matroska_whose_end_cant_be_reached_keeps_its_stated_length(final
     probe_module._ends.clear()
     assert probe(finalized_late, limits=Limits(max_scan_packets=10)).duration == pytest.approx(stated)
     probe_module._ends.clear()
+
+
+def _scan_that_stops(monkeypatch, *, after: int, error: str | None = None, said: bytes = b"") -> None:
+    """ffprobe's packet list, cut after `after` lines, then failing with `error` or saying `said` on stderr."""
+    real = probe_module.stream_ffmpeg
+
+    def stopping(cmd, size, tail=None):
+        lines = b"".join(real(cmd, size)).split(b"\n")
+        yield b"".join(line + b"\n" for line in lines[:after])
+        if tail is not None and said:
+            tail.append(said)
+        if error is not None:
+            raise probe_module.ProcessingError(error)
+
+    monkeypatch.setattr(probe_module, "stream_ffmpeg", stopping)
+
+
+def _forgetting_scans() -> None:
+    probe_module._ends.clear()
+    probe_module._scans.clear()
+
+
+@pytest.mark.parametrize("after", [0, 3, 40], ids=["at once", "midway", "near the end"])
+def test_a_scan_that_fails_leaves_the_stated_length_and_says_why(finalized_late, monkeypatch, caplog, after):
+    stated = float(_ffprobe(finalized_late)["format"]["duration"])
+    _forgetting_scans()
+    _scan_that_stops(monkeypatch, after=after, error="ffprobe exited with code 1: the reason")
+    with caplog.at_level(logging.WARNING, logger="sashimi"):
+        assert probe(finalized_late).duration == pytest.approx(stated)
+    assert "the reason" in caplog.text
+    monkeypatch.undo()
+    assert probe(finalized_late).duration == pytest.approx(SECONDS, abs=0.1), "a failed scan was remembered"
+    _forgetting_scans()
+
+
+def test_a_demuxers_complaint_on_a_clean_exit_is_only_logged_for_those_who_look(finalized_late, monkeypatch, caplog):
+    _forgetting_scans()
+    _scan_that_stops(monkeypatch, after=1_000_000, said=b"[matroska,webm @ 0x1] File ended prematurely\n")
+    with caplog.at_level(logging.INFO, logger="sashimi"):
+        assert probe(finalized_late).duration == pytest.approx(SECONDS, abs=0.1)
+    complaints = [record for record in caplog.records if "File ended prematurely" in record.getMessage()]
+    assert [record.levelno for record in complaints] == [logging.INFO]
+    _forgetting_scans()
+
+
+def test_a_scan_cut_short_with_no_sign_of_it_is_logged(finalized_late, monkeypatch, caplog):
+    _forgetting_scans()
+    _scan_that_stops(monkeypatch, after=3)
+    with caplog.at_level(logging.INFO, logger="sashimi"):
+        short = probe(finalized_late).duration
+    assert short < SECONDS - 0.5
+    assert "where it states" in caplog.text
+    _forgetting_scans()
+
+
+def test_a_good_scan_logs_nothing_about_it(finalized_late, caplog):
+    _forgetting_scans()
+    with caplog.at_level(logging.INFO, logger="sashimi"):
+        assert probe(finalized_late).duration == pytest.approx(SECONDS, abs=0.1)
+    assert "where it states" not in caplog.text and "packets of" not in caplog.text
+    _forgetting_scans()
+
+
+def test_a_recording_that_states_no_length_has_none_when_its_scan_fails(late_capture, monkeypatch, caplog):
+    _forgetting_scans()
+    _scan_that_stops(monkeypatch, after=3, error="ffprobe exited with code 1: the reason")
+    with caplog.at_level(logging.WARNING, logger="sashimi"):
+        assert probe(late_capture).duration is None
+    assert "the reason" in caplog.text
+    monkeypatch.undo()
+    assert probe(late_capture).duration == pytest.approx(SECONDS, abs=0.1), "a failed scan was remembered"
+    _forgetting_scans()
+
+
+def test_a_truncated_recording_is_measured_as_far_as_it_goes(late_capture, tmp_path):
+    _forgetting_scans()
+    data = late_capture.read_bytes()
+    cut = tmp_path / "original.blob"
+    cut.write_bytes(data[: len(data) // 2])
+    assert 0 < probe(cut).duration < SECONDS - 1
+    _forgetting_scans()
+
+
+@pytest.fixture
+def cut_late(tmp_path) -> pathlib.Path:
+    """A late-start recording that was finalized, stating 106 s, with its second half gone."""
+    full = tmp_path / "full.mkv"
+    make_media(*SOURCES, *H264, "-output_ts_offset", "100", "-f", "matroska", str(full))
+    data = full.read_bytes()
+    cut = tmp_path / "original.blob"
+    cut.write_bytes(data[: len(data) // 2])
+    assert float(_ffprobe(cut)["format"]["duration"]) > 100
+    return cut
+
+
+def test_a_cut_late_recording_is_as_long_as_what_is_left(cut_late, caplog):
+    _forgetting_scans()
+    with caplog.at_level(logging.WARNING, logger="sashimi"):
+        length = probe(cut_late).duration
+    assert 1 < length < SECONDS - 1
+    assert caplog.records == [], "a person with a cut file is told about ffprobe's complaints"
+    _forgetting_scans()
+
+
+def test_a_sheet_of_a_cut_late_recording_shows_what_is_left(cut_late, tmp_path):
+    _forgetting_scans()
+    out = tmp_path / "sheet.png"
+    config = PngSheetConfig(width=640, cols=4, rows=2, gap=0, show_header=False, show_timestamps=False)
+    sheets.render(cut_late, out, config)
+    layout = plan_layout(640, 4, 2, 0, probe(cut_late).display_aspect_ratio)
+    with Image.open(out) as sheet:
+        rgb = sheet.convert("RGB")
+        tiles = []
+        for slot in range(layout.cells):
+            x, y = layout.cell_origin(slot)
+            tiles.append(rgb.crop((x, y, x + layout.thumb_w, y + layout.thumb_h)).tobytes())
+    assert len(set(tiles)) == 8, "tiles repeat a frame, as they do past where the picture ends"
+    _forgetting_scans()
 
 
 @pytest.fixture(scope="module")

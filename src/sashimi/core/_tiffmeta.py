@@ -19,6 +19,8 @@ ORIENTATION = 0x0112
 SUB_IFDS = frozenset({EXIF_IFD, GPS_IFD, INTEROP_IFD})
 THUMBNAIL_OFFSET = 0x0201
 THUMBNAIL_LENGTH = 0x0202
+STRIP_OFFSETS = 0x0111
+STRIP_LENGTHS = 0x0117
 PIXEL_X = 0xA002
 PIXEL_Y = 0xA003
 _MAX_ENTRIES = 4096
@@ -113,6 +115,14 @@ class TiffEditor:
         if entry.type in (3, 8):
             return int(struct.unpack(self.order + "H", entry.raw[:2])[0])
         return int(struct.unpack(self.order + "I", entry.raw)[0])
+
+    def numbers(self, entry: Entry) -> list[int]:
+        """An entry's numbers, if it holds SHORTs, LONGs or IFD offsets; none otherwise."""
+        code = {3: "H", 8: "H", 4: "I", 13: "I"}.get(entry.type)
+        value = self.value(entry)
+        if code is None or len(value) != entry.size:
+            return []
+        return list(struct.unpack(f"{self.order}{entry.count}{code}", value))
 
     def zero(self, start: int, length: int) -> None:
         start = max(0, min(start, len(self.buf)))
@@ -261,19 +271,35 @@ def edit_exif(
         except TiffStructureError:
             thumb, thumb_length = [], 0
         values = {entry.tag: entry for entry in thumb}
-        start, count = values.get(THUMBNAIL_OFFSET), values.get(THUMBNAIL_LENGTH)
-        if start is not None and count is not None:
-            editor.zero(editor.pointer(start), editor.pointer(count))
+        for places, lengths in ((THUMBNAIL_OFFSET, THUMBNAIL_LENGTH), (STRIP_OFFSETS, STRIP_LENGTHS)):
+            start, count = values.get(places), values.get(lengths)
+            if start is not None and count is not None:
+                for at, amount in zip(editor.numbers(start), editor.numbers(count), strict=False):
+                    editor.zero(at, amount)
         for entry in thumb:
             editor.erase_value(entry)
         if thumb_length:
             editor.zero(following, thumb_length)
         editor.put_u32(first + length - 4, 0)
+        if not any(editor.buf[following:]):
+            del editor.buf[following:]
     if drop_gps:
         new = editor.rewrite(first, lambda entry: entry.tag != GPS_IFD)
         if new is not None:
             editor.put_u32(4, new)
     return bytes(editor.buf)
+
+
+def exif_has_thumbnail(data: bytes) -> bool:
+    """True if an EXIF block's second directory (IFD1) says where a thumbnail is."""
+    try:
+        editor = TiffEditor(data)
+        following = editor.directory(editor.first)[1]
+        return bool(following) and any(
+            entry.tag in (THUMBNAIL_OFFSET, STRIP_OFFSETS) for entry in editor.directory(following)[0]
+        )
+    except (TiffStructureError, struct.error):
+        return False
 
 
 def gps_directory(data: bytes) -> bool:

@@ -10,6 +10,7 @@ whatever the width. These run under CliRunner without COLUMNS, as a pipe or a lo
 import io
 import logging
 import pathlib
+import tomllib
 import shlex
 import shutil
 
@@ -138,19 +139,19 @@ def test_a_run_names_the_file_and_its_output_whole(command):
     assert_whole(again.stdout, str(source), output)
 
 
-def test_several_files_too_long_for_a_table_print_one_line_each():
+def test_several_files_too_long_for_a_table_print_one_line_each(no_live_log_of_sashimi):
     names = [picture(PICTURE), picture("another-photo-from-a-little-further-up-the-hill.png")]
-    result = invoke("convert", *map(str, names), "webp")
+    result = invoke("-v", "convert", *map(str, names), "webp")
     assert result.exit_code == 0, result.output
     for name in names:
         assert_whole(result.stdout, f"Success: {name}: Converted to {name.name}.webp")
     assert "┃ File" not in result.stdout
 
 
-def test_several_files_that_fit_still_get_a_table(tmp_path):
+def test_several_files_that_fit_still_get_a_table(tmp_path, no_live_log_of_sashimi):
     Image.new("RGB", (8, 8)).save(tmp_path / "a.png")
     Image.new("RGB", (8, 8)).save(tmp_path / "b.png")
-    result = invoke("resize", "a.png", "b.png", "-w", "4")
+    result = invoke("-v", "resize", "a.png", "b.png", "-w", "4")
     assert result.exit_code == 0, result.output
     assert any(f"{border} File" in result.stdout for border in "┃│") and "│ a.png " in result.stdout
     assert max(len(line) for line in result.stdout.splitlines()) <= 80
@@ -245,6 +246,15 @@ def test_config_show_path_and_unset_name_the_settings_file_whole(tmp_path, monke
     assert_whole(invoke("config", "path").stdout, written)
     assert_whole(invoke("config", "unset", "thumbs.output_name").stdout, f"Removed thumbs.output_name from {written}")
     assert_whole(invoke("config", "unset", "thumbs.output_name").stdout, f"thumbs.output_name isn't set in {written}.")
+
+
+def test_config_show_prints_toml_that_reads_back(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "USER_CONFIG_DIR", tmp_path)
+    assert invoke("config", "set", "thumbs.output_dir", "sheets").exit_code == 0
+    assert invoke("config", "set", "resize.output_dir", "small").exit_code == 0
+    shown = invoke("config", "show").stdout
+    assert tomllib.loads(shown) == {"thumbs": {"output_dir": "sheets"}, "resize": {"output_dir": "small"}}
+    assert 'output_dir = "sheets"' in shown.splitlines()
 
 
 def test_unknown_settings_warning_names_the_file_whole(tmp_path, monkeypatch):

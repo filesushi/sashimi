@@ -10,13 +10,16 @@ the source's and the output's metadata and tracks as sashimi reads them, and, fo
 without loss, the decoded pixels of the output compared with the source's.
 """
 
+import logging
 import os
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from PIL import Image
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
+
+from sashimi.core._metaread import clean_text
 
 __all__ = [
     "Fidelity",
@@ -35,7 +38,25 @@ __all__ = [
 ]
 
 FidelityLevel = Literal["lossless", "content_lossless", "lossy"]
+MAX_QUOTED = 80
+"""The most characters of a file's own text (a track's handler name) that one label quotes."""
+MAX_ENTRY = 500
+"""The most characters one entry of a :class:`Fidelity` list holds."""
+MAX_ENTRIES = 20
+"""The most entries one :class:`Fidelity` list holds; one more says how many were left out."""
+logger = logging.getLogger("sashimi")
+
 Content = Literal["picture", "sound", "picture and sound"]
+
+
+def one_line(text: str, limit: int = MAX_ENTRY) -> str:
+    """`text` clean of control characters, on one line, at most `limit` characters. Pure."""
+    return " ".join(clean_text(text).split())[:limit]
+
+
+def quoted_label(text: str) -> str:
+    """A file's own name for something, fit to quote in a :class:`Fidelity` entry. Pure."""
+    return one_line(text, MAX_QUOTED)
 
 
 def and_list(items: Sequence[str]) -> str:
@@ -74,6 +95,11 @@ class Fidelity(BaseModel):
     """What was left out as asked (``metadata``, ``keep_icc``, ``animated``, ``mute``): ``location``, ``sound``."""
     adjusted: list[str] = []
     """What was set as asked without changing the picture or sound, for people: ``display rotation set to 90° clockwise``."""
+    kept: list[str] = []
+    """
+    What a metadata removal left in place because showing the file needs it, for people:
+    ``orientation (turned 90° clockwise)``, ``colour profile (Display P3)``, ``resolution (72 dpi)``.
+    """
     notes: list[str] = []
     """Sentences explaining ``lost``, such as why a copy dropped a track and which format keeps it."""
     checked: bool = True
@@ -81,6 +107,13 @@ class Fidelity(BaseModel):
     False when the source may hold data sashimi can't read (vendor boxes in MP4 and MOV, HEIC
     items, unknown chunks), so it doesn't claim that everything besides the content was kept.
     """
+
+    @field_validator("changed", "lost", "removed", "adjusted", "kept", "notes")
+    @classmethod
+    def _bounded(cls, entries: list[str]) -> list[str]:
+        """Whatever a file's text put in an entry, every entry is clean, on one line and capped, and so is the list."""
+        kept = [one_line(entry) for entry in entries[:MAX_ENTRIES]]
+        return [*kept, f"{len(entries) - MAX_ENTRIES} more"] if len(entries) > MAX_ENTRIES else kept
 
     @property
     def text(self) -> str:
@@ -99,6 +132,8 @@ class Fidelity(BaseModel):
             parts.append(f"{and_list(self.lost)} dropped")
         if self.removed:
             parts.append(f"{and_list(self.removed)} removed as asked")
+        if self.kept:
+            parts.append(f"kept: {and_list(self.kept)}")
         text = "; ".join(parts)
         if self.notes:
             text += ". " + " ".join(self.notes).rstrip(".")
@@ -131,6 +166,7 @@ def fidelity(
     notes: Iterable[str] = (),
     checked: bool = True,
     adjusted: Iterable[str] = (),
+    kept: Iterable[str] = (),
 ) -> Fidelity:
     """A :class:`Fidelity`, its level worked out from what changed, what was lost and what was checked. Pure."""
     changed, lost, removed = _unique(changed), _unique(lost), _unique(removed)
@@ -147,9 +183,30 @@ def fidelity(
         lost=lost,
         removed=removed,
         adjusted=_unique(adjusted),
+        kept=_unique(kept),
         notes=_unique(notes),
         checked=checked,
     )
+
+
+UNCHECKED = "sashimi couldn't check this output against its source"
+"""What ``Fidelity.changed`` or ``notes`` says when the check after writing an output failed."""
+
+
+def checked_after_writing(content: Content, check: Callable[[], Fidelity], *, identical: bool = False) -> Fidelity:
+    """
+    The result of `check`, which runs once an output is written. The output stands whatever the
+    check finds, so a failed check is reported rather than raised: as ``lossy`` and unchecked,
+    since nothing can be claimed for it, or ``content_lossless`` when the route copies the picture
+    or sound as they are (`identical`).
+    """
+    try:
+        return check()
+    except Exception as e:
+        logger.warning(f"{UNCHECKED}: {type(e).__name__}: {e}")
+        if identical:
+            return fidelity(content, notes=[UNCHECKED], checked=False)
+        return fidelity(content, changed=[UNCHECKED], checked=False)
 
 
 @dataclass
@@ -165,6 +222,7 @@ class Inventory:
     location: bool = False
     checked: bool = True
     labels: dict[str, str] = field(default_factory=dict)
+    hidden_picture: bool = False
 
     def add(self, name: str, *, metadata: bool = False, label: str | None = None) -> None:
         """Adds `name`; `label` is how people see it when it differs (``animation (20 frames)`` for ``animation``)."""
@@ -202,8 +260,27 @@ _JPEG_STRUCTURAL = frozenset({0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0x
 _JPEG_STRUCTURAL |= frozenset({0xCD, 0xCE, 0xCF, 0xDA, 0xDB, 0xDD, 0xD8, 0xD9})
 
 
+HIDDEN_PICTURE = "embedded thumbnail"
+"""A picture stored in a file's metadata, which no re-encoded output keeps."""
+EXTRA_IMAGES = "extra images (such as a gain map)"
+"""Pictures a phone adds to show the main one: a gain map or a preview, which go with most phone photos."""
+ANOTHER_PICTURE = "another picture (such as a stereo pair's other eye)"
+"""A picture in its own right: a stereo pair's other eye, a panorama's or multi-angle set's other shots."""
+
+
+def _add_extra_pictures(data: bytes, inventory: Inventory) -> None:
+    """Names what an MPF segment lists after the main picture, by the type it states and whether the file has a gain map."""
+    from sashimi.core._imagemeta import mpf_extra_kinds
+
+    kinds = mpf_extra_kinds(data)
+    if "shows the main picture" in kinds:
+        inventory.add(EXTRA_IMAGES)
+    if "a picture of its own" in kinds:
+        inventory.add(ANOTHER_PICTURE)
+
+
 def _jpeg_structure(data: bytes, inventory: Inventory) -> None:
-    from sashimi.core._imagemeta import jpeg_pieces
+    from sashimi.core._imagemeta import jpeg_pieces, motion_video, tail_summary
 
     pieces, trailer = jpeg_pieces(data)
     for marker, segment in pieces:
@@ -217,7 +294,7 @@ def _jpeg_structure(data: bytes, inventory: Inventory) -> None:
         if marker == 0xE2 and payload.startswith(b"ICC_PROFILE\0"):
             continue
         if marker == 0xE2 and payload.startswith(b"MPF\0"):
-            inventory.add("extra images (such as a gain map)")
+            _add_extra_pictures(data, inventory)
             continue
         if marker == 0xED and payload.startswith(b"Photoshop 3.0\0"):
             continue
@@ -228,7 +305,8 @@ def _jpeg_structure(data: bytes, inventory: Inventory) -> None:
         name = f"APP{marker - 0xE0}" if 0xE0 <= marker <= 0xEF else f"marker 0x{marker:02X}"
         inventory.add(f"other data ({name})", metadata=True)
     if trailer.strip(b"\0"):
-        motion = b"MotionPhoto" in data or b"MicroVideo" in data
+        stated = b"MotionPhoto" in data or b"MicroVideo" in data
+        motion = stated and (motion_video(data) is not None or tail_summary(data)[1])
         inventory.add("motion photo video" if motion else "data after the picture")
 
 
@@ -285,7 +363,7 @@ def image_inventory(path: str | os.PathLike[str], *, limits: Any = None) -> Inve
     :func:`sashimi.metadata.read` finds them), colour profile, resolution, gamma, frames or pages,
     extra images and anything else in the file's structure. Decodes no pixels.
     """
-    from sashimi.core._imagemeta import read_carriers
+    from sashimi.core._imagemeta import holds_hidden_picture, location_shown, read_carriers
     from sashimi.core._animation import frame_count
     from sashimi.core.image import _open_image
     from sashimi.core.metadata import _image_info
@@ -295,19 +373,22 @@ def image_inventory(path: str | os.PathLike[str], *, limits: Any = None) -> Inve
         fmt = str(img.format)
         carriers = read_carriers(path, img)
         info = _image_info(path, img, carriers)
+        looked_at = location_shown(carriers)
+        shown = info.has_location and (looked_at == carriers or _image_info(path, img, looked_at).has_location)
+        inventory.hidden_picture = holds_hidden_picture(carriers)
         frames = frame_count(img)
         dpi = _stated_resolution(img)
         colour_tags = any(key in img.info for key in ("gamma", "chromaticity", "srgb"))
         inventory.checked = fmt in _CHECKED_IMAGE_FORMATS
         if frames > 1 and fmt == "TIFF":
             inventory.add("pages", label=f"{frames - 1} more {'page' if frames == 2 else 'pages'}")
-        elif frames > 1:
+        elif frames > 1 and fmt != "MPO":
             inventory.add("animation", label=f"animation ({frames} frames)")
-    for name in carriers.found:
+    for name in info.carriers:
         label = _CARRIER_NAMES.get(name, name)
         if label:
             inventory.add(label, metadata=True)
-    if info.has_location:
+    if shown:
         inventory.add(LOCATION, metadata=True)
         inventory.location = True
     if info.has_color_profile:
@@ -331,7 +412,8 @@ def image_inventory(path: str | os.PathLike[str], *, limits: Any = None) -> Inve
         except (ValueError, IndexError):
             inventory.checked = False
     elif fmt == "MPO":
-        inventory.add("extra images (such as a gain map)")
+        with open(os.fspath(path), "rb") as f:
+            _add_extra_pictures(f.read(), inventory)
     return inventory
 
 
@@ -340,7 +422,9 @@ _CHECKED_CONTAINERS = frozenset({"matroska", "webm"})
 
 
 def _count(number: int, singular: str) -> str:
-    return singular if number == 1 else f"{number} {singular.removeprefix('a ').removeprefix('an ')}s"
+    if number == 1:
+        return singular
+    return f"{number} {singular.replace('another ', 'more ').removeprefix('a ').removeprefix('an ')}s"
 
 
 def media_inventory(path: str | os.PathLike[str]) -> Inventory:
@@ -399,6 +483,12 @@ def _dolby_vision(stream: dict[str, Any]) -> bool:
     return stream.get("codec_type") == "video" and any(
         str(side.get("side_data_type", "")).startswith("DOVI") for side in stream.get("side_data_list", [])
     )
+
+
+def reencode_losses(source: Inventory, output: Inventory) -> list[str]:
+    """What a re-encoded output left out with nothing in the inventories to say so: a picture hidden in metadata it kept. Pure."""
+    kept_metadata = any(name in output.items for name in ("EXIF", "XMP", "Photoshop data", "PNG text"))
+    return [HIDDEN_PICTURE] if source.hidden_picture and kept_metadata and not output.hidden_picture else []
 
 
 def differences(

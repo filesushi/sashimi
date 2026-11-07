@@ -6,6 +6,26 @@ Reading what metadata an image, video or audio file holds (for showing it to peo
 removing it, all of it or just location data, without re-encoding.
 """
 
-from sashimi.core.metadata import MetadataInfo, StripResult, build_strip_command, read, strip, strip_format
+from sashimi.core.metadata import (
+    MetadataField,
+    MetadataInfo,
+    MetadataSection,
+    StripResult,
+    UncountedDetail,
+    build_strip_command,
+    read,
+    strip,
+    strip_format,
+)
 
-__all__ = ["MetadataInfo", "StripResult", "build_strip_command", "read", "strip", "strip_format"]
+__all__ = [
+    "MetadataField",
+    "MetadataInfo",
+    "MetadataSection",
+    "StripResult",
+    "UncountedDetail",
+    "build_strip_command",
+    "read",
+    "strip",
+    "strip_format",
+]

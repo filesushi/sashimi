@@ -5,6 +5,7 @@
 
 import collections
 import json
+import logging
 import re
 import math
 import os
@@ -24,9 +25,17 @@ from sashimi.core._ffmpeg import (
     stream_ffmpeg,
 )
 from sashimi.config._limits import Limits, resolve_limits, rough_length_text
-from sashimi.errors import BinaryNotFoundError, MediaTooLargeError, ProcessingError, UnsupportedMediaError
+from sashimi.errors import (
+    BinaryNotFoundError,
+    MediaTooLargeError,
+    ProcessingError,
+    UndecodableVideoError,
+    UnsupportedMediaError,
+)
 
 __all__ = ["MediaInfo", "StreamInfo", "anamorphic", "check_decodable", "probe", "VIDEO_CONTAINERS", "AUDIO_CONTAINERS"]
+
+logger = logging.getLogger("sashimi")
 
 _SEGMENT_TIMESTAMPS = frozenset({"matroska", "webm"})
 _PAST_THE_END = "999999999"
@@ -35,6 +44,7 @@ _PACKETS_PER_SECOND = 77
 _NO_SCAN = frozenset({"gif"})
 _SCAN_CHUNK = 1 << 16
 _SCAN_CACHE_SIZE = 64
+_STATED_TOLERANCE = 0.5
 
 
 class StreamInfo(BaseModel):
@@ -98,6 +108,16 @@ class MediaInfo(BaseModel):
     display_aspect_ratio: float | None = None
     fps: float | None = None
     video_codec: str | None = None
+    """ffprobe's codec name for the video, e.g. ``h264``; None when ffprobe names none (a codec FFmpeg can't decode)."""
+    video_codec_tag: str | None = None
+    """The codec tag the file stores for the video (``avc1``, ``hvc1``, ``brvm`` for Blackmagic RAW), if any."""
+    video_decodable: bool = True
+    """
+    False when sashimi can't make pictures from the video (see :func:`check_decodable`): FFmpeg
+    names no codec for it, the FFmpeg sashimi runs has no decoder for its codec (:func:`probe`
+    asks it), or it decodes it without its real colours (Dolby Vision in IPT, ProRes RAW). Routes that decode the picture then raise UndecodableVideoError; copies, ``strip`` and
+    audio extraction still work where the container allows. True for files without video.
+    """
     pixel_format: str | None = None
     """The video's pixel format as ffprobe names it, e.g. ``yuv420p`` (8-bit 4:2:0) or ``yuv420p10le``."""
     color_space: str | None = None
@@ -298,12 +318,23 @@ def parse_ffprobe_json(data: dict[str, Any]) -> MediaInfo:
             display_aspect_ratio=round(dar, 6) if dar else None,
             fps=_ratio(video.get("avg_frame_rate")) or _ratio(video.get("r_frame_rate")),
             video_codec=video.get("codec_name"),
+            video_codec_tag=_codec_tag(video),
+            video_decodable=_decodable(video.get("codec_name"), _known(video.get("color_space"))),
             pixel_format=video.get("pix_fmt"),
             color_space=_known(video.get("color_space")),
             color_transfer=_known(video.get("color_transfer")),
             color_primaries=_known(video.get("color_primaries")),
         )
     return MediaInfo(**info)
+
+
+def _codec_tag(stream: dict[str, Any]) -> str | None:
+    tag = stream.get("codec_tag_string")
+    return tag if isinstance(tag, str) and tag and not tag.startswith("[") else None
+
+
+def _decodable(codec: Any, color_space: str | None) -> bool:
+    return bool(codec) and codec not in ("none", "unknown", "prores_raw") and color_space != "ipt-c2"
 
 
 def anamorphic(source: MediaInfo | None) -> bool:
@@ -322,20 +353,58 @@ PRORES_RAW = (
     "This is ProRes RAW video, which has to be developed like a camera's raw photos; FFmpeg reads it without its "
     "colours, so sashimi can't make pictures from it."
 )
-LOSSLESS_STILL_WORK = "Lossless copies (remux, a cut that isn't accurate, removing metadata) still work."
+LOSSLESS_STILL_WORK = (
+    "Lossless copies (remux, a cut that isn't accurate, removing metadata) and extracting the sound still work."
+)
+
+
+CODEC_NAMES = {"brvm": "Blackmagic RAW"}
+"""Names for codec tags of video FFmpeg can't decode, for messages."""
+
+
+def undecodable_text(tag: str | None, codec: str | None = None) -> str:
+    """
+    Why sashimi can't make pictures from a video: FFmpeg doesn't know its codec (named by its codec
+    tag), or knows `codec` but the FFmpeg sashimi runs has no decoder for it. Pure.
+    """
+    if codec and codec not in ("none", "unknown"):
+        named = f"{codec} ({tag})" if tag and tag != codec else codec
+        return f"sashimi can't decode this video's picture: the FFmpeg it runs has no decoder for its codec, {named}."
+    known = f"{CODEC_NAMES[tag]} ({tag})" if tag in CODEC_NAMES else tag
+    what = f"its codec, {known}" if known else "its codec"
+    return f"sashimi can't decode this video's picture: FFmpeg has no decoder for {what}."
 
 
 def check_decodable(info: MediaInfo) -> None:
     """
-    Refuses, with UnsupportedMediaError, video whose pictures FFmpeg can't decode faithfully: Dolby
-    Vision whose base layer is in Dolby's IPT colour space (``ipt-c2``: profiles 5 and 20), which
-    only Dolby's reshaping turns into viewable colours, and ProRes RAW, which FFmpeg reads as
-    undeveloped sensor data. Routes that copy streams without decoding still work on them.
+    Refuses, with UndecodableVideoError (an UnsupportedMediaError), video whose pictures FFmpeg
+    can't decode faithfully: video whose codec ffprobe can't name (Blackmagic RAW and other codecs
+    FFmpeg has no decoder for), Dolby Vision whose base layer is in Dolby's IPT colour space
+    (``ipt-c2``: profiles 5 and 20), which only Dolby's reshaping turns into viewable colours, and
+    ProRes RAW, which FFmpeg reads as undeveloped sensor data. Routes that copy streams without
+    decoding still work on them. ``info.video_decodable`` says the same up front.
     """
+    if not info.has_video:
+        return
+    tag = info.video_codec_tag
     if info.color_space == "ipt-c2":
-        raise UnsupportedMediaError(f"{DOLBY_VISION_COLOURS} {LOSSLESS_STILL_WORK}", detail="color_space=ipt-c2")
+        raise UndecodableVideoError(
+            f"{DOLBY_VISION_COLOURS} {LOSSLESS_STILL_WORK}",
+            detail="color_space=ipt-c2",
+            codec=info.video_codec,
+            codec_tag=tag,
+        )
     if info.video_codec == "prores_raw":
-        raise UnsupportedMediaError(f"{PRORES_RAW} {LOSSLESS_STILL_WORK}", detail="codec=prores_raw")
+        raise UndecodableVideoError(
+            f"{PRORES_RAW} {LOSSLESS_STILL_WORK}", detail="codec=prores_raw", codec="prores_raw", codec_tag=tag
+        )
+    if not info.video_decodable:
+        raise UndecodableVideoError(
+            f"{undecodable_text(tag, info.video_codec)} {LOSSLESS_STILL_WORK}",
+            detail=f"codec={info.video_codec} tag={tag}",
+            codec=info.video_codec,
+            codec_tag=tag,
+        )
 
 
 def probe(input_path: str | os.PathLike[str], *, limits: Limits | None = None) -> MediaInfo:
@@ -376,7 +445,11 @@ def probe(input_path: str | os.PathLike[str], *, limits: Limits | None = None) -
         raise ProcessingError(f"ffprobe returned invalid JSON for {os.fspath(input_path)}: {e}") from e
     if not data.get("format"):
         raise UnsupportedMediaError("This file doesn't look like media we can read.")
-    info = parse_ffprobe_json(data)
+    try:
+        parsed = parse_ffprobe_json(data)
+    except (ValueError, TypeError, AttributeError, LookupError, ArithmeticError) as e:
+        raise UnsupportedMediaError("This file doesn't look like media we can read.", detail=str(e)) from e
+    info = _with_decoder(parsed)
     if "gif" in info.container_names and info.duration and short_gif_frames(input_path):
         from sashimi.core._animation import gif_shown_seconds
 
@@ -389,6 +462,22 @@ def probe(input_path: str | os.PathLike[str], *, limits: Limits | None = None) -
         if (span := _late_span(input_path, data, cap)) is not None:
             info = info.model_copy(update={"duration": span})
     return info
+
+
+def _with_decoder(info: MediaInfo) -> MediaInfo:
+    """`info` with ``video_decodable`` False when the FFmpeg sashimi runs can't decode the video's codec."""
+    if not (info.has_video and info.video_decodable and info.video_codec):
+        return info
+    from sashimi.core._capabilities import decodable_codecs
+    from sashimi.core._ffmpeg import ffmpeg_binary
+
+    try:
+        codecs = decodable_codecs(ffmpeg_binary())
+    except BinaryNotFoundError:
+        return info
+    if codecs is None or info.video_codec in codecs:
+        return info
+    return info.model_copy(update={"video_decodable": False})
 
 
 def short_gif_frames(input_path: str | os.PathLike[str]) -> bool:
@@ -446,12 +535,15 @@ def _lines(chunks: Iterable[bytes]) -> Iterator[bytes]:
 
 
 class _Scan:
-    """One packet scan's result: the end it found, how many packets it read, and whether it reached the end."""
+    """
+    One packet scan's result: the end it found, how many packets it read, whether it can be trusted to
+    have reached the end, and whether ffprobe failed, so nothing is known of what it didn't read.
+    """
 
-    __slots__ = ("end", "packets", "complete")
+    __slots__ = ("end", "packets", "complete", "failed")
 
-    def __init__(self, end: float | None, packets: int, complete: bool):
-        self.end, self.packets, self.complete = end, packets, complete
+    def __init__(self, end: float | None, packets: int, complete: bool, failed: bool = False):
+        self.end, self.packets, self.complete, self.failed = end, packets, complete, failed
 
 
 _scans: collections.OrderedDict[tuple[int, int, int, int], _Scan] = collections.OrderedDict()
@@ -490,8 +582,12 @@ def _late_span(input_path: str | os.PathLike[str], data: dict[str, Any], cap: in
     frame ends, mkvmerge the span from the first frame, and a remux can keep the old muxer's
     ``ENCODER`` tag. So the end is read from the file: ffprobe seeks to its last keyframe (from the
     Cues) and reads the packets after it; without Cues, or with keyframes far apart, it reads more,
-    up to `cap` packets. The stated length is kept when the end isn't reached, so it is never
-    shortened by guesswork (a length that is too short cuts every re-encode short).
+    up to `cap` packets. The stated length is kept when the end isn't reached or ffprobe fails (a
+    non-zero exit), so it is never shortened by guesswork. ffprobe exits with 0 at damage or a cut
+    in the file, and what it read then is the file's length as far as FFmpeg can read it, since a
+    re-encode stops at the same place. A read that stopped for another reason with an exit of 0
+    can't be told from that; it is logged when the end found agrees with neither way of stating a
+    length.
     """
     key = _file_key(input_path)
     known = None
@@ -508,10 +604,25 @@ def _late_span(input_path: str | os.PathLike[str], data: dict[str, Any], cap: in
     if not known.complete or known.end is None or (cap is not None and known.packets > cap):
         return None
     span = round(known.end - _start_time(data), 6)
+    _note_disagreement(input_path, data, known.end, span)
     return span if span > 0 else None
 
 
+def _note_disagreement(input_path: str | os.PathLike[str], data: dict[str, Any], end: float, span: float) -> None:
+    try:
+        stated = float(data["format"]["duration"])
+    except (KeyError, TypeError, ValueError):
+        return
+    if abs(end - stated) > _STATED_TOLERANCE and abs(span - stated) > _STATED_TOLERANCE:
+        logger.info(f"Measured {span} s for {os.fspath(input_path)}, ending at {end} s, where it states {stated} s")
+
+
 def _measured_duration(input_path: str | os.PathLike[str], data: dict[str, Any], cap: int | None) -> float | None:
+    """
+    How long a file that states no length is, from its packets. None when ffprobe fails partway: what it
+    read is only part of the file, and a length that is too short cuts every re-encode short, so
+    the file counts as unreadable, as one with no packets does. A failed scan isn't remembered.
+    """
     key = _file_key(input_path)
     known = None
     if key is not None:
@@ -525,6 +636,8 @@ def _measured_duration(input_path: str | os.PathLike[str], data: dict[str, Any],
         scan = known
     else:
         scan = _scan_packets(input_path, data, cap)
+        if scan.failed:
+            return None
         if key is not None and key == _file_key(input_path):
             with _scans_lock:
                 _scans[key] = scan
@@ -560,7 +673,8 @@ def _scan_packets(
     cmd.append(file_arg(input_path))
     end: float | None = None
     packets = 0
-    chunks = stream_ffmpeg(cmd, _SCAN_CHUNK)
+    said: collections.deque[bytes] = collections.deque(maxlen=40)
+    chunks = stream_ffmpeg(cmd, _SCAN_CHUNK, said)
     try:
         for line in _lines(chunks):
             if not line.strip():
@@ -573,8 +687,12 @@ def _scan_packets(
                 end = time
     except BinaryNotFoundError:
         raise
-    except ProcessingError:
-        pass
+    except ProcessingError as e:
+        logger.warning(f"Reading the packets of {os.fspath(input_path)} failed after {packets}: {e}")
+        return _Scan(end, packets, False, failed=True)
     finally:
         chunks.close()
+    reported = b"".join(said).decode("utf-8", "replace").strip()
+    if reported:
+        logger.info(f"ffprobe reported errors reading the packets of {os.fspath(input_path)}: {reported}")
     return _Scan(end, packets, True)

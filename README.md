@@ -23,7 +23,7 @@ no network.
 
 ### What it does
 
-* **Images:** convert between JPEG, PNG, WebP, GIF, BMP, TIFF, AVIF and APNG (and read HEIC, ICO,
+* **Images:** convert between JPEG, PNG, WebP, GIF, BMP, TIFF, AVIF and APNG (and read HEIC, MPO, ICO,
   TGA and PSD), keeping animated GIFs, WebPs, APNGs and AVIFs animated, resize, make ICO files and
   complete favicon packs; rotate, flip, crop, and adjust brightness, contrast and saturation to
   match CSS filters, on every frame of an animated GIF, WebP, APNG or AVIF too.
@@ -95,8 +95,7 @@ about such a path when you set it.
 
 sashimi is tested on Linux, macOS and Windows with Python 3.11 to 3.14. Before 1.0, minor
 versions may change the Python API; the [changelog](https://github.com/filesushi/sashimi/blob/main/CHANGELOG.md)
-lists every change and [MIGRATION.md](https://github.com/filesushi/sashimi/blob/main/MIGRATION.md)
-how to upgrade.
+lists every change.
 
 ## Quick start
 
@@ -245,8 +244,9 @@ everywhere:
 
 Removal is best effort: it covers the carriers above, which are the ones sashimi knows of; a
 device may store data where no tool looks. When sashimi applies the EXIF orientation it resets the
-orientation to 1, so viewers don't turn the picture twice, and drops the EXIF thumbnail, which shows
-the picture before the change; edits always do both. `keep_icc` decides the colour profile alone.
+orientation to 1, so viewers don't turn the picture twice; edits always do. A re-encoded output never
+keeps a picture hidden in the metadata (an EXIF, Photoshop or XMP thumbnail), whatever the mode, and
+the result lists it as lost. `keep_icc` decides the colour profile alone.
 ICO files and favicon packs carry no metadata or profile: their colours are converted to sRGB.
 
 What `keep` can carry into each output format:
@@ -275,12 +275,30 @@ from sashimi import metadata
 info = metadata.read("upload.blob")          # decodes nothing; works on outputs too
 if info.has_location:
     print(info.latitude, info.longitude, info.carriers)   # 48.8584 2.2945 ['EXIF', 'GPS', 'XMP']
+for section in info.sections:                # every field read, by where it was found
+    print(section.name, [(f.name, f.value) for f in section.fields][:2])  # EXIF Exif IFD [('ExposureTime', '1/33'), …]
 metadata.strip("upload.blob", "clean.bin", "remove_all")  # same format, nothing re-encoded
 ```
 
+`read` returns highlights (location and the direction the camera faced, camera, lens, exposure,
+focal length, the capture date with its offset and fraction of a second, software, the colour
+profile's name, an EXIF thumbnail's size, whose maker note it holds; for video and audio the
+title, artist, album and creation time) and `sections`: every field it read, grouped by where it
+was found (EXIF IFD0, Exif, GPS, interoperability and thumbnail directories, the maker note, XMP,
+IPTC, Photoshop resources, the ICC profile, PNG text, comments; the file's tags, each stream's
+tags, chapters, cover art and timed metadata tracks of video and audio), with names as their
+standard spells them and values as readable text (at most 200 fields a section and 300 characters
+a value; what's left out is counted). `date_taken` is only a capture date (EXIF
+`DateTimeOriginal`, XMP and IPTC creation dates, QuickTime's `com.apple.quicktime.creationdate`, a
+recorded date), never when the file was written: that is `creation_time`. `carriers` lists only
+what sashimi counts as metadata to remove; `looked_for` says what it reads in that kind of file,
+and `not_counted` what is still there because showing or playing the file needs it (orientation,
+colour profile, resolution, the writing application, encoder, handler and language tags), so an
+empty `carriers` can be shown honestly.
+
 `strip` copies the compressed pixels byte for byte (JPEG, PNG, WebP, GIF, TIFF, HEIC, AVIF) and
 stream-copies video and audio (MKV, WebM, MP4, MOV, M4A, 3GP, MPEG-TS and M2TS, VOB and MPG, FLV,
-WMV, AVI, MP3, FLAC, OGG, WAV); an MPO keeps only its main picture. BMP and ICO hold no metadata,
+WMV, AVI, MP3, FLAC, OGG, WAV). BMP and ICO hold no metadata,
 and TGA and PSD can't be stripped without re-encoding, so `strip` says so and leaves them.
 
 - **HEIC and AVIF** are rewritten in place: every picture item (the photo, its tiles, an iPhone's
@@ -290,10 +308,15 @@ and TGA and PSD can't be stripped without re-encoding, so `strip` says so and le
   than 1) and the photo's XMP, and keeps the XMP that tells viewers how to show the gain map and
   other auxiliary pictures (without location). On iPhones up to the 15, how bright the gain map's
   HDR is lives in the EXIF maker notes, so after `remove_all` viewers use their default.
+- **Pictures after a JPEG's main one** that MPF or a container directory lists (a gain map, depth
+  and confidence maps, an MPO's other eye) stay in both modes without their own metadata: removing a
+  segment leaves the picture as it was, the lengths and offsets that locate it are updated, and a
+  gain map keeps what says how to apply it. Anything else after the picture that isn't the video
+  goes, a picture nothing lists included, and the result says so. `read` counts what every picture
+  there holds, listed or not, and says when it gave up on what follows the main picture
+  (`data after the picture` in `carriers` and `not_counted`, and `has_location`).
 - **Motion photos and Ultra HDR JPEGs** (Google, Samsung) keep a video and a gain map after the
-  picture, listed in the XMP. Both modes keep the gain map (stripping removes information about
-  the person, place and device, not the picture), with the XMP that tells viewers how to show it,
-  unless the gain map holds location or, for `remove_all`, metadata of its own. The video stays
+  picture, listed in the XMP. The video stays
   when it holds nothing the mode removes (location or data tracks for `remove_location`, any
   metadata for `remove_all`); otherwise sashimi strips it the same way, checks the result and puts
   it back, updating the lengths in the XMP. A Samsung trailer points into the old video, so a
@@ -395,6 +418,7 @@ sashimi preview clip.mp4 --output-format gif --crop 9:16  # vertical GIF preview
 sashimi info clip.mkv                                # container, duration, codecs
 sashimi info clip.gif                                # an image's size, frames and their durations
 sashimi metadata photo.jpg                           # camera, dates, location: what the file holds
+sashimi metadata photo.jpg --all                     # every field, by where it was found (EXIF, XMP, …)
 sashimi strip photos/ -r                             # remove metadata without re-encoding
 sashimi strip clip.mov --remove remove_location      # remove only GPS and place names
 sashimi convert photo.heic jpeg --metadata remove_all  # convert without the photo's metadata
@@ -595,9 +619,12 @@ rotated, saved as PNG" is `photo.jpg.rotated.png`. Conversions have no role, so 
   place. Outputs are written to a temporary file first and moved into place, so a failure leaves
   the original as it was. Without `--force` nothing is ever replaced, even a file that appears
   while sashimi works.
-- **Problems come first:** the results table and the `--dry-run` listing show errors, then
-  skipped files (name clashes marked), then existing outputs, then successes, and
-  `--limit-output` cuts successes before problems.
+- **Only what needs attention is listed.** A run over several files prints a summary, then errors,
+  name clashes, files it couldn't use, and successes that dropped something you may want (a sound
+  track, chapters, a GoPro GPS track, an animation) or tone-mapped HDR. `sashimi -v` (or `-v` after
+  the command) lists every file. `--dry-run` and `--json` always list every file.
+- **Problems come first** in every listing: errors, then skipped files (name clashes marked), then
+  existing outputs, then successes, and `--limit-output` cuts successes before problems.
 - Messages name an output by its file name when it's beside its input, and otherwise by its path
   as built from the paths you gave, so relative to where you ran sashimi when those were relative
   ("Output already exists: sheets/hike-5.mkv.jpeg").

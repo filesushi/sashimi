@@ -3,19 +3,24 @@
 
 """Image conversion, resizing, ICO generation and favicon packs with Pillow."""
 
+import bisect
 import contextlib
 import html
 import io
 import json
 import logging
 import os
+import re
+import struct
 import threading
 import warnings
 import zipfile
-from collections.abc import Iterator
+import zlib
+from array import array
+from collections.abc import Iterator, Sequence
 from typing import Any, Literal
 
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageOps, PngImagePlugin
 from pydantic import BaseModel, ConfigDict
 
 from sashimi.config._image import (
@@ -50,8 +55,20 @@ from sashimi.config._base import SourceMetadata
 from sashimi.config._limits import check_webp_size, megapixels, resolve_limits
 from sashimi.core import _animation
 from sashimi.core._atomic import PathLike, atomic_output
+from sashimi.core._faults import (
+    FILE_FAULTS,
+    can_read,
+    caller_progress,
+    file_at_fault,
+    from_caller,
+    signature_format,
+    stated_still_format,
+)
 from sashimi.core._imagemeta import (
     Carriers,
+    PNG_INFLATED,
+    png_inflated_size,
+    png_profile,
     add_tiff_groups,
     apply_mode,
     clean_info,
@@ -62,19 +79,28 @@ from sashimi.core._imagemeta import (
     tiff_groups,
 )
 from sashimi.core._ffmpeg import ProgressCallback
+from sashimi.core._metaread import clean_text
 from sashimi.core.fidelity import (
     COLOUR_PROFILE,
     Fidelity,
     Outcome,
+    checked_after_writing,
     derived,
     differences,
     fidelity,
     image_inventory,
+    reencode_losses,
     same_animation,
     same_picture,
     shown_length,
 )
-from sashimi.errors import MediaTooLargeError, ProcessingError, UnsupportedMediaError
+from sashimi.errors import (
+    MediaTooLargeError,
+    MissingReaderError,
+    ProcessingError,
+    SashimiError,
+    UnsupportedMediaError,
+)
 
 __all__ = ["ImageConversion", "convert", "to_ico", "favicon_pack", "heif_available", "to_srgb"]
 
@@ -83,6 +109,11 @@ logger = logging.getLogger("sashimi")
 NOT_AN_IMAGE = "This file isn't an image we can convert."
 DAMAGED_IMAGE = "This image file is damaged or incomplete."
 TOO_LARGE_IMAGE = "This image is too large to process."
+_FTYP_HEAD = 256
+_NEEDS_READER = {
+    "HEIF": ("HEIC and HEIF photos need sashimi's heif extra.", "pip install 'sashimi-convert[heif]'"),
+    "AVIF": ("AVIF images need a Pillow that reads them.", "pip install --upgrade pillow"),
+}
 
 _INPUT_FORMATS = frozenset({"PNG", "JPEG", "MPO", "WEBP", "GIF", "BMP", "TIFF", "HEIF", "AVIF", "ICO", "TGA", "PSD"})
 _PIL_FORMAT = {
@@ -157,6 +188,168 @@ def too_large_image(width: int, height: int, limit: int) -> MediaTooLargeError:
     )
 
 
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def internal_error(error: BaseException) -> ProcessingError:
+    """The error for a fault of the code rather than the file, logged as a warning: it may be a bug, so it must be seen."""
+    said = (str(error).splitlines() or [""])[0]
+    what = f"{type(error).__name__}: {said}" if said else type(error).__name__
+    what = clean_text(what)[:300]
+    logger.warning(f"Internal error, not necessarily the file's fault: {what}")
+    return ProcessingError(f"Internal error ({what}); the file may be fine.")
+
+
+@contextlib.contextmanager
+def refuse_unexpected(pil_format: str | None = None) -> Iterator[None]:
+    """
+    Turns what a route raises into a :class:`~sashimi.errors.SashimiError`: UnsupportedMediaError
+    when reading the file's bytes failed (see :func:`file_at_fault`; `pil_format` is the file's),
+    ProcessingError for what the system reports (a full disk, no memory) and for a fault of the code
+    (:func:`internal_error`). What a caller's progress callback raises passes through unchanged
+    (see :func:`~sashimi.core._faults.caller_progress`).
+    """
+    try:
+        yield
+    except SashimiError:
+        raise
+    except Exception as e:
+        if from_caller(e):
+            raise
+        if isinstance(e, MemoryError):
+            raise ProcessingError(f"Ran out of memory: {e}") from e
+        if isinstance(e, OSError) and e.errno is not None:
+            raise ProcessingError(f"{type(e).__name__}: {e}") from e
+        if file_at_fault(e, pil_format):
+            logger.info(f"{DAMAGED_IMAGE} {type(e).__name__}: {e}")
+            raise UnsupportedMediaError(DAMAGED_IMAGE, detail=f"{type(e).__name__}: {e}") from e
+        raise internal_error(e) from e
+
+
+class _PngWithoutChunks(io.RawIOBase):
+    """A PNG file without some byte ranges, read from disk as asked for: no copy of the file is held."""
+
+    def __init__(self, path: str, left_out: Sequence[int]):
+        super().__init__()
+        self._file = open(path, "rb")
+        self._size = os.fstat(self._file.fileno()).st_size - sum(left_out[1::2])
+        self._at = 0
+        self._shown = array("Q", [0])
+        self._real = array("Q", [0])
+        for start, length in zip(left_out[::2], left_out[1::2], strict=True):
+            shown = self._shown[-1] + start - self._real[-1]
+            if shown == self._shown[-1]:
+                self._real[-1] = start + length
+            else:
+                self._shown.append(shown)
+                self._real.append(start + length)
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._at
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        base = {os.SEEK_SET: 0, os.SEEK_CUR: self._at, os.SEEK_END: self._size}[whence]
+        self._at = max(0, base + offset)
+        return self._at
+
+    def readinto(self, buffer: Any) -> int:
+        wanted = min(len(buffer), self._size - self._at)
+        if wanted <= 0:
+            return 0
+        piece = bisect.bisect_right(self._shown, self._at) - 1
+        if piece + 1 < len(self._shown):
+            wanted = min(wanted, self._shown[piece + 1] - self._at)
+        self._file.seek(self._real[piece] + self._at - self._shown[piece])
+        data = self._file.read(wanted)
+        buffer[: len(data)] = data
+        self._at += len(data)
+        return len(data)
+
+    def close(self) -> None:
+        self._file.close()
+        super().close()
+
+
+def _png_view(input_path: PathLike) -> tuple[io.BufferedReader | None, bytes | None]:
+    """
+    A PNG as Pillow can open it, and its colour profile, when Pillow would refuse it. Pillow's
+    limits on text and colour profile chunks are global settings, and past them it refuses the
+    whole file, so the view leaves out each chunk past them, every colour profile after the first
+    (PNG allows one), and whatever is left once ``MAX_TEXT_MEMORY`` has been spent inflating. sashimi
+    reads text from the file itself (see :class:`~sashimi.core._imagemeta.PngTexts`), and the
+    profile comes back here. ``(None, None)`` for any other file or a PNG within the limits.
+    """
+    chunk_limit = getattr(PngImagePlugin, "MAX_TEXT_CHUNK", 1 << 20)
+    memory_limit = getattr(PngImagePlugin, "MAX_TEXT_MEMORY", 64 << 20)
+    path = os.fspath(input_path)
+    used = spent = 0
+    profile = None
+    seen_profile = False
+    dropped = array("Q")
+    try:
+        with open(path, "rb") as f:
+            if f.read(8) != _PNG_SIGNATURE:
+                return None, None
+            while len(head := f.read(8)) == 8:
+                size, kind = struct.unpack(">I4s", head)
+                start = f.tell() - 8
+                if kind == b"IEND":
+                    break
+                if kind not in PNG_INFLATED:
+                    f.seek(size + 4, os.SEEK_CUR)
+                    continue
+                if (kind == b"iCCP" and seen_profile) or spent > memory_limit:
+                    f.seek(size + 4, os.SEEK_CUR)
+                    dropped += array("Q", (start, size + 12))
+                    continue
+                payload = f.read(size)
+                f.seek(4, os.SEEK_CUR)
+                inflated = png_inflated_size(kind, payload, chunk_limit)
+                spent += chunk_limit if inflated is None else inflated
+                if kind == b"iCCP":
+                    seen_profile = True
+                    if inflated is None:
+                        dropped += array("Q", (start, size + 12))
+                        profile = png_profile(payload)
+                elif inflated is None or used + inflated > memory_limit:
+                    dropped += array("Q", (start, size + 12))
+                else:
+                    used += inflated
+    except OSError:
+        return None, None
+    if not dropped:
+        return None, None
+    return io.BufferedReader(_PngWithoutChunks(path, dropped)), profile
+
+
+def _missing_reader(input_path: PathLike) -> MissingReaderError | None:
+    """The refusal for a file that states HEIF or AVIF, when nothing installed reads that format."""
+    try:
+        with open(os.fspath(input_path), "rb") as f:
+            stated = stated_still_format(f.read(_FTYP_HEAD))
+    except OSError:
+        return None
+    if stated is None or (heif_available() if stated == "HEIF" else "AVIF" in Image.OPEN):
+        return None
+    message, install = _NEEDS_READER[stated]
+    return MissingReaderError(message, detail=f"no reader for {stated}", install=install)
+
+
+def stated_image_format(input_path: PathLike) -> str | None:
+    """The image format a file's first bytes say it is (see :func:`~sashimi.core._faults.signature_format`)."""
+    try:
+        with open(os.fspath(input_path), "rb") as f:
+            return signature_format(f.read(12))
+    except OSError:
+        return None
+
+
 @contextlib.contextmanager
 def _open_image(input_path: PathLike, limits: Limits | None, *, load: bool = True) -> Iterator[Image.Image]:
     """
@@ -168,32 +361,47 @@ def _open_image(input_path: PathLike, limits: Limits | None, *, load: bool = Tru
         heif_available()
     max_pixels = resolve_limits(limits).max_pixels if load else None
     pillow_limit = Image.MAX_IMAGE_PIXELS
+    view = None
     try:
-        with warnings.catch_warnings(), _pillow_allows(max_pixels):
-            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
-            img = Image.open(os.fspath(input_path))
-    except Image.DecompressionBombError as e:
-        if max_pixels is None or pillow_limit is None:
-            raise MediaTooLargeError(TOO_LARGE_IMAGE, detail=str(e)) from e
-        raise MediaTooLargeError(
-            f"This image is too large to process: it has more than {megapixels(2 * pillow_limit)} megapixels, "
-            f"and the limit is {megapixels(max_pixels)} megapixels.",
-            detail=str(e),
-            limit="max_pixels",
-        ) from e
-    except (UnidentifiedImageError, OSError) as e:
-        raise UnsupportedMediaError(NOT_AN_IMAGE, detail=str(e)) from e
-    with img:
-        if img.format not in _INPUT_FORMATS:
-            raise UnsupportedMediaError(NOT_AN_IMAGE, detail=f"Pillow format {img.format}")
-        if max_pixels is not None and img.width * img.height > max_pixels:
-            raise too_large_image(img.width, img.height, max_pixels)
-        if load:
-            try:
+        try:
+            with warnings.catch_warnings(), _pillow_allows(max_pixels):
+                warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+                view, profile = _png_view(input_path)
+                img = Image.open(view or os.fspath(input_path))
+        except Image.DecompressionBombError as e:
+            if max_pixels is None or pillow_limit is None:
+                raise MediaTooLargeError(TOO_LARGE_IMAGE, detail=str(e)) from e
+            raise MediaTooLargeError(
+                f"This image is too large to process: it has more than {megapixels(2 * pillow_limit)} megapixels, "
+                f"and the limit is {megapixels(max_pixels)} megapixels.",
+                detail=str(e),
+                limit="max_pixels",
+            ) from e
+        except MemoryError as e:
+            raise ProcessingError(f"Ran out of memory: {e}") from e
+        except Exception as e:
+            missing = _missing_reader(input_path)
+            if missing is not None:
+                raise missing from e
+            stated = stated_image_format(input_path)
+            if stated is not None and not can_read(stated):
+                raise internal_error(e) from e
+            if isinstance(e, OSError) or file_at_fault(e):
+                raise UnsupportedMediaError(NOT_AN_IMAGE, detail=str(e)) from e
+            raise internal_error(e) from e
+        if profile is not None:
+            img.info["icc_profile"] = profile
+        with img, refuse_unexpected(img.format):
+            if img.format not in _INPUT_FORMATS:
+                raise UnsupportedMediaError(NOT_AN_IMAGE, detail=f"Pillow format {img.format}")
+            if max_pixels is not None and img.width * img.height > max_pixels:
+                raise too_large_image(img.width, img.height, max_pixels)
+            if load:
                 img.load()
-            except (OSError, SyntaxError, ValueError) as e:
-                raise UnsupportedMediaError(DAMAGED_IMAGE, detail=str(e)) from e
-        yield img
+            yield img
+    finally:
+        if view is not None:
+            view.close()
 
 
 HIGH_BIT_DEPTH = frozenset({"I;16", "I;16B", "I;16L", "I;16N", "I", "F"})
@@ -262,7 +470,6 @@ def _render_from(
     metadata = config if hasattr(config, "keep_icc") else None
     icc = img.info.get("icc_profile") if metadata and metadata.keep_icc else None
     cmyk_source = img.mode == "CMYK"
-    turned = config.auto_orient and img.getexif().get(0x0112, 1) not in (None, 1)
     if config.auto_orient:
         img = ImageOps.exif_transpose(img)
     upright = img
@@ -276,9 +483,7 @@ def _render_from(
         kwargs["icc_profile"] = None if cmyk_source and img.mode != "CMYK" else icc
     groups: dict[int, dict[int, Any]] = {}
     if isinstance(config, SourceMetadata):
-        kept = apply_mode(
-            carriers or Carriers(), config.metadata, upright=config.auto_orient, edited=turned, size=img.size
-        )
+        kept = apply_mode(carriers or Carriers(), config.metadata, upright=config.auto_orient, size=img.size)
         kwargs.update(save_arguments(kept, _PIL_FORMAT[config.target]))
         if config.target == "tiff":
             groups = tiff_groups(kept)
@@ -324,7 +529,9 @@ def encode_for(
             img = img.convert("RGBA" if _has_alpha(img) else "RGB")
         kwargs = _animation.avif_arguments(config)
     elif isinstance(config, _GifSave):
-        if img.mode not in ("P", "L"):
+        if isinstance(img.info.get("transparency"), bytes):
+            img = _animation.palette_frame(img.convert("RGBA"))
+        elif img.mode not in ("P", "L"):
             img = img.convert("RGBA" if _has_alpha(img) else "RGB")
         kwargs = {"optimize": config.optimize}
     elif isinstance(config, _TiffSave):
@@ -400,6 +607,7 @@ def _convert_animation(
     on_progress: ProgressCallback | None,
 ) -> int:
     """Converts every frame of an animation to an animated GIF or WebP, as :func:`convert` describes."""
+    on_progress = caller_progress(on_progress)
     total = _animation.frame_count(img)
     transpose = _orientation(img) if config.auto_orient else None
     width, height = (img.height, img.width) if transpose in _SWAPS_SIDES else img.size
@@ -423,9 +631,7 @@ def _convert_animation(
         durations.append(_animation.shown_ms(duration))
         if on_progress:
             on_progress((index + 1) / (total + 1), "converting")
-    kept = apply_mode(
-        carriers, config.metadata, upright=config.auto_orient, edited=transpose is not None, size=(width, height)
-    )
+    kept = apply_mode(carriers, config.metadata, upright=config.auto_orient, size=(width, height))
     metadata = save_arguments(kept, _PIL_FORMAT[config.target])
     if icc:
         metadata["icc_profile"] = icc
@@ -525,6 +731,7 @@ def still_fidelity(
         removed_metadata=getattr(config, "metadata", "keep"),
         removed=[*(removed or []), *_asked_removals(config, COLOUR_PROFILE in source.items, first_frame_asked)],
     )
+    lost += reencode_losses(source, output)
     return fidelity("picture", changed=changes, lost=lost, removed=asked, checked=source.checked)
 
 
@@ -563,6 +770,7 @@ def _animation_fidelity(
         removed_metadata=config.metadata,
         removed=_asked_removals(config, COLOUR_PROFILE in source.items, False),
     )
+    lost += reencode_losses(source, output)
     if isinstance(config, _AvifSave) and _animation.plays(img) is not None:
         lost.append("play count (AVIF animations here loop forever)")
     return fidelity("picture", changed=changes, lost=lost, removed=asked, checked=source.checked)
@@ -603,8 +811,8 @@ def convert(
     :data:`~sashimi.config.IMAGE_CONVERT` and :data:`~sashimi.config.IMAGE_RESIZE`), and says
     what it wrote.
 
-    Accepts PNG (and APNG), JPEG, WebP, GIF, BMP, TIFF, AVIF, ICO (its largest picture), TGA,
-    PSD (its flattened picture), and HEIC/HEIF when ``pillow-heif`` is installed. The input type
+    Accepts PNG (and APNG), JPEG, MPO (its first picture), WebP, GIF, BMP, TIFF, AVIF, ICO (its
+    largest picture), TGA, PSD (its flattened picture), and HEIC/HEIF when ``pillow-heif`` is installed. The input type
     is detected from content. An animated GIF, WebP, APNG or AVIF converted to GIF or WebP stays
     animated: every frame is converted, keeping its timing (frames stored as shorter than
     :data:`~sashimi.config.MIN_FRAME_MS` play for 100 ms, as browsers play them), the loop count
@@ -621,12 +829,15 @@ def convert(
     metadata. Images with more than ``limits.max_pixels`` pixels raise MediaTooLargeError, and a
     WebP wider or taller than :data:`~sashimi.config.WEBP_MAX_SIDE` raises MediaTooLargeError.
     """
+    on_progress = caller_progress(on_progress)
     pil_format = _PIL_FORMAT[config.target]
     with _open_image(input_path, limits) as img:
         kind, count = _source_kind(img)
         if kind == "animation" and isinstance(config, ANIMATED_SAVES) and getattr(config, "animated", True):
             frames = _convert_animation(img, input_path, output_path, config, scratch_dir, limits, on_progress)
-            told = _animation_fidelity(img, input_path, output_path, config, limits)
+            told = checked_after_writing(
+                "picture", lambda: _animation_fidelity(img, input_path, output_path, config, limits)
+            )
             result = ImageConversion(frames=frames, source_frames=count, source=kind, fidelity=told)
         else:
             carriers = (
@@ -638,16 +849,19 @@ def convert(
             _save(rendered, output_path, pil_format, kwargs, scratch_dir, groups)
             asked = kind == "animation" and isinstance(config, ANIMATED_SAVES)
             reason: Literal["kept", "target", "asked"] = "kept" if count == 1 else "asked" if asked else "target"
-            told = still_fidelity(
-                input_path,
-                output_path,
-                config,
-                upright=upright,
-                source_mode=source_mode,
-                alpha=alpha,
-                written=rendered,
-                first_frame_asked=reason == "asked",
-                limits=limits,
+            told = checked_after_writing(
+                "picture",
+                lambda: still_fidelity(
+                    input_path,
+                    output_path,
+                    config,
+                    upright=upright,
+                    source_mode=source_mode,
+                    alpha=alpha,
+                    written=rendered,
+                    first_frame_asked=reason == "asked",
+                    limits=limits,
+                ),
             )
             result = ImageConversion(frames=1, source_frames=count, source=kind, reason=reason, fidelity=told)
     if on_progress:
@@ -736,6 +950,7 @@ def to_ico(
     carries no profile or metadata (browsers treat icons as sRGB). Images with more than
     ``limits.max_pixels`` pixels raise MediaTooLargeError.
     """
+    on_progress = caller_progress(on_progress)
     config = config or IcoConfig()
     with _open_image(input_path, limits) as img:
         square = _square(img, config.fit, max(config.sizes))
@@ -831,6 +1046,7 @@ def favicon_pack(
     fixed, so the same input and config give the same bytes. Images with more than
     ``limits.max_pixels`` pixels raise MediaTooLargeError. Written atomically.
     """
+    on_progress = caller_progress(on_progress)
     config = config or FaviconPackConfig()
     entries: list[tuple[str, bytes]] = []
     with _open_image(input_path, limits) as img:

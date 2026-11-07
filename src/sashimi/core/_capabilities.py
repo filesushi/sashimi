@@ -176,6 +176,18 @@ def filters_of(ffmpeg: str) -> frozenset[str]:
     return _names(_listing(ffmpeg, "-filters"))
 
 
+def decodable_codecs(ffmpeg: str) -> frozenset[str] | None:
+    """
+    The codecs `ffmpeg` can decode (``-codecs`` lines flagged ``D``), read once per executable;
+    None when the listing can't be read, so it isn't known.
+    """
+    lines = _listing(ffmpeg, "-codecs").splitlines()
+    start = next((i + 1 for i, line in enumerate(lines) if line.strip().startswith("---")), None)
+    if start is None:
+        return None
+    return frozenset(parts[1] for line in lines[start:] if len(parts := line.split()) >= 2 and parts[0].startswith("D"))
+
+
 _reported: set[tuple[str, int, int]] = set()
 
 

@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import time
 import traceback
 from collections.abc import Iterable, Iterator
@@ -31,30 +32,88 @@ if TYPE_CHECKING:
 
     from sashimi.api._batch import YieldType
 
-console = Console(soft_wrap=True, highlight=False)
-err_console = Console(stderr=True, soft_wrap=True, highlight=False)
+_TERMINAL_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069\ud800-\udfff]")
+
+
+def terminal_safe(text: str) -> str:
+    """`text` on one line, with what a terminal would act on, reorder lines by or can't print as spaces. Pure."""
+    return _TERMINAL_CONTROLS.sub(" ", text).replace("\n", " ").replace("\t", " ")
+
+
+def json_safe(text: str) -> str:
+    """JSON text with the same characters written as ``\\uXXXX``, so it reads back the same and is safe to print. Pure."""
+    return _TERMINAL_CONTROLS.sub(lambda found: f"\\u{ord(found[0]):04x}", text)
+
+
+class _SafeConsole(Console):
+    """
+    A console that never passes on control characters from what it's given (file names, tags,
+    messages) and whose text can't start a new line. Something meant to take several lines is
+    printed a line at a time.
+    """
+
+    def render_str(self, text: str, **options: Any) -> Any:
+        return super().render_str(terminal_safe(text), **options)
+
+
+console = _SafeConsole(soft_wrap=True, highlight=False)
+err_console = _SafeConsole(stderr=True, soft_wrap=True, highlight=False)
 
 STATUS_STYLES = {
     "success": "[bold green]Success[/bold green]",
-    "exists": "[bold yellow]Exists (Skipped)[/bold yellow]",
+    "exists": "[bold yellow]Exists[/bold yellow]",
     "skipped": "[bold bright_black]Skipped[/bold bright_black]",
     "error": "[bold red]Error[/bold red]",
 }
 DRY_RUN_STYLES = {**STATUS_STYLES, "success": "[bold cyan]Plan[/bold cyan]"}
 STATUS_PRIORITY = {"error": 0, "skipped": 1, "exists": 2, "success": 3}
+_WORTH_SHOWING = re.compile(
+    r"\b(?:(?<!Apple metadata )tracks?|subtitles|chapters|animation|pages?|another picture|motion photo|item|attached files?|cover art)\b"
+)
+"""
+What an output may have lost that its owner may want; a conversion to a format that can't hold it still says so.
+Gain maps and other extra images, and Apple's metadata tracks, go with most phone files, so they don't count.
+"""
+_NOTES_WORTH_SHOWING = re.compile(r"couldn't|\bremoved:")
+_SMALLER_GRID = re.compile(r"so the sheet shows")
+"""A note saying a contact sheet has fewer tiles or clips than asked, because the video is too short for them."""
+_DERIVED_COMMANDS = frozenset({"thumbs", "animated_thumbs", "preview", "favicon"})
+"""Commands whose outputs are made from a file rather than converted from it, so nothing is expected to carry over."""
+_verbosity = 0
+
+
+def set_verbosity(count: int) -> None:
+    """How much the CLI says: 0 for warnings and the rows that need attention, 1 and up for every row and more logging."""
+    global _verbosity
+    _verbosity = count
+    level = logging.DEBUG if count >= 2 else logging.INFO if count == 1 else logging.WARNING
+    logging.basicConfig(level=level, handlers=[LineLogHandler()])
+    logger = logging.getLogger("sashimi")
+    logger.setLevel(level)
+    if count > 0:
+        logger.info(f"Logging level set to {logging.getLevelName(level)}")
+
+
+def add_verbosity(count: int) -> None:
+    """Adds `count` to what ``sashimi -v`` set, for a ``-v`` given after the command."""
+    if count:
+        set_verbosity(_verbosity + count)
 
 
 def display_path(path: pathlib.Path) -> str:
     try:
-        return str(path.absolute().relative_to(pathlib.Path.cwd()))
+        return terminal_safe(str(path.absolute().relative_to(pathlib.Path.cwd())))
     except ValueError:
-        return str(path)
+        return terminal_safe(str(path))
 
 
 def refusal(error: Any) -> str:
     """A user error's message, followed by how to change the limit it names (``sashimi config set limits.…``), if any."""
     from sashimi.cli._limits import with_hint
+    from sashimi.errors import MissingReaderError
 
+    if isinstance(error, MissingReaderError):
+        return error.advice
     return with_hint(error.user_message, getattr(error, "limit", None))
 
 
@@ -124,10 +183,13 @@ def print_fields(rows: Iterable[tuple[str, str]]) -> None:
 
     rows = list(rows)
     width = max((cell_len(label) for label, _ in rows), default=0)
-    indent = "\n" + " " * (width + 6)
+    indent = " " * (width + 6)
     for label, value in rows:
         pad = " " * (width - cell_len(label))
-        console.print(f"  {pad}[bold cyan]{escape(label)}[/bold cyan]    {indent.join(escape(value).splitlines())}")
+        first, *rest = value.splitlines() or [""]
+        console.print(f"  {pad}[bold cyan]{escape(label)}[/bold cyan]    {escape(first)}")
+        for line in rest:
+            console.print(f"{indent}{escape(line)}")
 
 
 class LineLogHandler(logging.Handler):
@@ -135,7 +197,7 @@ class LineLogHandler(logging.Handler):
 
     def __init__(self, level: int = logging.NOTSET) -> None:
         super().__init__(level)
-        self.console = Console(stderr=True, soft_wrap=True, highlight=False)
+        self.console = _SafeConsole(stderr=True, soft_wrap=True, highlight=False)
 
     def emit(self, record: logging.LogRecord) -> None:
         from datetime import datetime
@@ -143,9 +205,10 @@ class LineLogHandler(logging.Handler):
         from rich.text import Text
 
         try:
-            message = record.getMessage()
+            message = terminal_safe(record.getMessage())
             if record.exc_info:
-                message += "\n" + "".join(traceback.format_exception(*record.exc_info)).rstrip()
+                trace = "".join(traceback.format_exception(*record.exc_info)).rstrip().split("\n")
+                message += "".join(f"\n{terminal_safe(line)}" for line in trace)
             name = record.levelname
             line = Text.assemble(
                 (datetime.fromtimestamp(record.created).strftime("[%X] "), "log.time"),
@@ -160,7 +223,7 @@ class LineLogHandler(logging.Handler):
 
 def print_json(payload: Any) -> None:
     """Prints a JSON report on stdout (logging and warnings go to stderr)."""
-    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    print(json_safe(json.dumps(payload, indent=2, ensure_ascii=False)))
 
 
 def every(count: int) -> str:
@@ -180,9 +243,11 @@ def _stdin_is_terminal() -> bool:
 class BatchRunner:
     """
     Consumes a batch generator and renders a Rich progress bar (with per-file progress for long
-    conversions), then one line for a single file or a summary and table for several, or the
-    JSON report (:func:`sashimi.api.build_report`). With `dry_run` the results are the plan.
-    Problems come first: errors, then skipped files, then existing outputs, then successes.
+    conversions), then one line for a single file or a summary for several, or the JSON report
+    (:func:`sashimi.api.build_report`). With `dry_run` the results are the plan, listed in full.
+    Under a summary only what needs attention is listed (see :meth:`_needs_attention`), and with
+    ``sashimi -v`` every file. Problems come first: errors, then skipped files, then existing
+    outputs, then successes.
 
     Before a run over a folder whose files take different routes (photos and videos through
     ``rotate``), it asks on stderr, unless `yes`; without a terminal to ask on it stops with exit
@@ -301,8 +366,8 @@ class BatchRunner:
             file_path, status, _, _ = item
             if status == "starting":
                 started.add(file_path)
-                name = file_path.name
-                self._current = name if len(name) <= 35 else name[:32] + "..."
+                name = terminal_safe(file_path.name)
+                self._current = escape(name if len(name) <= 35 else name[:32] + "...")
                 return False
             results.append(item)
             return file_path in started
@@ -371,17 +436,63 @@ class BatchRunner:
                 console.print(f"{style}: [cyan]{escape(display_path(path))}[/cyan]: {escape(message)}")
             self._more(results)
         else:
-            self._print_summary(results, report["summary"], clashed)
+            shown = [item for item in results if _verbosity > 0 or self._needs_attention(item, clashed, done, named)]
+            self._print_summary(shown, report["summary"], clashed)
+            self._smaller_grids(results)
         self._notes(plan)
         for message in self._refusals:
             console.print(f"[red]{escape(message)}[/red]")
         if failed:
             raise typer.Exit(code=1)
 
+    def _needs_attention(
+        self,
+        item: Any,
+        clashed: set[pathlib.Path],
+        routine: set[pathlib.Path],
+        named: set[pathlib.Path] | frozenset[pathlib.Path] = frozenset(),
+    ) -> bool:
+        """
+        Whether a result is listed under the summary without ``-v``: an error, a name clash, a file
+        that couldn't be used (not one already as the command would leave it, unless it was named
+        and so fails the run), or a success that dropped or couldn't check something its owner may want.
+        """
+        path, status = item[0], item[1]
+        if status == "exists":
+            return False
+        if status == "skipped":
+            needed_nothing = path in routine or (getattr(item, "routine", False) and path not in named)
+            return path in clashed or not needed_nothing
+        if status != "success":
+            return True
+        told = getattr(item, "fidelity", None)
+        if told is None:
+            return False
+        if any(_NOTES_WORTH_SHOWING.search(text) for text in [*told.notes, *told.changed]):
+            return True
+        if self.command in _DERIVED_COMMANDS:
+            return False
+        return any(_WORTH_SHOWING.search(text) for text in told.lost) or any("tone-mapped" in c for c in told.changed)
+
     @staticmethod
     def _style(styles: dict[str, str], status: str, clashed: bool) -> str:
         style = styles.get(status, f"[bold white]{status.capitalize()}[/bold white]")
         return f"{style} [yellow](name clash)[/yellow]" if clashed else style
+
+    def _smaller_grids(self, results: list) -> None:
+        """One closing line for contact sheets a short video made smaller; ``-v`` and a single file say why, per file."""
+        if _verbosity > 0:
+            return
+        count = sum(
+            any(_SMALLER_GRID.search(note) for note in told.notes)
+            for told in (getattr(item, "fidelity", None) for item in results)
+            if told is not None
+        )
+        if count:
+            what = "1 video was" if count == 1 else f"{count} videos were"
+            console.print(
+                f"[dim]{what} too short for the full grid, so {'its sheet is' if count == 1 else 'their sheets are'} smaller; -v says why.[/dim]"
+            )
 
     def _more(self, results: list) -> None:
         if len(results) <= self.limit_output:
@@ -512,6 +623,8 @@ class BatchRunner:
         grid.add_row("[bright_black]Skipped:[/bright_black]", str(summary["skipped"]), "", "")
         console.print()
         console.print(Panel(grid, title=f"{self.title} summary", border_style="blue", expand=False))
+        if not results:
+            return
         console.print()
 
         rows = [

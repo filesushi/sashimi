@@ -1,14 +1,17 @@
 # SPDX-FileCopyrightText: 2026 The FileSushi Authors
 # SPDX-License-Identifier: Apache-2.0
 
+import collections
+import io
 import os
+import queue
 import sys
 
 import pytest
 
 from sashimi.core import _resources
 from sashimi.core._atomic import atomic_output
-from sashimi.core._ffmpeg import file_arg, fmt_seconds, run_ffmpeg
+from sashimi.core._ffmpeg import _frame_times, file_arg, fmt_seconds, run_ffmpeg
 from sashimi.errors import ProcessingError
 
 
@@ -122,3 +125,37 @@ def test_ffmpeg_versions_are_read_from_the_banner():
     assert parse_ffmpeg_version("ffmpeg version 6.1.2 Copyright") == (6, 1)
     assert parse_ffmpeg_version("ffmpeg version N-121234-gabcdef Copyright") is None
     assert parse_ffmpeg_version("") is None
+
+
+def _read_frame_times(stderr: bytes) -> tuple[list[float | None], list[bytes]]:
+    times: queue.Queue[float | None] = queue.Queue()
+    said: collections.deque[bytes] = collections.deque()
+    _frame_times(io.BytesIO(stderr), times, said)
+    return [times.get_nowait() for _ in range(times.qsize())], list(said)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [b"", b"[in#0/matroska,webm @ 0x63d7b72bee80] ", b"[in#0/matroska,webm @ 0x1] [vost#0:0/rawvideo @ 0x2] "],
+    ids=["alone", "after a log prefix", "after two log prefixes"],
+)
+def test_a_frame_keeps_its_time_when_a_log_prefix_runs_into_its_line(prefix):
+    stderr = b"frame:8 pts:2400 pts_time:2.4\n" + prefix + b"frame:9 pts:2440 pts_time:2.44\nFile ended prematurely\n"
+    times, said = _read_frame_times(stderr)
+    assert times == [2.4, 2.44, None]
+    assert said == [b"File ended prematurely\n"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        b"[in#0 @ 0x1] Error opening file:frame:1 pts:2 pts_time:3\n",
+        b"file:frame:1 pts:2 pts_time:3: Invalid data found\n",
+        b"[in#0 @ 0x1] frame:1 pts:2 pts_time:3: Invalid data found\n",
+    ],
+    ids=["after other words", "file name first", "words after it"],
+)
+def test_a_log_line_quoting_a_frame_line_gives_no_time(line):
+    times, said = _read_frame_times(line)
+    assert times == [None]
+    assert said == [line]

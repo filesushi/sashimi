@@ -23,6 +23,7 @@ from sashimi.cli._output import (
     refusal,
     print_fields,
     print_json,
+    json_safe,
 )
 
 
@@ -319,10 +320,12 @@ def info_cmd(
     from sashimi.config import Limits
     from sashimi.core.edit import frames_info
     from sashimi.core.sheets._render import format_duration, format_size
-    from sashimi.errors import SashimiError, UnsupportedMediaError, UserInputError
+    from sashimi.errors import MissingReaderError, SashimiError, UnsupportedMediaError, UserInputError
 
     try:
         image_info = frames_info(path, limits=Limits.unlimited())
+    except MissingReaderError as e:
+        fail(refusal(e), code=1)
     except UnsupportedMediaError:
         image_info = None
     except UserInputError as e:
@@ -339,7 +342,7 @@ def info_cmd(
         fail(str(e).splitlines()[0], code=1)
 
     if json_output:
-        print(info.model_dump_json(indent=2))
+        print(json_safe(info.model_dump_json(indent=2)))
         return
 
     rows = [
@@ -383,7 +386,7 @@ _SHORT_FRAMES = " (under 20 ms plays as 100 ms, as browsers play it)"
 
 def _print_image_info(path: pathlib.Path, info: Any, json_output: bool, size: str) -> None:
     if json_output:
-        print(info.model_dump_json(indent=2))
+        print(json_safe(info.model_dump_json(indent=2)))
         return
     rows = [
         ("File", display_path(path)),

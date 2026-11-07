@@ -266,16 +266,16 @@ def test_unsupported_files_say_what_the_command_takes(tmp_path):
     assert results(rotate)[0][3] == "PNG is an image format, so only images are rotated; rotate videos in another run."
 
 
-def test_problems_come_first_and_are_never_hidden(tmp_path):
+def test_problems_come_first_and_are_never_hidden(tmp_path, no_live_log_of_sashimi):
     for name in ("a", "b", "c"):
         Image.new("RGB", (8, 8)).save(tmp_path / f"{name}.png")
     (tmp_path / "z.png").write_bytes(b"not an image")
     (tmp_path / "b.png.webp").write_bytes(b"old")
     listing = runner.invoke(app, ["convert", ".", "webp", "-n", "-l", "2"], env={"COLUMNS": "200"})
     lines = listing.stdout.splitlines()
-    assert lines[0].startswith("Exists (Skipped): b.png") and lines[1].startswith("Plan:")
+    assert lines[0].startswith("Exists: b.png") and lines[1].startswith("Plan:")
     assert "(2 success not shown)" in listing.stdout
-    table = runner.invoke(app, ["convert", ".", "webp", "-l", "1"], env={"COLUMNS": "200"})
+    table = runner.invoke(app, ["-v", "convert", ".", "webp", "-l", "1"], env={"COLUMNS": "200"})
     rows = [line for line in table.stdout.splitlines() if ".png" in line]
     assert len(rows) == 1 and "z.png" in rows[0] and "Skipped" in rows[0]
     assert "(1 exists, 2 success not shown)" in " ".join(table.stdout.split())

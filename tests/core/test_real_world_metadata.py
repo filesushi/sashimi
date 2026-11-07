@@ -103,7 +103,11 @@ def _motion_photo(gain_map_gps: bool = False) -> tuple[bytes, int, int]:
     """
     gain = _jpeg(
         Image.new("L", (16, 12), 128),
-        xmp=b'<x:xmpmeta><rdf:Description hdrgm:Version="1.0" hdrgm:GainMapMax="2.0"/></x:xmpmeta>',
+        xmp=(
+            b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+            b'<rdf:Description rdf:about="" xmlns:hdrgm="http://ns.adobe.com/hdr-gain-map/1.0/" hdrgm:Version="1.0" '
+            b'hdrgm:GainMapMax="2.0"/></rdf:RDF></x:xmpmeta>'
+        ),
         exif=_exif_with_gps().tobytes() if gain_map_gps else None,
     )
     video = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 100 + b"\xa9xyz+51.5-000.1/"
@@ -175,14 +179,16 @@ def test_remove_location_keeps_the_gain_map_and_drops_the_video_and_what_points_
     )
 
 
-def test_a_gain_map_with_a_location_is_dropped_too(tmp_path):
+def test_a_gain_map_with_a_location_stays_without_it(tmp_path):
     data, _, _ = _motion_photo(gain_map_gps=True)
     (tmp_path / "m.jpg").write_bytes(data)
     metadata.strip(tmp_path / "m.jpg", tmp_path / "o.jpg", "remove_location")
     out = (tmp_path / "o.jpg").read_bytes()
-    assert _mpf_pictures(out) == [] and jpeg_pieces(out)[1] == b""
+    size, start = _mpf_pictures(out)[1]
+    assert out[start : start + 2] == b"\xff\xd8" and start + size == len(out)
+    assert not metadata.read(tmp_path / "o.jpg").has_location
     xmp = _xmp(out)
-    assert b"hdrgm" not in xmp and b"Container:Directory" not in xmp and b"MotionPhoto" not in xmp
+    assert b"hdrgm" in xmp and b"Container:Directory" in xmp and b"MotionPhoto" not in xmp
 
 
 def test_remove_all_keeps_the_gain_map_and_drops_a_video_it_cannot_read(tmp_path):

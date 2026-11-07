@@ -54,6 +54,15 @@ made_by_current_ffmpeg = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def sashimi_log_level_restored():
+    """Keeps a CLI run's verbosity in one test from hiding log records in the tests after it."""
+    logger = logging.getLogger("sashimi")
+    level = logger.level
+    yield
+    logger.setLevel(level)
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
@@ -141,6 +150,27 @@ def junk_blob(tmp_path) -> pathlib.Path:
     return path
 
 
+def ffmetadata_file(
+    path: pathlib.Path, tags: dict[str, str], stream_tags: dict[str, str] | None = None
+) -> pathlib.Path:
+    """
+    An FFMETADATA file for ``-f ffmetadata -i``: tags too long for a command line, which Windows
+    limits to 32,767 characters, reach a test file this way.
+    """
+
+    def escaped(text: str) -> str:
+        return "".join(f"\\{char}" if char in "=;#\\\n" else char for char in text)
+
+    def rows(section: dict[str, str]) -> str:
+        return "".join(f"{escaped(key)}={escaped(value)}\n" for key, value in section.items())
+
+    body = ";FFMETADATA1\n" + rows(tags)
+    if stream_tags is not None:
+        body += "[STREAM]\n" + rows(stream_tags)
+    path.write_bytes(body.encode("utf-8"))
+    return path
+
+
 def leftovers(directory: pathlib.Path) -> list[str]:
     """Temporary files an atomic write may have left behind."""
     return sorted(p.name for p in directory.iterdir() if p.name.endswith(".partial"))
@@ -154,3 +184,9 @@ def noise(size: tuple[int, int], seed: int, mode: str = "RGB") -> Image.Image:
     """
     count = size[0] * size[1] * Image.getmodebands(mode)
     return Image.frombytes(mode, size, random.Random(seed).randbytes(count))
+
+
+@pytest.fixture
+def no_live_log_of_sashimi(monkeypatch):
+    """Keeps ``-v``'s log records from pyproject's live log: inside typer's CliRunner they close its output on 3.11."""
+    monkeypatch.setattr(logging.getLogger("sashimi"), "propagate", False)

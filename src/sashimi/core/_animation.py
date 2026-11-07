@@ -4,6 +4,7 @@
 """Reading and writing animated images (GIF, WebP, APNG and AVIF) frame by frame, with Pillow."""
 
 import os
+import struct
 from collections.abc import Iterator, Sequence
 from typing import Any
 
@@ -13,7 +14,7 @@ from sashimi.config import MIN_FRAME_MS, Limits
 from sashimi.config._image import _ApngSave, _AvifSave, _GifSave, _PngSave, _WebpSave
 from sashimi.config._limits import check_webp_size, megabytes, resolve_limits
 from sashimi.core._atomic import PathLike, atomic_output
-from sashimi.errors import MediaTooLargeError, ProcessingError
+from sashimi.errors import MediaTooLargeError, ProcessingError, UnsupportedMediaError
 
 AnimatedSave = _GifSave | _WebpSave | _AvifSave | _ApngSave | _PngSave
 
@@ -131,14 +132,42 @@ def check_budget(width: int, height: int, frames: int, limits: Limits | None, ac
         )
 
 
+MAX_OVERFLOW_PIXELS = 1 << 24
+"""The largest canvas sashimi draws a frame on when it overflows the animation's, unless 4 times the animation's is larger."""
+
+
+def canvas_of(img: Image.Image) -> tuple[int, int]:
+    """The size of `img`'s first frame, the size of its animation: once a frame has overflowed, Pillow reports the larger one."""
+    size: tuple[int, int] | None = getattr(img, "_first_frame_size", None)
+    if size is None:
+        size = img.size
+        img._first_frame_size = size  # type: ignore[attr-defined]
+    return size
+
+
+def _believable(pixels: int, first: int) -> bool:
+    return pixels <= max(first * 4, MAX_OVERFLOW_PIXELS)
+
+
 def frames_of(img: Image.Image, keep: frozenset[int] | None = None) -> Iterator[tuple[int, Image.Image, int]]:
-    """Every frame (or those in `keep`) as a full RGBA canvas, with its index and stored duration in ms."""
+    """
+    Every frame (or those in `keep`) as a full RGBA canvas, with its index and stored duration in
+    ms. Pillow grows the canvas for a GIF frame that overflows it, where browsers clip the frame,
+    so frames here are clipped to the first's canvas; an overflow past :func:`_believable` is damage.
+    """
+    width, height = canvas_of(img)
     for index in range(frame_count(img)):
         img.seek(index)
+        if not _believable(img.width * img.height, width * height):
+            raise UnsupportedMediaError(
+                "This image file is damaged or incomplete.", detail=f"frame {index} is {img.width}x{img.height}"
+            )
         if keep is not None and index not in keep:
             img.load()
             continue
         frame = img.convert("RGBA")
+        if frame.size != (width, height):
+            frame = frame.crop((0, 0, width, height))
         duration = int(img.info.get("duration") or 0)
         frame.info = {}
         yield index, frame, duration
@@ -240,14 +269,37 @@ def save_animation(
         kwargs.update(metadata)
         fmt = "PNG"
     try:
-        with atomic_output(output_path, scratch_dir) as temp:
-            first.save(temp, format=fmt, **kwargs)
+        try:
+            with atomic_output(output_path, scratch_dir) as temp:
+                first.save(temp, format=fmt, **kwargs)
+        except struct.error:
+            if fmt != "PNG":
+                raise
+            kwargs["duration"] = _runs_within_apng_limit(frames, kwargs["duration"])
+            with atomic_output(output_path, scratch_dir) as temp:
+                first.save(temp, format=fmt, **kwargs)
     except OSError as e:
         raise ProcessingError(f"Cannot write {os.fspath(output_path)}: {e}") from e
 
 
 APNG_MAX_FRAME_MS = 65535
 """The longest frame an APNG holds with Pillow's writer (a 16-bit count of milliseconds)."""
+
+
+def _runs_within_apng_limit(frames: Sequence[Image.Image], durations: Sequence[int]) -> list[int]:
+    """
+    Durations for a Pillow whose APNG writer joins a run of identical frames and fails when their
+    durations add up past :data:`APNG_MAX_FRAME_MS`: each such run is scaled down to fit.
+    """
+    found = list(durations)
+    start = 0
+    for index in range(1, len(found) + 1):
+        if index == len(found) or frames[index] != frames[start]:
+            total = sum(found[start:index])
+            if total > APNG_MAX_FRAME_MS:
+                found[start:index] = [duration * APNG_MAX_FRAME_MS // total for duration in found[start:index]]
+            start = index
+    return found
 
 
 def avif_arguments(config: _AvifSave) -> dict[str, Any]:

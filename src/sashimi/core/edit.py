@@ -39,6 +39,7 @@ from sashimi.core._animation import (
     plays,
     save_animation,
 )
+from sashimi.core._faults import caller_progress
 from sashimi.core._atomic import PathLike, atomic_output
 from sashimi.core._ffmpeg import ProgressCallback
 from sashimi.core._imagemeta import (
@@ -58,6 +59,7 @@ from sashimi.core.fidelity import (
     differences,
     fidelity,
     image_inventory,
+    reencode_losses,
     same_animation,
 )
 from sashimi.core.image import (
@@ -70,9 +72,16 @@ from sashimi.core.image import (
     eight_bit,
     encode_for,
     encoder_change,
+    checked_after_writing,
     still_fidelity,
 )
-from sashimi.errors import InvalidOptionsError, MediaTooLargeError, ProcessingError, UnsupportedMediaError
+from sashimi.errors import (
+    InvalidOptionsError,
+    MediaTooLargeError,
+    NothingToDoError,
+    ProcessingError,
+    UnsupportedMediaError,
+)
 
 __all__ = [
     "FramesInfo",
@@ -403,7 +412,7 @@ def _metadata(
     if isinstance(config, _Metadata) and config.keep_icc and img.mode != "CMYK" and img.info.get("icc_profile"):
         kept["icc_profile"] = img.info["icc_profile"]
     if isinstance(config, SourceMetadata):
-        carried = apply_mode(carriers, config.metadata, upright=True, edited=True, size=size)
+        carried = apply_mode(carriers, config.metadata, upright=True, size=size)
         kept.update(save_arguments(carried, pil_format))
         if pil_format == "TIFF":
             kept["_groups"] = tiff_groups(carried)
@@ -500,6 +509,7 @@ def edit(
     written (:class:`~sashimi.image.ImageConversion`): an animation or multi-page TIFF saved as one
     picture says so.
     """
+    on_progress = caller_progress(on_progress)
     with _open_image(input_path, limits) as img:
         kind, count = _source_kind(img)
         carriers = (
@@ -523,24 +533,29 @@ def edit(
                     on_progress((index + 1) / (total + 1), "editing")
             metadata = _metadata(img, config, carriers, frames[0].size, _PIL_FORMAT[config.target])
             save_animation(frames, durations, loop, config, output_path, scratch_dir, metadata)
-            told = _animated_edit_fidelity(img, input_path, output_path, config, transpose)
+            told = checked_after_writing(
+                "picture", lambda: _animated_edit_fidelity(img, input_path, output_path, config, transpose)
+            )
             result = ImageConversion(frames=total, source_frames=count, source=kind, fidelity=told)
         else:
             source_mode, alpha, shown = img.mode, _uses_alpha(img), _shown_size(img)
             written, reference = _edit_still(img, config, carriers, output_path, scratch_dir)
             changed, removed = _edits(config, shown)
             asked = kind == "animation" and isinstance(config, EDIT_ANIMATED)
-            told = still_fidelity(
-                input_path,
-                output_path,
-                config,
-                upright=reference,
-                source_mode=source_mode,
-                alpha=alpha,
-                written=written,
-                changed=changed,
-                removed=removed,
-                first_frame_asked=asked,
+            told = checked_after_writing(
+                "picture",
+                lambda: still_fidelity(
+                    input_path,
+                    output_path,
+                    config,
+                    upright=reference,
+                    source_mode=source_mode,
+                    alpha=alpha,
+                    written=written,
+                    changed=changed,
+                    removed=removed,
+                    first_frame_asked=asked,
+                ),
             )
             reason: Literal["kept", "target", "asked"] = "kept" if count == 1 else "asked" if asked else "target"
             result = ImageConversion(frames=1, source_frames=count, source=kind, reason=reason, fidelity=told)
@@ -581,6 +596,7 @@ def _animated_edit_fidelity(
     if source.items.count(COLOUR_PROFILE) and getattr(config, "keep_icc", True) is False:
         asked.append(COLOUR_PROFILE)
     lost, asked = differences(source, output, removed_metadata=getattr(config, "metadata", "keep"), removed=asked)
+    lost += reencode_losses(source, output)
     if isinstance(config, _AvifSave) and plays(img) is not None:
         lost.append("play count (AVIF animations here loop forever)")
     return fidelity("picture", changed=changed, lost=lost, removed=asked, checked=source.checked)
@@ -620,9 +636,10 @@ def select_frames(
     MediaTooLargeError over ``limits.max_animation_bytes`` or ``limits.max_pixels``. Written
     atomically. Returns what the output kept (:class:`~sashimi.core.fidelity.Outcome`).
     """
+    on_progress = caller_progress(on_progress)
     with _open_image(input_path, limits) as img:
         if not _is_animated(img):
-            raise UnsupportedMediaError(NOT_ANIMATED, detail=f"Pillow format {img.format}")
+            raise NothingToDoError(NOT_ANIMATED, detail=f"Pillow format {img.format}")
         total = frame_count(img)
         check_budget(img.width, img.height, total, limits)
         keep = config.keep if config.keep is not None else tuple(range(total))
@@ -645,7 +662,9 @@ def select_frames(
                 on_progress((index + 1) / (total + 1), "selecting")
         metadata = _metadata(img, config, carriers, frames[0].size, _PIL_FORMAT[config.target])
         save_animation(frames, durations, loop, config, output_path, scratch_dir, metadata)
-        told = _animated_edit_fidelity(img, input_path, output_path, config, transpose, frozenset(keep))
+        told = checked_after_writing(
+            "picture", lambda: _animated_edit_fidelity(img, input_path, output_path, config, transpose, frozenset(keep))
+        )
     if on_progress:
         on_progress(1.0, "done")
     return Outcome(fidelity=told)
@@ -691,6 +710,7 @@ def frame_strip(
     areas stay transparent. Refused over ``limits.max_animation_bytes`` and ``limits.max_pixels``,
     like edits. Written atomically.
     """
+    on_progress = caller_progress(on_progress)
     config = config or FrameStripConfig()
     with _open_image(input_path, limits) as img:
         animated = _is_animated(img)

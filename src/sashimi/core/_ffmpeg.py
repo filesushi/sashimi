@@ -278,8 +278,17 @@ def _binary(name: str) -> str:
     return found
 
 
-def _start_error(executable: str, error: OSError) -> BinaryNotFoundError:
-    """The error for an executable that wouldn't start: named as the FFmpeg sashimi was pointed at when it is one of them."""
+_WINDOWS_COMMAND_TOO_LONG = 206
+"""``ERROR_FILENAME_EXCED_RANGE``, which ``CreateProcess`` gives for a command over 32,767 characters; Python's errno for it says the file wasn't found."""
+
+
+def _start_error(executable: str, error: OSError) -> ProcessingError:
+    """
+    The error for an executable that wouldn't start: named as the FFmpeg sashimi was pointed at when
+    it is one of them. A command too long for the system says nothing about the FFmpeg.
+    """
+    if error.errno == errno.E2BIG or getattr(error, "winerror", None) == _WINDOWS_COMMAND_TOO_LONG:
+        return ProcessingError(f"The command for this file is too long for the system to run: {error}")
     paths = ffmpeg_paths()
     for name, path in (("ffmpeg", paths.ffmpeg), ("ffprobe", paths.ffprobe)):
         if path == executable:
@@ -362,7 +371,7 @@ Filters that print each frame's timestamp to stderr as it passes, for progress w
 ``-progress`` has nothing to report (an output that writes only at the end, such as
 ``palettegen``'s). Frames are otherwise unchanged.
 """
-_FRAME_LINE = re.compile(rb"frame:\s*\d+\s+pts:\s*\S+\s+pts_time:\s*(-?[0-9.]+)\s*")
+_FRAME_LINE = re.compile(rb"(?:\[[^\]]*\]\s*)*frame:\s*\d+\s+pts:\s*\S+\s+pts_time:\s*(-?[0-9.]+)\s*")
 _FRAME_KEY_LINE = f"{FRAME_PROGRESS_KEY}=1".encode()
 
 
@@ -402,12 +411,14 @@ def _feed(stream: IO[bytes], chunks: Iterable[bytes], errors: list[BaseException
                 errors.append(e)
 
 
-def stream_ffmpeg(cmd: list[str], chunk_size: int) -> Generator[bytes, None, None]:
+def stream_ffmpeg(
+    cmd: list[str], chunk_size: int, stderr_tail: collections.deque | None = None
+) -> Generator[bytes, None, None]:
     """
     Runs an ffmpeg command and yields its stdout in chunks of `chunk_size` bytes (the last may be
     shorter), so a large output never sits in memory. Raises ProcessingError after the last chunk
     if ffmpeg failed, and BinaryNotFoundError if it can't be started. Closing the generator early
-    kills the process.
+    kills the process. `stderr_tail`, if given, collects the last of what it says on stderr.
     """
     _check(cmd)
     try:
@@ -415,7 +426,8 @@ def stream_ffmpeg(cmd: list[str], chunk_size: int) -> Generator[bytes, None, Non
     except OSError as e:
         raise _start_error(cmd[0], e) from e
     assert proc.stdout is not None and proc.stderr is not None
-    stderr_tail: collections.deque = collections.deque(maxlen=40)
+    if stderr_tail is None:
+        stderr_tail = collections.deque(maxlen=40)
     drain = threading.Thread(target=_drain, args=(proc.stderr, stderr_tail), daemon=True)
     drain.start()
     try:

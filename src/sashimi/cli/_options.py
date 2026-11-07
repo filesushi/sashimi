@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Annotated, Any, NoReturn, Optional
 
 import typer
-from typer.core import TyperCommand
+from typer.core import TyperCommand, TyperOption
 
 from sashimi.cli._output import fail
 
@@ -107,6 +107,12 @@ def reflow(text: str | None) -> str | None:
     return "\n\n".join(paragraphs)
 
 
+def _verbose_after_command(_ctx: Any, _param: Any, value: int) -> None:
+    from sashimi.cli._output import add_verbosity
+
+    add_verbosity(value)
+
+
 class KeptCommand(TyperCommand):
     """
     A processing command whose ``--help`` shows what its sashimi.toml section keeps for ``--output-name`` and
@@ -115,6 +121,21 @@ class KeptCommand(TyperCommand):
 
     SECTIONS = {"trim": "extract"}
     ARGS = "sashimi.args"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.params.append(
+            TyperOption(
+                param_decls=["-v", "--verbose"],
+                count=True,
+                expose_value=False,
+                show_default=False,
+                metavar="",
+                callback=_verbose_after_command,
+                help="List every file, not only what needs attention, and log more on stderr (-vv for debugging).",
+                rich_help_panel=GENERAL,
+            )
+        )
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
         ctx.meta[self.ARGS] = list(args)
@@ -356,7 +377,15 @@ DryRun = Annotated[
     ),
 ]
 JsonOutput = Annotated[bool, option("--json", help="Print a JSON report for scripting.", panel=GENERAL)]
-LimitOutput = Annotated[int, option("--limit-output", "-l", help="Maximum rows in the results table.", panel=GENERAL)]
+LimitOutput = Annotated[
+    int,
+    option(
+        "--limit-output",
+        "-l",
+        help="Maximum files listed under the results; -v lists every file up to this.",
+        panel=GENERAL,
+    ),
+]
 
 MaxWidth = Annotated[
     Optional[int],

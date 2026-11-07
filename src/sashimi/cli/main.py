@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Annotated, Optional
 
 import typer
@@ -51,7 +50,7 @@ def main_callback(
             count=True,
             metavar="",
             show_default=False,
-            help="More logging on stderr: -v for progress notes, -vv for debugging.",
+            help="List every file under a summary, not only what needs attention, and log more on stderr: -v for progress notes, -vv for debugging.",
         ),
     ] = 0,
 ):
@@ -62,20 +61,9 @@ def main_callback(
     from sashimi.core._ffmpeg import use_setting
 
     use_setting(_kept_ffmpeg)
-    if verbose >= 2:
-        log_level = logging.DEBUG
-    elif verbose == 1:
-        log_level = logging.INFO
-    else:
-        log_level = logging.WARNING
+    from sashimi.cli._output import set_verbosity
 
-    from sashimi.cli._output import LineLogHandler
-
-    logging.basicConfig(level=log_level, handlers=[LineLogHandler()])
-    logger = logging.getLogger("sashimi")
-    logger.setLevel(log_level)
-    if verbose > 0:
-        logger.info(f"Logging level set to {logging.getLevelName(log_level)}")
+    set_verbosity(verbose)
 
 
 CONVERT, SHEETS, INSPECT, FILES, CONFIG = "Convert", "Sheets & previews", "Inspect", "Files", "Configuration"
