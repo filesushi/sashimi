@@ -21,6 +21,7 @@ from sashimi.core._ffmpeg import (
     VIDEO_CONTAINERS,
     ffprobe_binary,
     file_arg,
+    read_from,
     run_ffmpeg,
     stream_ffmpeg,
 )
@@ -668,7 +669,7 @@ def _scan_packets(
     }
     cmd = [ffprobe_binary(), "-hide_banner", "-loglevel", "error", *INPUT_PROTOCOLS]
     if start is not None:
-        cmd += ["-read_intervals", f"{start}%"]
+        cmd += read_from(start)
     cmd += ["-show_entries", "packet=stream_index,pts_time,dts_time,duration_time", "-of", "csv=p=0"]
     cmd.append(file_arg(input_path))
     end: float | None = None

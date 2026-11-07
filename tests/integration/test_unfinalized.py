@@ -425,9 +425,7 @@ def test_a_cut_late_recording_is_as_long_as_what_is_left(cut_late, caplog):
     _forgetting_scans()
 
 
-def test_a_sheet_of_a_cut_late_recording_shows_what_is_left(cut_late, tmp_path):
-    _forgetting_scans()
-    out = tmp_path / "sheet.png"
+def _cut_late_sheet(cut_late: pathlib.Path, out: pathlib.Path) -> list[bytes]:
     config = PngSheetConfig(width=640, cols=4, rows=2, gap=0, show_header=False, show_timestamps=False)
     sheets.render(cut_late, out, config)
     layout = plan_layout(640, 4, 2, 0, probe(cut_late).display_aspect_ratio)
@@ -437,7 +435,72 @@ def test_a_sheet_of_a_cut_late_recording_shows_what_is_left(cut_late, tmp_path):
         for slot in range(layout.cells):
             x, y = layout.cell_origin(slot)
             tiles.append(rgb.crop((x, y, x + layout.thumb_w, y + layout.thumb_h)).tobytes())
+    return tiles
+
+
+def test_a_sheet_of_a_cut_late_recording_shows_what_is_left(cut_late, tmp_path):
+    _forgetting_scans()
+    tiles = _cut_late_sheet(cut_late, tmp_path / "sheet.png")
     assert len(set(tiles)) == 8, "tiles repeat a frame, as they do past where the picture ends"
+    _forgetting_scans()
+
+
+PREMATURE = b"[in#0/matroska,webm @ 000002bb3991e6c0] File ended prematurely"
+
+
+class _Glued:
+    """A command's stderr with a demuxer message that lacks its newline run into every third frame line."""
+
+    def __init__(self, stream):
+        self.stream, self.frames = stream, 0
+
+    def readline(self) -> bytes:
+        line = self.stream.readline()
+        if line.startswith(b"frame:"):
+            self.frames += 1
+            if self.frames % 3 == 2:
+                return PREMATURE + line
+        return line
+
+    def __iter__(self):
+        return iter(self.readline, b"")
+
+    def close(self) -> None:
+        self.stream.close()
+
+
+def test_a_sheet_keeps_every_tile_when_a_message_runs_into_a_frame_line(cut_late, tmp_path, monkeypatch):
+    monkeypatch.setattr(static, "sheet_route", lambda index, times: "pass")
+    _forgetting_scans()
+    plain = _cut_late_sheet(cut_late, tmp_path / "plain.png")
+    real = subprocess.Popen
+    glued = []
+
+    def popen(cmd, *args, **kwargs):
+        proc = real(cmd, *args, **kwargs)
+        if any("sashimi_progress" in str(arg) for arg in cmd) and proc.stderr is not None:
+            proc.stderr = _Glued(proc.stderr)
+            glued.append(proc.stderr)
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    tiles = _cut_late_sheet(cut_late, tmp_path / "glued.png")
+    assert glued and all(stream.frames > 3 for stream in glued)
+    assert tiles == plain and len(set(tiles)) == 8
+    assert (tmp_path / "glued.png").read_bytes() == (tmp_path / "plain.png").read_bytes()
+    _forgetting_scans()
+
+
+@pytest.mark.parametrize("name", ["finalized_late", "cut_late"])
+def test_a_late_matroska_is_measured_the_same_whatever_memory_ffprobe_starts_with(request, name, monkeypatch):
+    source = request.getfixturevalue(name)
+    _forgetting_scans()
+    expected = probe(source).duration
+    assert expected is not None and 1 < expected < SECONDS + 0.1
+    monkeypatch.setenv("MALLOC_PERTURB_", "1")
+    for _ in range(3):
+        _forgetting_scans()
+        assert probe(source).duration == expected
     _forgetting_scans()
 
 

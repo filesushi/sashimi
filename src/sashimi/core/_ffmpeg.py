@@ -5,6 +5,7 @@
 
 import collections
 import errno
+import logging
 import os
 import queue
 import re
@@ -19,6 +20,8 @@ from typing import IO, Literal
 from sashimi.errors import BinaryNotFoundError, FFmpegPathError, ProcessingError
 
 ProgressCallback = Callable[[float, str], None]
+
+logger = logging.getLogger("sashimi")
 
 _configured: dict[str, str | None] = {"ffmpeg": None, "ffprobe": None, "origin": None}
 
@@ -342,6 +345,20 @@ def fmt_seconds(seconds: float) -> str:
     return text or "0"
 
 
+NO_END = "99999999999"
+"""
+The end (in seconds, past any file's last packet) of every ``-read_intervals`` interval that would
+otherwise read to the end of the file. ffprobe leaves an interval with no end partly uninitialised
+and can stop after any number of packets, exiting 0 with nothing said; an absolute end makes it
+set every field, and involves no arithmetic in ffprobe whatever the file's timestamps.
+"""
+
+
+def read_from(start: str) -> list[str]:
+    """``-read_intervals`` for every packet from `start` (seconds, as ffprobe reads them) to the end of the file."""
+    return ["-read_intervals", f"{start}%{NO_END}"]
+
+
 OUTPUT_FLAGS = ["-fflags", "+bitexact"]
 
 
@@ -371,8 +388,32 @@ Filters that print each frame's timestamp to stderr as it passes, for progress w
 ``-progress`` has nothing to report (an output that writes only at the end, such as
 ``palettegen``'s). Frames are otherwise unchanged.
 """
-_FRAME_LINE = re.compile(rb"(?:\[[^\]]*\]\s*)*frame:\s*\d+\s+pts:\s*\S+\s+pts_time:\s*(-?[0-9.]+)\s*")
-_FRAME_KEY_LINE = f"{FRAME_PROGRESS_KEY}=1".encode()
+_FRAME_LINE = re.compile(rb"frame:(\d+)( +)pts:(\S+)( +)pts_time:(-?[0-9.]+)\s*\Z")
+_FRAME_KEY_LINE = re.compile(re.escape(f"{FRAME_PROGRESS_KEY}=1".encode()) + rb"\s*\Z")
+
+
+def _printed(value: bytes, padding: bytes, width: int) -> bool:
+    return len(value) + len(padding) == max(width, len(value)) + 1
+
+
+def _frame_line(line: bytes) -> tuple[tuple[int, float] | None, bytes]:
+    """
+    What a line of stderr from a command ending in :data:`FRAME_PROGRESS` holds: the number and
+    time of the frame it ends with, if it does, and the text before that (or before a closing
+    progress key). The frame part must be as the filter prints it (``frame:%-4d pts:%-7s
+    pts_time:%s``), since other messages can run into it: FFmpeg logs from several threads.
+    """
+    frame = _FRAME_LINE.search(line)
+    if frame and _printed(frame[1], frame[2], 4) and _printed(frame[3], frame[4], 7):
+        return (int(frame[1]), float(frame[5])), line[: frame.start()]
+    if key := _FRAME_KEY_LINE.search(line):
+        return None, line[: key.start()]
+    return None, line
+
+
+def _keep_message(text: bytes, sink: collections.deque) -> None:
+    if text.strip():
+        sink.append(text.rstrip() + b"\n")
 
 
 def _drain(stream: IO[bytes], sink: collections.deque) -> None:
@@ -509,10 +550,10 @@ def run_ffmpeg(
         if progress_on_stderr:
             assert on_progress is not None and progress_total
             for raw in proc.stderr:
-                if frame := _FRAME_LINE.fullmatch(raw.strip()):
-                    on_progress(min(1.0, max(0.0, float(frame.group(1))) / progress_total), stage)
-                elif raw.strip() != _FRAME_KEY_LINE:
-                    stderr_tail.append(raw)
+                frame, rest = _frame_line(raw)
+                _keep_message(rest, stderr_tail)
+                if frame is not None:
+                    on_progress(min(1.0, max(0.0, frame[1]) / progress_total), stage)
         elif capture_stdout:
             assert proc.stdout is not None
             stdout = proc.stdout.read()
@@ -557,13 +598,37 @@ def holds_packets(path: str | os.PathLike[str], kind: Literal["video", "audio"])
         return False
 
 
-def _frame_times(stream: IO[bytes], times: "queue.Queue[float | None]", sink: collections.deque) -> None:
+TIME_WAIT_SECONDS = 5.0
+"""
+How long :func:`stream_timed_frames` waits for a frame's time once it has the frame. FFmpeg prints
+the time before it writes the frame, so the wait is only for the thread reading stderr; past it,
+the frame counts as having no time and stdout keeps being read, so ffmpeg can't block on it.
+"""
+STARVED_WAIT_SECONDS = 0.05
+"""The wait for each frame's time after one wait has run out, until a time arrives again."""
+
+
+def _frame_times(stream: IO[bytes], times: "queue.Queue[tuple[int, float] | None]", sink: collections.deque) -> None:
+    """
+    Puts ``(index, time)`` on `times` for each frame line of `stream`, then None. The index is the
+    frame's place on stdout. The filter numbers frames from 0, one up each frame, and starts again
+    whenever FFmpeg rebuilds the graph (a change of size or colour range mid-stream, where times
+    can also step back), so a number no higher than the last starts a new run, right after the
+    last frame seen.
+    """
+    run_start = 0
+    last: tuple[int, int] | None = None
     try:
         for line in iter(stream.readline, b""):
-            if frame := _FRAME_LINE.fullmatch(line.strip()):
-                times.put(float(frame.group(1)))
-            elif line.strip() != _FRAME_KEY_LINE:
-                sink.append(line)
+            frame, rest = _frame_line(line)
+            _keep_message(rest, sink)
+            if frame is None:
+                continue
+            number, time = frame
+            if last is not None and number <= last[1]:
+                run_start = last[0] + 1
+            last = (run_start + number, number)
+            times.put((last[0], time))
     finally:
         times.put(None)
 
@@ -572,8 +637,13 @@ def stream_timed_frames(cmd: list[str], frame_bytes: int) -> Generator[tuple[flo
     """
     Runs an ffmpeg command whose graph ends in :data:`FRAME_PROGRESS` and writes raw frames of
     `frame_bytes` to stdout, and yields each frame with its time (seconds, as the filter graph
-    saw it). Raises ProcessingError after the last frame if ffmpeg failed, and BinaryNotFoundError
-    if it can't be started. Closing the generator early kills the process.
+    saw it). Each time is matched to its frame's place on stdout (the filter's frame number,
+    counted across graph rebuilds), so a frame whose time can't be read is left out (and logged),
+    and stdout is always read on (see :data:`TIME_WAIT_SECONDS`). The numbers can't tell two
+    faults FFmpeg doesn't make on its own from a rebuild: when the last line before a rebuild is
+    lost, or a line is repeated, the frames after it take times one frame off (the warning counts
+    only the frames left out). Raises ProcessingError after the last frame if ffmpeg failed, and
+    BinaryNotFoundError if it can't be started. Closing the generator early kills the process.
     """
     _check(cmd)
     try:
@@ -582,15 +652,31 @@ def stream_timed_frames(cmd: list[str], frame_bytes: int) -> Generator[tuple[flo
         raise _start_error(cmd[0], e) from e
     assert proc.stdout is not None and proc.stderr is not None
     stderr_tail: collections.deque = collections.deque(maxlen=40)
-    times: queue.Queue[float | None] = queue.Queue()
+    times: queue.Queue[tuple[int, float] | None] = queue.Queue()
     reader = threading.Thread(target=_frame_times, args=(proc.stderr, times, stderr_tail), daemon=True)
     reader.start()
+    timed: tuple[int, float] | None = None
+    ended = starved = False
+    untimed = 0
+    count = 0
     try:
         while len(frame := proc.stdout.read(frame_bytes)) == frame_bytes:
-            time = times.get()
-            if time is None:
-                break
-            yield time, frame
+            while not ended and (timed is None or timed[0] < count):
+                try:
+                    got = times.get(timeout=STARVED_WAIT_SECONDS if starved else TIME_WAIT_SECONDS)
+                except queue.Empty:
+                    starved = True
+                    break
+                starved = False
+                if got is None:
+                    ended = True
+                else:
+                    timed = got
+            if timed is not None and timed[0] == count:
+                yield timed[1], frame
+            else:
+                untimed += 1
+            count += 1
         proc.stdout.read()
         proc.wait()
     except BaseException:
@@ -601,6 +687,9 @@ def stream_timed_frames(cmd: list[str], frame_bytes: int) -> Generator[tuple[flo
         reader.join(timeout=5)
         proc.stdout.close()
         proc.stderr.close()
+        if untimed:
+            logger.warning(f"ffmpeg didn't report the time of {untimed} of {count} frames, so they were left out")
+            logger.debug(f"The command: {shlex.join(cmd)}")
     if proc.returncode != 0:
         tail = b"".join(stderr_tail).decode("utf-8", "replace").strip()
         raise ProcessingError(

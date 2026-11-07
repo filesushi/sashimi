@@ -13,6 +13,7 @@ import pathlib
 import random
 import shutil
 import subprocess
+import threading
 
 import pytest
 from PIL import Image
@@ -52,6 +53,74 @@ needs_trusted_cuts = pytest.mark.skipif(
 made_by_current_ffmpeg = pytest.mark.skipif(
     OLD_FFMPEG, reason="the fixture's timestamps come out differently when FFmpeg 8.0 or older makes it"
 )
+
+
+def open_ended_intervals(cmd) -> list[str]:
+    """The ``-read_intervals`` intervals in `cmd` that have no end, after which ffprobe can stop reading at random."""
+    found: list[str] = []
+    for at, arg in enumerate(cmd[:-1]):
+        if arg == "-read_intervals":
+            found += [interval for interval in str(cmd[at + 1]).split(",") if not interval.partition("%")[2].strip()]
+    return found
+
+
+@pytest.fixture(autouse=True)
+def every_read_interval_has_an_end(monkeypatch):
+    """Fails any test in which sashimi runs a command with a ``-read_intervals`` interval that has no end."""
+    from sashimi.core import _ffmpeg
+
+    real = _ffmpeg._check
+    found: list[str] = []
+
+    def checked(cmd):
+        found.extend(open_ended_intervals(cmd))
+        real(cmd)
+
+    monkeypatch.setattr(_ffmpeg, "_check", checked)
+    yield found
+    assert not found, f"sashimi ran a command with -read_intervals {found}, which have no end"
+
+
+@pytest.fixture
+def finishes_within(monkeypatch):
+    """
+    ``finishes_within(seconds, call)`` returns what `call` returns, or fails the test when it runs
+    longer than `seconds`, killing the processes it started so that it stops.
+    """
+    started: list[subprocess.Popen] = []
+    real = subprocess.Popen
+
+    def recorded(*args, **kwargs):
+        proc = real(*args, **kwargs)
+        started.append(proc)
+        return proc
+
+    def run(seconds: float, call):
+        outcome: dict = {}
+
+        def target():
+            try:
+                outcome["value"] = call()
+            except BaseException as e:
+                outcome["error"] = e
+
+        monkeypatch.setattr(subprocess, "Popen", recorded)
+        worker = threading.Thread(target=target, daemon=True)
+        worker.start()
+        worker.join(seconds)
+        hung = worker.is_alive()
+        if hung:
+            for proc in started:
+                proc.kill()
+            worker.join(30)
+        monkeypatch.setattr(subprocess, "Popen", real)
+        if hung:
+            pytest.fail(f"still running after {seconds} s")
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome.get("value")
+
+    return run
 
 
 @pytest.fixture(autouse=True)
