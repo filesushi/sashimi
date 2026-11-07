@@ -3,11 +3,13 @@
 
 """The ffmpeg arguments that carry out a ``metadata`` mode, and Opus's per-channel bitrate ceiling. Pure."""
 
+import os
 import re
 from collections.abc import Sequence
 
 from sashimi.config import OPUS_MAX_KBPS_PER_CHANNEL, MetadataMode
 from sashimi.core.probe import MediaInfo, StreamInfo
+from sashimi.errors import UnsupportedMediaError
 
 LOCATION_KEYS = (
     "location",
@@ -23,6 +25,23 @@ LOCATION_KEYS = (
 )
 """Location tags ``remove_location`` always removes, whatever the source shows; matching is case-insensitive."""
 _LOCATION_KEY = re.compile(r"(?i)(location|gps|geo|latitude|longitude|coordinates|iso6709)")
+MAX_TAG_ARGS = 8 << 10
+"""
+How much of a command, in characters, the names and values a file holds may take, whatever the file: a
+whole command is limited to 32,767 characters on Windows, and one argument to 128 KiB on Linux.
+"""
+WINDOWS_ATTACHMENT_ARGS = 24 << 10
+"""What fits of a Windows command, limited to 32,767 characters, with the rest of the command beside it."""
+POSIX_ATTACHMENT_ARGS = 512 << 10
+"""What fits of a command elsewhere: about 2 MiB on Linux and 1 MiB on macOS, environment included, and no argument here is long."""
+MAX_ATTACHMENT_ARGS = WINDOWS_ATTACHMENT_ARGS if os.name == "nt" else POSIX_ATTACHMENT_ARGS
+"""
+How much of a command may go to stream languages and attachment names once every stream tag is gone:
+Matroska refuses an attachment without its name and type, and a film can carry hundreds of fonts, at
+about 100 characters each. Past it, an attachment's names leave nothing to run, so the file is refused.
+"""
+_MAX_STREAM_VALUE = 255
+"""The longest language, attachment name or attachment type put back on a command: real ones are far shorter."""
 
 
 def is_location_key(key: str) -> bool:
@@ -58,46 +77,92 @@ def _tag(stream: StreamInfo, name: str) -> str | None:
     return next((value for key, value in stream.tags.items() if key.lower() == name), None)
 
 
+def _length(args: Sequence[str]) -> int:
+    """About what `args` take of a command line, with the space and quotes around each."""
+    return sum(len(arg) + 3 for arg in args)
+
+
+def _within(args: list[str], budget: int) -> list[str]:
+    """As many of `args`' option and value pairs as `budget` holds. Pure."""
+    kept: list[str] = []
+    for at in range(0, len(args), 2):
+        if _length(kept) + _length(args[at : at + 2]) > budget:
+            break
+        kept += args[at : at + 2]
+    return kept
+
+
+def _names_to_keep(streams: Sequence[StreamInfo], outputs: Sequence[int | None], budget: int) -> list[str]:
+    """
+    The tags that put back what players need once every stream tag is gone: each stream's language, and
+    an attachment's file name and type, which Matroska requires. Only the attachments' when the
+    languages don't fit in a command, and a plain stand-in for a value too long to be real. Raises
+    UnsupportedMediaError when the attachments' don't fit either, since FFmpeg would refuse them.
+    """
+    languages: list[str] = []
+    attached: list[str] = []
+    both: list[str] = []
+    stand_ins = {"filename": "attachment{out}", "mimetype": "application/octet-stream"}
+    for out, source in enumerate(outputs):
+        if source is None or source >= len(streams):
+            continue
+        stream = streams[source]
+        if stream.language and len(stream.language) <= _MAX_STREAM_VALUE:
+            row = [f"-metadata:s:{out}", f"language={stream.language}"]
+            languages += row
+            both += row
+        if stream.type == "attachment":
+            for name, stand_in in stand_ins.items():
+                value = _tag(stream, name)
+                if value:
+                    fitting = value if len(value) <= _MAX_STREAM_VALUE else stand_in.format(out=out)
+                    row = [f"-metadata:s:{out}", f"{name}={fitting}"]
+                    attached += row
+                    both += row
+    if _length(both) <= budget:
+        return both
+    if _length(attached) > budget:
+        raise UnsupportedMediaError(
+            "This file has too many attachments for this system.", detail=f"{len(attached) // 4} attachments"
+        )
+    return attached
+
+
 def metadata_args(mode: MetadataMode, info: MediaInfo | None, outputs: Sequence[int | None]) -> list[str]:
     """
     Output options that carry out `mode`. `outputs` gives, for each output stream in order, the
     source stream it comes from (None if unknown), so stream tags can be removed or put back:
     ``remove_all`` keeps each stream's language, and an attachment's file name and type, which
-    players need.
+    players need. ``remove_location`` names each location tag to remove; when a file's names don't
+    fit in :data:`MAX_TAG_ARGS`, or a name can't be said on a command, every tag at that level goes
+    instead (the file's, or the streams', keeping what :func:`_names_to_keep` puts back).
     """
     if mode == "keep":
         return []
     streams = info.streams if info is not None else []
     if mode == "remove_all":
-        args = ["-map_metadata", "-1", "-map_chapters", "-1"]
-        for out, source in enumerate(outputs):
-            if source is None or source >= len(streams):
-                continue
-            stream = streams[source]
-            if stream.language:
-                args += [f"-metadata:s:{out}", f"language={stream.language}"]
-            if stream.type == "attachment":
-                for name in ("filename", "mimetype"):
-                    value = _tag(stream, name)
-                    if value:
-                        args += [f"-metadata:s:{out}", f"{name}={value}"]
-        return args
+        return ["-map_metadata", "-1", "-map_chapters", "-1", *_names_to_keep(streams, outputs, MAX_ATTACHMENT_ARGS)]
     lowered = {key.lower() for key in LOCATION_KEYS}
     keys = [*LOCATION_KEYS]
     for key in info.tags if info is not None else {}:
         if is_location_key(key) and key.lower() not in lowered:
             keys.append(key)
             lowered.add(key.lower())
-    args = []
-    for key in keys:
-        args += ["-metadata:g", f"{key}="]
+    named = [arg for key in keys for arg in ("-metadata:g", f"{key}=")]
+    if _length(named) > MAX_TAG_ARGS // 2 or any("=" in key for key in keys):
+        named = ["-map_metadata:g", "-1"]
+    in_streams: list[str] = []
+    unnamable = False
     for out, source in enumerate(outputs):
         if source is None or source >= len(streams):
             continue
         for key in streams[source].tags:
             if is_location_key(key):
-                args += [f"-metadata:s:{out}", f"{key}="]
-    return args
+                in_streams += [f"-metadata:s:{out}", f"{key}="]
+                unnamable = unnamable or "=" in key
+    if unnamable or _length(in_streams) > MAX_TAG_ARGS // 2:
+        in_streams = ["-map_metadata:s", "-1", *_names_to_keep(streams, outputs, MAX_ATTACHMENT_ARGS - MAX_TAG_ARGS)]
+    return [*named, *in_streams]
 
 
 QUICKTIME_MUXERS = frozenset({"mp4", "mov", "ipod", "3gp", "3g2"})
@@ -140,7 +205,7 @@ MP4 and M4A keep iTunes' list, MOV QuickTime's user-data strings; every other ta
 """
 _CONTAINER_KEYS = ("major_brand", "minor_version", "compatible_brands")
 """Source tags that describe the source's file type, not its content: never written as tags."""
-_ISO_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z?")
+_ISO_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z?")
 
 
 def _kept_tags(mode: MetadataMode, info: MediaInfo) -> list[str]:
@@ -173,16 +238,14 @@ def quicktime_tag_args(mode: MetadataMode, info: MediaInfo | None, muxer: str) -
     created = next((value for key, value in info.tags.items() if key.lower() == "creation_time"), "")
     stated = next((part.strip() for part in created.split(";") if _ISO_TIME.fullmatch(part.strip())), None)
     when = ["-metadata:g", f"creation_time={stated}"] if stated else []
+    file_types = [arg for key in info.tags if key.lower() in _CONTAINER_KEYS for arg in ("-metadata:g", f"{key}=")]
+    file_types = _within(file_types, MAX_TAG_ARGS // 2)
     if muxer not in QUICKTIME_MUXERS:
-        args = [arg for key in info.tags if key.lower() in _CONTAINER_KEYS for arg in ("-metadata:g", f"{key}=")]
-        return [*args, *when] if muxer in MATROSKA_MUXERS else args
+        return [*file_types, *when] if muxer in MATROSKA_MUXERS else file_types
     args = []
     plain = _PLAIN_TAGS.get(muxer, _ITUNES_TAGS)
     if any(key.lower() not in plain for key in _kept_tags(mode, info)):
-        args += ["-movflags", "+use_metadata_tags"]
-        for key in info.tags:
-            if key.lower() in _CONTAINER_KEYS:
-                args += ["-metadata:g", f"{key}="]
+        args += ["-movflags", "+use_metadata_tags", *file_types]
     return [*args, *when]
 
 

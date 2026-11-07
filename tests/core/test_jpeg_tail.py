@@ -609,3 +609,39 @@ def test_an_items_other_attributes_stay_valid_when_a_directory_is_rewritten(tmp_
     assert xmp is not None and f"Item:{name}".encode() in xmp
     xmp.decode("utf-8")
     assert items_of(out)[1][name] == "v"
+
+
+def ultra_hdr_listing(gain: bytes) -> bytes:
+    """A photo whose MPF lists `gain` right after it, and which Pillow reads as a JPEG, as it does Ultra HDR photos."""
+    return with_mpf(jpeg_xmp(xmp_packet(b'hdrgm:Version="1.0"')), [gain])
+
+
+@pytest.mark.parametrize("mode", ["remove_all", "remove_location"])
+def test_a_listed_picture_past_the_end_of_the_file_isnt_a_loss(tmp_path, mode):
+    gain = holding(_segment(0xE1, XMP_PREFIX + GAIN_XMP), seed=3)
+    told, out = write_strip(tmp_path, ultra_hdr_listing(gain), mode)
+    assert told.lost == [] and told.removed == [] and told.level == "lossless"
+    assert b"MPF\0" not in out
+
+
+@pytest.mark.parametrize("mode", ["remove_all", "remove_location"])
+def test_a_directory_item_of_a_cut_file_isnt_a_loss(tmp_path, mode):
+    depth = plain(seed=2)
+    data = photo([primary_item(), item(b"Depth", len(depth))], [])
+    told, _ = write_strip(tmp_path, data, mode)
+    assert told.lost == []
+
+
+def test_a_conversion_of_a_cut_file_doesnt_say_it_lost_the_picture_it_never_had(tmp_path):
+    source = tmp_path / "source.jpg"
+    source.write_bytes(ultra_hdr_listing(holding(seed=3)))
+    told = image.convert(source, tmp_path / "o.png", IMAGE_CONVERT.from_params({}, target="png")).fidelity
+    assert not any("extra images" in name or "another picture" in name for name in told.lost)
+
+
+def test_a_picture_that_is_there_is_still_a_loss(tmp_path):
+    gain = holding(seed=3)
+    source = tmp_path / "source.jpg"
+    source.write_bytes(ultra_hdr_listing(gain) + gain)
+    told = image.convert(source, tmp_path / "o.png", IMAGE_CONVERT.from_params({}, target="png")).fidelity
+    assert "extra images (such as a gain map)" in told.lost

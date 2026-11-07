@@ -202,7 +202,7 @@ class FakeFfprobe:
         assert "-show_format" in cmd
         return json.dumps(self.data).encode()
 
-    def stream(self, cmd, chunk_size):
+    def stream(self, cmd, chunk_size, stderr_tail=None):
         self.scans.append(cmd)
         self.stopped_early = True
         for start in range(0, len(self.packets), 7):
@@ -249,9 +249,9 @@ def test_unfinalized_audio_is_measured(monkeypatch):
     assert len(fake.scans) == 1
 
 
-def test_a_scan_that_fails_part_way_keeps_what_it_read(monkeypatch):
-    FakeFfprobe(monkeypatch, unfinalized(), PACKETS_FROM_100, fail_after=ProcessingError("truncated"))
-    assert probe("capture.mkv").duration == 5.013333
+def test_a_scan_that_fails_part_way_gives_no_length_rather_than_a_short_one(monkeypatch):
+    FakeFfprobe(monkeypatch, unfinalized(), PACKETS_FROM_100, fail_after=ProcessingError("it failed"))
+    assert probe("capture.mkv").duration is None
 
 
 def test_a_scan_without_packets_leaves_the_length_unknown(monkeypatch):

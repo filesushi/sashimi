@@ -21,7 +21,7 @@ from sashimi.core import video as core_video
 from sashimi.core._metaread import MAX_VALUE_CHARS
 from sashimi.errors import ProcessingError, UndecodableVideoError, UnsupportedMediaError
 from tests import metadata_samples as samples
-from tests.conftest import needs_ffmpeg
+from tests.conftest import ffmetadata_file, needs_ffmpeg
 
 pytestmark = needs_ffmpeg
 CAPTURE_FIELDS = {"com.apple.quicktime.creationdate", "date_recorded", "DATE_RECORDED"}
@@ -455,8 +455,22 @@ def test_many_tags_and_streams_stay_within_the_bound(tmp_path):
     from tests.core.test_hostile_metadata import READ_LIMIT
 
     source = tmp_path / "many.mkv"
-    tags = [arg for number in range(400) for arg in ("-metadata", f"key{number}=" + "é" * 400)]
-    ffmpeg("-f", "lavfi", "-i", "sine=d=1", *tags, str(source))
+    tags = ffmetadata_file(tmp_path / "tags.txt", {f"key{number}": "é" * 400 for number in range(400)})
+    ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=d=1",
+        "-f",
+        "ffmetadata",
+        "-i",
+        str(tags),
+        "-map",
+        "0",
+        "-map_metadata",
+        "1",
+        str(source),
+    )
     info = metadata.read(source)
     assert len(info.model_dump_json().encode()) <= READ_LIMIT
     assert len(info.tags) + info.tags_omitted >= 400 and info.tags_omitted > 0

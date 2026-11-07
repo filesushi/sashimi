@@ -27,7 +27,7 @@ from sashimi.cli.main import app
 from sashimi.core import _ffmpeg, video
 from sashimi.config import VIDEO_CONVERT, CopyTrimConfig
 from sashimi.core.fidelity import UNCHECKED, fidelity
-from tests.conftest import needs_ffmpeg
+from tests.conftest import ffmetadata_file, needs_ffmpeg
 from tests.core import test_hostile_metadata as hostile
 
 runner = CliRunner()
@@ -734,6 +734,7 @@ def test_a_tracks_own_name_reaches_fidelity_clean_and_capped(tmp_path, route):
     clip = tmp_path / "in.mov"
     clip_with_data_tracks(clip, "abcd")
     named = tmp_path / "named.mov"
+    tags = ffmetadata_file(tmp_path / "tags.txt", {}, {"handler_name": HOSTILE_HANDLER.replace("\x00", "")})
     subprocess.run(
         [
             "ffmpeg",
@@ -742,18 +743,24 @@ def test_a_tracks_own_name_reaches_fidelity_clean_and_capped(tmp_path, route):
             "-y",
             "-i",
             str(clip),
+            "-f",
+            "ffmetadata",
+            "-i",
+            str(tags),
             "-map",
             "0",
             "-c",
             "copy",
-            "-metadata:s:d:0",
-            "handler_name=" + HOSTILE_HANDLER.replace("\x00", ""),
+            "-map_metadata:s:d:0",
+            "1:s:0",
             "-f",
             "mov",
             str(named),
         ],
         check=True,
     )
+    held = [stream.tags.get("handler_name", "") for stream in sashimi.probe(named).streams if stream.type == "data"]
+    assert any(len(name) > 60_000 and "\x1b]0;pwned" in name for name in held), "the track didn't get its name"
     told = route(named, tmp_path).fidelity
     texts = [told.text, *told.changed, *told.lost, *told.removed, *told.adjusted, *told.kept, *told.notes]
     for text in texts:

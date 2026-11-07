@@ -57,7 +57,12 @@ A full metadata read: every field, by where it was found, with what isn't counte
 - `strip` keeps every picture after a JPEG's main one that MPF or a container directory lists (depth maps, a stereo pair's other eye) without its metadata, and updates what locates it; a picture nothing lists goes.
 - `read` counts metadata in pictures after a JPEG's main one, and says when false starts or too many pictures stopped it looking.
 - Re-encoded images drop EXIF, Photoshop and XMP thumbnails under every mode; the result lists `embedded thumbnail` as lost.
-- A HEIC or AVIF nothing installed can read names what it needs, on every image command and `read`, and `strip` no longer writes it as an MP4.
+- A HEIC or AVIF nothing installed can read names what it needs, on every image command, `read` and `info`, and `strip` no longer writes it as an MP4.
+- A file's tag names and values take a bounded part of an FFmpeg command: when its location tags don't fit, `remove_location` removes every tag at that level and lists `tags` as lost; too many attachment names for the system are refused before FFmpeg runs.
+- A command too long for the system is a `ProcessingError`, never reported as a bad FFmpeg.
+- A packet scan where ffprobe exits with an error no longer gives a short length: a late-starting file keeps its stated length, one that states none has no length, and the failure is logged.
+- A picture MPF or a directory lists past the end of the file is no longer reported as dropped.
+- `strip` of a video claims nothing when its check of the end fails.
 - `strip` keeps the container directory of a photo with depth or labelled items, without the labels, and names only what really went.
 - A GIF frame that overflows its canvas is clipped as browsers clip it, on every target.
 - A palette PNG with several transparent entries converts to GIF.

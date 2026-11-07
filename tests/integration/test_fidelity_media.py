@@ -206,6 +206,26 @@ def test_a_cut_to_the_end_claims_nothing_when_its_check_of_the_end_fails(tmp_pat
     assert told.level == "lossy" and not told.checked
 
 
+def test_a_strip_claims_nothing_for_a_video_when_its_check_of_the_end_fails(tmp_path, video_blob, monkeypatch):
+    def broken(*args):
+        raise RuntimeError("the check failed")
+
+    monkeypatch.setattr(core_video, "tail_report", broken)
+    told = metadata.strip(video_blob, tmp_path / "o.mkv", "remove_all").fidelity
+    assert told.level == "lossy" and not told.checked
+
+
+def test_a_strip_of_sound_has_no_end_to_check_and_stays_a_copy_when_its_check_fails(tmp_path, audio_blob, monkeypatch):
+    from sashimi.core import fidelity as core_fidelity
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("the check failed")
+
+    monkeypatch.setattr(core_fidelity, "media_fidelity", broken)
+    told = metadata.strip(audio_blob, tmp_path / "o.m4a", "remove_all").fidelity
+    assert told.level == "content_lossless" and not told.checked
+
+
 def test_a_copy_keeps_a_hidden_lead_hidden(tmp_path):
     source = _with_hidden_lead(tmp_path)
     assert core_video.hidden_lead(source) == pytest.approx(0.5, abs=0.05)

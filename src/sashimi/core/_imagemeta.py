@@ -1092,24 +1092,28 @@ def mpf_extra_kinds(data: bytes) -> set[str]:
     """
     What a JPEG's MPF segment lists after the main picture: ``shows the main picture`` for a preview
     or an undefined type in a file with a gain map, ``a picture of its own`` for the rest. A type
-    that says nothing counts as a picture, so nothing a person may want goes unmentioned. Pure.
+    that says nothing counts as a picture, so nothing a person may want goes unmentioned, and a
+    segment that can't be read as a preview; an entry past the end of the file isn't there at all. Pure.
     """
     try:
         pieces, _ = jpeg_pieces(data)
     except (ValueError, struct.error):
         return set()
     kinds: set[str] = set()
+    position = 0
     for marker, segment in pieces:
+        position += len(segment)
         if marker != 0xE2 or segment[4:8] != b"MPF\x00":
             continue
         found = _mpf_entries(segment)
         if found is None:
-            return set()
+            return {"shows the main picture"}
         order, start, pictures = found
+        header = position - len(segment) + 8
         table = segment[8:]
         gain_map = b"hdrgm:" in data or b"GainMap" in data
         for index in range(1, len(pictures)):
-            if not pictures[index][0]:
+            if not pictures[index][0] or header + pictures[index][1] >= len(data):
                 continue
             kind = struct.unpack_from(order + "I", table, start + 16 * index)[0] & 0xFFFFFF
             routine = kind in _MP_THUMBNAILS or (gain_map and kind not in _MP_MULTI_FRAME)

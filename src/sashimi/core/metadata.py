@@ -1022,7 +1022,7 @@ def _jpeg_tail_report(input_path: PathLike, output_path: PathLike, notes: list[s
     the source's bytes show; and whether it lost data after the picture that was neither a picture
     nor a video. Items that stay may be renamed ``Unknown``, so items are compared under that name.
     """
-    from sashimi.core._imagemeta import _jpeg_carriers, _read, motion_video, tail_summary
+    from sashimi.core._imagemeta import _jpeg_carriers, _read, jpeg_pieces, motion_video, tail_summary
     from sashimi.core._metaread import DISPLAY_ITEM_VALUES, directory_items
     from sashimi.core.fidelity import counted
 
@@ -1037,7 +1037,8 @@ def _jpeg_tail_report(input_path: PathLike, output_path: PathLike, notes: list[s
 
     left = [named(item) for item in directory_items(_jpeg_carriers(output).xmp or b"")]
     lost = []
-    for item in directory_items(_jpeg_carriers(source).xmp or b""):
+    listed = directory_items(_jpeg_carriers(source).xmp or b"") if jpeg_pieces(source)[1].strip(b"\0") else []
+    for item in listed:
         semantic = named(item)
         if semantic in left:
             left.remove(semantic)
@@ -1219,7 +1220,7 @@ def strip(
             kept=_timecode_kept(info),
         )
 
-    told = checked_after_writing(content, report, identical=True)
+    told = checked_after_writing(content, report, identical=not info.has_video)
     if on_progress:
         on_progress(1.0, "done")
     return StripResult(format=_STRIP_MUXERS[muxer], fidelity=told)

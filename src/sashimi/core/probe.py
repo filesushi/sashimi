@@ -5,6 +5,7 @@
 
 import collections
 import json
+import logging
 import re
 import math
 import os
@@ -34,6 +35,8 @@ from sashimi.errors import (
 
 __all__ = ["MediaInfo", "StreamInfo", "anamorphic", "check_decodable", "probe", "VIDEO_CONTAINERS", "AUDIO_CONTAINERS"]
 
+logger = logging.getLogger("sashimi")
+
 _SEGMENT_TIMESTAMPS = frozenset({"matroska", "webm"})
 _PAST_THE_END = "999999999"
 _PACKETS_PER_SECOND = 77
@@ -41,6 +44,7 @@ _PACKETS_PER_SECOND = 77
 _NO_SCAN = frozenset({"gif"})
 _SCAN_CHUNK = 1 << 16
 _SCAN_CACHE_SIZE = 64
+_STATED_TOLERANCE = 0.5
 
 
 class StreamInfo(BaseModel):
@@ -531,12 +535,15 @@ def _lines(chunks: Iterable[bytes]) -> Iterator[bytes]:
 
 
 class _Scan:
-    """One packet scan's result: the end it found, how many packets it read, and whether it reached the end."""
+    """
+    One packet scan's result: the end it found, how many packets it read, whether it can be trusted to
+    have reached the end, and whether ffprobe failed, so nothing is known of what it didn't read.
+    """
 
-    __slots__ = ("end", "packets", "complete")
+    __slots__ = ("end", "packets", "complete", "failed")
 
-    def __init__(self, end: float | None, packets: int, complete: bool):
-        self.end, self.packets, self.complete = end, packets, complete
+    def __init__(self, end: float | None, packets: int, complete: bool, failed: bool = False):
+        self.end, self.packets, self.complete, self.failed = end, packets, complete, failed
 
 
 _scans: collections.OrderedDict[tuple[int, int, int, int], _Scan] = collections.OrderedDict()
@@ -575,8 +582,12 @@ def _late_span(input_path: str | os.PathLike[str], data: dict[str, Any], cap: in
     frame ends, mkvmerge the span from the first frame, and a remux can keep the old muxer's
     ``ENCODER`` tag. So the end is read from the file: ffprobe seeks to its last keyframe (from the
     Cues) and reads the packets after it; without Cues, or with keyframes far apart, it reads more,
-    up to `cap` packets. The stated length is kept when the end isn't reached, so it is never
-    shortened by guesswork (a length that is too short cuts every re-encode short).
+    up to `cap` packets. The stated length is kept when the end isn't reached or ffprobe fails (a
+    non-zero exit), so it is never shortened by guesswork. ffprobe exits with 0 at damage or a cut
+    in the file, and what it read then is the file's length as far as FFmpeg can read it, since a
+    re-encode stops at the same place. A read that stopped for another reason with an exit of 0
+    can't be told from that; it is logged when the end found agrees with neither way of stating a
+    length.
     """
     key = _file_key(input_path)
     known = None
@@ -593,10 +604,25 @@ def _late_span(input_path: str | os.PathLike[str], data: dict[str, Any], cap: in
     if not known.complete or known.end is None or (cap is not None and known.packets > cap):
         return None
     span = round(known.end - _start_time(data), 6)
+    _note_disagreement(input_path, data, known.end, span)
     return span if span > 0 else None
 
 
+def _note_disagreement(input_path: str | os.PathLike[str], data: dict[str, Any], end: float, span: float) -> None:
+    try:
+        stated = float(data["format"]["duration"])
+    except (KeyError, TypeError, ValueError):
+        return
+    if abs(end - stated) > _STATED_TOLERANCE and abs(span - stated) > _STATED_TOLERANCE:
+        logger.info(f"Measured {span} s for {os.fspath(input_path)}, ending at {end} s, where it states {stated} s")
+
+
 def _measured_duration(input_path: str | os.PathLike[str], data: dict[str, Any], cap: int | None) -> float | None:
+    """
+    How long a file that states no length is, from its packets. None when ffprobe fails partway: what it
+    read is only part of the file, and a length that is too short cuts every re-encode short, so
+    the file counts as unreadable, as one with no packets does. A failed scan isn't remembered.
+    """
     key = _file_key(input_path)
     known = None
     if key is not None:
@@ -610,6 +636,8 @@ def _measured_duration(input_path: str | os.PathLike[str], data: dict[str, Any],
         scan = known
     else:
         scan = _scan_packets(input_path, data, cap)
+        if scan.failed:
+            return None
         if key is not None and key == _file_key(input_path):
             with _scans_lock:
                 _scans[key] = scan
@@ -645,7 +673,8 @@ def _scan_packets(
     cmd.append(file_arg(input_path))
     end: float | None = None
     packets = 0
-    chunks = stream_ffmpeg(cmd, _SCAN_CHUNK)
+    said: collections.deque[bytes] = collections.deque(maxlen=40)
+    chunks = stream_ffmpeg(cmd, _SCAN_CHUNK, said)
     try:
         for line in _lines(chunks):
             if not line.strip():
@@ -658,8 +687,12 @@ def _scan_packets(
                 end = time
     except BinaryNotFoundError:
         raise
-    except ProcessingError:
-        pass
+    except ProcessingError as e:
+        logger.warning(f"Reading the packets of {os.fspath(input_path)} failed after {packets}: {e}")
+        return _Scan(end, packets, False, failed=True)
     finally:
         chunks.close()
+    reported = b"".join(said).decode("utf-8", "replace").strip()
+    if reported:
+        logger.info(f"ffprobe reported errors reading the packets of {os.fspath(input_path)}: {reported}")
     return _Scan(end, packets, True)

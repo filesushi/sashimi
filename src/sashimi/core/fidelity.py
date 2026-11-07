@@ -273,7 +273,7 @@ def _add_extra_pictures(data: bytes, inventory: Inventory) -> None:
     from sashimi.core._imagemeta import mpf_extra_kinds
 
     kinds = mpf_extra_kinds(data)
-    if "shows the main picture" in kinds or not kinds:
+    if "shows the main picture" in kinds:
         inventory.add(EXTRA_IMAGES)
     if "a picture of its own" in kinds:
         inventory.add(ANOTHER_PICTURE)

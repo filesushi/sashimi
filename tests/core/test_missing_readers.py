@@ -88,6 +88,7 @@ def test_every_call_says_a_heic_needs_the_extra(tmp_path, heic):
         ["edit", "--rotate", "90"],
         ["favicon"],
         ["metadata"],
+        ["info"],
     ],
     ids=lambda command: command[0],
 )
@@ -119,6 +120,12 @@ def test_an_avif_without_a_reader_says_what_it_needs_and_writes_nothing(tmp_path
     for route, said in json.loads(done.stdout).items():
         assert "AVIF" in said and "pip install" in said, route
     assert not list(tmp_path.glob("out*"))
+
+
+def test_info_on_an_avif_without_a_reader_says_what_it_needs(tmp_path, avif):
+    done = run(BLOCK_AVIF + CLI, "info", str(avif))
+    said = " ".join((done.stdout + done.stderr).split())
+    assert done.returncode != 0 and "AVIF" in said and "pip install" in said, said
 
 
 def test_a_heic_stated_as_mif1_is_still_a_heic(tmp_path, heic):

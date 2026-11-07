@@ -320,10 +320,12 @@ def info_cmd(
     from sashimi.config import Limits
     from sashimi.core.edit import frames_info
     from sashimi.core.sheets._render import format_duration, format_size
-    from sashimi.errors import SashimiError, UnsupportedMediaError, UserInputError
+    from sashimi.errors import MissingReaderError, SashimiError, UnsupportedMediaError, UserInputError
 
     try:
         image_info = frames_info(path, limits=Limits.unlimited())
+    except MissingReaderError as e:
+        fail(refusal(e), code=1)
     except UnsupportedMediaError:
         image_info = None
     except UserInputError as e:
