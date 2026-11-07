@@ -54,6 +54,15 @@ made_by_current_ffmpeg = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def sashimi_log_level_restored():
+    """Keeps a CLI run's verbosity in one test from hiding log records in the tests after it."""
+    logger = logging.getLogger("sashimi")
+    level = logger.level
+    yield
+    logger.setLevel(level)
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield

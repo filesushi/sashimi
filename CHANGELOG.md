@@ -82,6 +82,7 @@ A full metadata read: every field, by where it was found, with what isn't counte
 - `video.convert` copies video this FFmpeg can't decode into MP4; only routes that decode refuse it.
 - A cut from mid-file no longer warns about frames hidden at the source's start.
 - A failed read of a copy's first or last packets silently dropped the note about hidden frames.
+- A sheet or preview of a file FFmpeg complains about could silently show wrong frames, when a log line ran into a frame's time.
 
 ## 0.7.0 — 2026-10-30
 

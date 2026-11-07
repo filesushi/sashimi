@@ -371,7 +371,7 @@ Filters that print each frame's timestamp to stderr as it passes, for progress w
 ``-progress`` has nothing to report (an output that writes only at the end, such as
 ``palettegen``'s). Frames are otherwise unchanged.
 """
-_FRAME_LINE = re.compile(rb"frame:\s*\d+\s+pts:\s*\S+\s+pts_time:\s*(-?[0-9.]+)\s*")
+_FRAME_LINE = re.compile(rb"(?:\[[^\]]*\]\s*)*frame:\s*\d+\s+pts:\s*\S+\s+pts_time:\s*(-?[0-9.]+)\s*")
 _FRAME_KEY_LINE = f"{FRAME_PROGRESS_KEY}=1".encode()
 
 
