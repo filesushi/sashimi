@@ -82,7 +82,8 @@ A full metadata read: every field, by where it was found, with what isn't counte
 - `video.convert` copies video this FFmpeg can't decode into MP4; only routes that decode refuse it.
 - A cut from mid-file no longer warns about frames hidden at the source's start.
 - A failed read of a copy's first or last packets silently dropped the note about hidden frames.
-- A sheet or preview of a file FFmpeg complains about could silently show wrong frames, when a log line ran into a frame's time.
+- A sheet or preview of a file FFmpeg complains about could silently show wrong frames, when a log message ran into a frame's time; a frame whose time is lost is left out and logged.
+- ffprobe could stop at random reading a late-starting Matroska/WebM's last packets or an MP4/MOV's (seen on Windows; 0.7.0 too), so the file kept its stated length, or a copy didn't say it shows frames hidden at the end.
 
 ## 0.7.0 — 2026-10-30
 

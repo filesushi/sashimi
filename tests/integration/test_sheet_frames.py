@@ -23,6 +23,8 @@ import sashimi.core.sheets.animated as animated_module
 import sashimi.core.sheets.static as static_module
 from sashimi import probe, sheets
 from sashimi.config import VIDEO_PREVIEW, AnimatedGifSheetConfig, PngSheetConfig
+from sashimi.core._ffmpeg import stream_timed_frames
+from sashimi.core._seek import build_pass_command
 from sashimi.core.preview import plan_preview, preview
 from sashimi.core.sheets._layout import clip_starts, fit_grid, frame_times, plan_clips, plan_layout
 from tests.conftest import needs_ffmpeg
@@ -510,3 +512,107 @@ def test_an_animated_sheet_draws_the_clips_it_states_without_overlap(coded, tmp_
     for first, second in zip(shown, shown[1:], strict=False):
         assert not first & second, (first & second, result.fidelity.text)
     assert not _clip_errors(path, frames, plan.starts, layout, 5, [0, 4])
+
+
+CHANGES = {
+    "size": [(f"{W}x{H}", []), (f"{2 * W}x{2 * H}", [])],
+    "colour range": [(f"{W}x{H}", []), (f"{W}x{H}", ["-pix_fmt", "yuvj420p"])],
+}
+"""Two seconds of coded frames at 10 fps, then two more after a change FFmpeg rebuilds its filter graph for."""
+
+
+@pytest.fixture(scope="module", params=list(CHANGES))
+def changing(request, tmp_path_factory) -> pathlib.Path:
+    folder = tmp_path_factory.mktemp("changing")
+    joined = b""
+    for part, (size, extra) in enumerate(CHANGES[request.param]):
+        code = f"geq=lum='if(lt(Y,H/2),255*mod(floor((N+{20 * part})/pow(2,floor(X/(W/10)))),2),128)':cb=128:cr=128"
+        path = folder / f"{part}.ts"
+        subprocess.run(
+            [
+                *("ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi"),
+                *(
+                    "-i",
+                    f"nullsrc=s={size}:r=10:d=2,format=yuv420p,{code}",
+                    "-c:v",
+                    "libx264",
+                    "-g",
+                    "10",
+                    "-bf",
+                    "0",
+                    *extra,
+                ),
+                *("-output_ts_offset", str(2 * part), "-f", "mpegts", str(path)),
+            ],
+            check=True,
+        )
+        joined += path.read_bytes()
+    source = folder / "original.blob"
+    source.write_bytes(joined)
+    return source
+
+
+def test_the_changing_videos_restart_ffmpegs_frame_numbers(changing):
+    cmd = build_pass_command(changing, [(0.0, 5.0)], f"scale={W}:{H},setsar=1", 1)
+    said = subprocess.run(cmd, capture_output=True, check=True).stderr
+    times = [float(t) for t in re.findall(rb"pts_time:(-?[0-9.]+)", said)]
+    assert [int(n) for n in re.findall(rb"frame:(\d+) ", said)] == [*range(20), *range(20)]
+    assert times == sorted(times) and len(set(times)) == 40
+
+
+def test_every_frame_of_a_changing_video_keeps_its_time(changing, finishes_within):
+    cmd = build_pass_command(changing, [(0.0, 5.0)], f"scale={W}:{H},setsar=1", 1)
+    whole = subprocess.run(cmd, capture_output=True, check=True)
+    times = [float(t) for t in re.findall(rb"pts_time:(-?[0-9.]+)", whole.stderr)]
+    frames = [whole.stdout[at : at + W * H * 3] for at in range(0, len(whole.stdout), W * H * 3)]
+    got = finishes_within(60, lambda: list(stream_timed_frames(cmd, W * H * 3)))
+    assert got == list(zip(times, frames, strict=True))
+    assert [frame_number(Image.frombytes("RGB", (W, H), frame)) for _, frame in got] == list(range(40))
+
+
+def _cells(path: pathlib.Path, cols: int, rows: int, aspect: float) -> list[list[int]]:
+    layout = plan_layout(640, cols, rows, 0, aspect, even=True, animated=True)
+    return [
+        [
+            frame_number(frame.crop((x, y, x + layout.thumb_w, y + layout.thumb_h)))
+            for x, y in (layout.cell_origin(slot) for slot in range(layout.cells))
+        ]
+        for frame in _gif_frames(path)
+    ]
+
+
+def test_a_changing_video_gives_the_same_frames_on_both_routes(changing, tmp_path, monkeypatch, finishes_within):
+    aspect = probe(changing).display_aspect_ratio
+    still = PngSheetConfig(width=640, cols=4, rows=3, gap=0, show_header=False, show_timestamps=False)
+    animated = AnimatedGifSheetConfig(
+        width=640, cols=2, rows=2, gap=0, fps=5, sample_duration=1.0, show_header=False, show_timestamps=False,
+        start_offset_percent=0, end_offset_percent=0,
+    )  # fmt: skip
+    shown = {}
+    for forced in ("seek", "pass"):
+        monkeypatch.setattr(static_module, "sheet_route", lambda index, times, r=forced: r)
+        monkeypatch.setattr(animated_module, "clip_route", lambda index, clips, r=forced: r)
+        monkeypatch.setattr(preview_module, "clip_route", lambda index, clips, r=forced: r)
+        out = tmp_path / forced
+        out.mkdir()
+        finishes_within(60, lambda out=out: sheets.render(changing, out / "still.png", still))
+        finishes_within(60, lambda out=out: sheets.render(changing, out / "animated.gif", animated))
+        finishes_within(
+            60, lambda out=out: preview(changing, out / "preview.gif", VIDEO_PREVIEW.from_params({}, target="gif"))
+        )
+        layout = plan_layout(640, 4, 3, 0, aspect)
+        with Image.open(out / "still.png") as sheet:
+            tiles = [
+                frame_number(sheet.crop((x, y, x + layout.thumb_w, y + layout.thumb_h)))
+                for x, y in (layout.cell_origin(slot) for slot in range(layout.cells))
+            ]
+        clips = _cells(out / "animated.gif", 2, 2, aspect)
+        previewed = [frame_number(frame) for frame in _gif_frames(out / "preview.gif")]
+        shown[forced] = (tiles, clips, previewed)
+    assert shown["pass"][:2] == shown["seek"][:2]
+    tiles, clips, previewed = shown["pass"]
+    assert tiles == sorted(set(tiles)) and len(tiles) == 12 and tiles[-1] >= 20
+    assert max(max(frame) for frame in clips) >= 20
+    seeked = shown["seek"][2]
+    assert previewed == sorted(previewed) and len(previewed) == len(seeked)
+    assert all(abs(a - b) <= 1 for a, b in zip(previewed, seeked, strict=True)), "the routes differ by one at the join"

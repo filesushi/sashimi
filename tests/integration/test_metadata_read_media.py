@@ -18,6 +18,7 @@ from sashimi.config import AUDIO_CONVERT, VIDEO_CONVERT, VIDEO_PREVIEW, VIDEO_TR
 from sashimi.core import preview as core_preview
 from sashimi.core import _capabilities as core_capabilities
 from sashimi.core import video as core_video
+from sashimi.core._ffmpeg import NO_END
 from sashimi.core._metaread import MAX_VALUE_CHARS
 from sashimi.errors import ProcessingError, UndecodableVideoError, UnsupportedMediaError
 from tests import metadata_samples as samples
@@ -200,7 +201,7 @@ def test_a_failed_tail_read_is_noted_not_hidden(files, tmp_path, monkeypatch):
     real = core_video.run_ffmpeg
 
     def failing(cmd, *args, **kwargs):
-        if "-read_intervals" in cmd and any(str(arg).endswith("%") and "+" not in str(arg) for arg in cmd):
+        if "-read_intervals" in cmd and cmd[cmd.index("-read_intervals") + 1].endswith(f"%{NO_END}"):
             raise ProcessingError("ffprobe failed")
         return real(cmd, *args, **kwargs)
 

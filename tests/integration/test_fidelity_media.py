@@ -372,6 +372,15 @@ def test_a_copy_that_shows_frames_hidden_at_the_end_says_so(tmp_path):
     assert told.level != "lossy"
 
 
+def test_frames_hidden_at_the_end_are_counted_whatever_memory_ffprobe_starts_with(tmp_path, monkeypatch):
+    source = _with_hidden_tail(tmp_path)
+    monkeypatch.setenv("MALLOC_PERTURB_", "1")
+    for _ in range(3):
+        assert core_video.hidden_tail(source, probe(source)) == 2
+    told = video.trim(source, tmp_path / "r.mkv", CopyTrimConfig(container="mkv")).fidelity
+    assert "shows 2 frames the source keeps hidden at its end" in told.changed
+
+
 def _plain_mp4(path: pathlib.Path) -> bytes:
     make = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=32x24:r=5:d=0.4"]
     command = [*make, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-map_metadata", "-1", "-fflags", "+bitexact"]

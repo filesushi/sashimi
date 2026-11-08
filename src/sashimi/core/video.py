@@ -49,6 +49,7 @@ from sashimi.core._ffmpeg import (
     file_arg,
     fmt_seconds,
     holds_packets,
+    read_from,
     run_ffmpeg,
 )
 from sashimi.core._mediameta import (
@@ -508,7 +509,7 @@ def hidden_tail(input_path: PathLike, info: MediaInfo) -> int | None:
     if not info.container_names & {"mov", "mp4"} or not info.duration:
         return 0
     cmd = [ffprobe_binary(), "-hide_banner", "-loglevel", "error", *INPUT_PROTOCOLS, "-select_streams", "V:0"]
-    cmd += ["-read_intervals", f"{max(0.0, info.duration - _TAIL_SECONDS):.3f}%"]
+    cmd += read_from(f"{max(0.0, info.duration - _TAIL_SECONDS):.3f}")
     cmd += ["-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", file_arg(input_path)]
     try:
         listing = run_ffmpeg(cmd, capture_stdout=True).decode("ascii", "replace")
